@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VideoGen Editor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">VideoGen</div>
+    <div class="hgroup">
+      <button id="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+      <button id="redo" title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+      <select id="aspect" title="Canvas">
+        <option value="9:16">9:16 Reel</option><option value="16:9">16:9 YouTube</option>
+        <option value="1:1">1:1 Square</option><option value="4:5">4:5 Feed</option>
+      </select>
+    </div>
+    <div class="hgroup">
+      <div id="jobs"></div>
+      <button id="exportDraft" title="Fast 540p preview render">Draft render</button>
+      <button id="exportFinal" class="primary">Export MP4</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="media" class="panel">
+      <div class="panel-title">Media <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*" hidden /></label></div>
+      <div id="assets" class="assets"><div class="empty">Drop videos, images or music here</div></div>
+    </section>
+
+    <section id="center">
+      <div id="stageWrap">
+        <div id="stage">
+          <div class="layer" data-l="0"><video playsinline preload="auto"></video><img alt="" /></div>
+          <div class="layer" data-l="1"><video playsinline preload="auto"></video><img alt="" /></div>
+          <div id="texts"></div>
+          <div id="stageEmpty">Add clips to start</div>
+        </div>
+      </div>
+      <div id="transport">
+        <button id="toStart" title="Go to start (Home)">⏮</button>
+        <button id="play" title="Play / pause (Space)">▶</button>
+        <span id="time">0:00.0 / 0:00.0</span>
+        <span class="hint">Space play · S split · Del delete · ←/→ step</span>
+      </div>
+      <div id="inspector" class="panel"></div>
+    </section>
+
+    <section id="chat" class="panel">
+      <div class="panel-title">Chat with Claude <button id="chatReset" class="small ghost" title="Start a new conversation">New</button></div>
+      <div id="messages">
+        <div class="msg assistant">Hi! Import some clips, then tell me what to do. For example:<br>
+          <em>"Put all clips in order, trim each to 3 seconds, add fade transitions"</em><br>
+          <em>"Thêm tiêu đề 'Juju đi biển' ở trên cùng trong 2 giây đầu"</em><br>
+          <em>"Find the moment the dog jumps and make it slow motion"</em></div>
+      </div>
+      <form id="chatForm">
+        <textarea id="chatInput" rows="2" placeholder="Describe an edit…"></textarea>
+        <button class="primary" id="chatSend">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <section id="timeline">
+    <div id="tlHeader">
+      <div class="track-labels-spacer"></div>
+      <div id="tlTools">
+        <button id="split" class="small" title="Split at playhead (S)">✂ Split</button>
+        <button id="addText" class="small" title="Add text at playhead">T Add text</button>
+        <label class="zoom">Zoom <input id="zoom" type="range" min="10" max="300" value="80" /></label>
+      </div>
+    </div>
+    <div id="tlBody">
+      <div class="track-labels"><div class="tl-ruler-label"></div><div>Video</div><div>Text</div><div>Music</div></div>
+      <div id="tlScroll">
+        <div id="tlInner">
+          <div id="ruler"></div>
+          <div class="track" id="trackVideo"></div>
+          <div class="track" id="trackText"></div>
+          <div class="track" id="trackMusic"></div>
+          <div id="playhead"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div id="dropOverlay">Drop to import</div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

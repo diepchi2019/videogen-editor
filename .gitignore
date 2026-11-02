@@ -1,0 +1,4 @@
+node_modules/
+data/
+test/last-frame.png
+.DS_Store
