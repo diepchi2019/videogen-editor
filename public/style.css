@@ -4,7 +4,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
-body { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px minmax(0, 1fr) 230px; height: 100vh; overflow: hidden; }
+body { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: 48px minmax(0, 1fr) 282px; height: 100vh; overflow: hidden; }
 button, select, input, textarea { font: inherit; color: inherit; }
 button, .btn, select { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; }
 button:hover, .btn:hover { border-color: #3d4250; }
@@ -89,6 +89,11 @@ main { display: grid; grid-template-columns: 240px minmax(0, 1fr) 340px; min-hei
 .block.clip span { position: relative; }
 .block.text { background: var(--textc); color: #221a00; font-weight: 600; }
 .block.music { background: var(--music); color: #00230f; }
+.block.overlay { background: var(--accent2) center/auto 100% repeat-x; color: #fff; text-shadow: 0 1px 2px #000; }
+#overlays { position: absolute; inset: 0; pointer-events: none; z-index: 5; overflow: hidden; }
+.ov-media { position: absolute; transform: translate(-50%, -50%); object-fit: contain; }
+.ov-caption { position: absolute; left: 50%; transform: translate(-50%, -50%); font-weight: 700; text-align: center; white-space: pre-wrap; width: 90%; line-height: 1.2; pointer-events: none; }
+#project { max-width: 180px; }
 .trans { position: absolute; top: 14px; height: 24px; background: rgba(255,255,255,.85); color: #000; border-radius: 4px; font-size: 10px; display: flex; align-items: center; justify-content: center; z-index: 2; cursor: pointer; overflow: hidden; }
 .handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; background: rgba(255,255,255,.25); z-index: 3; }
 .handle.l { left: 0; } .handle.r { right: 0; }

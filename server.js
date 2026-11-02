@@ -6,7 +6,8 @@ import fs from 'node:fs';
 import * as store from './src/store.js';
 import { layout, uid } from './src/model.js';
 import { probe, makeThumb } from './src/media.js';
-import { TOOLS, executeTool } from './src/tools.js';
+import { TOOLS, executeTool, toolAnnotations } from './src/tools.js';
+import { invalidateFonts, readFamily } from './src/fonts.js';
 import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
 
@@ -18,7 +19,7 @@ app.use('/media', express.static(store.MEDIA_DIR));
 app.use('/thumbs', express.static(path.join(store.DATA_DIR, 'thumbs')));
 app.use('/exports', express.static(store.EXPORT_DIR));
 
-const state = () => ({ ...store.withLayout(), jobs: listJobs() });
+const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects() });
 const wrap = (fn) => async (req, res) => {
   try { res.json(await fn(req, res)); } catch (e) { res.status(400).json({ error: e.message }); }
 };
@@ -45,8 +46,16 @@ const upload = multer({
   limits: { fileSize: 4 * 1024 ** 3 },
 });
 app.post('/api/upload', upload.array('files'), wrap(async (req) => {
-  const added = [];
+  const added = [], fonts = [];
   for (const f of req.files || []) {
+    if (/\.(ttf|otf|ttc)$/i.test(f.originalname)) {
+      // Fonts go to data/fonts and become usable in text and captions.
+      const fam = readFamily(f.path);
+      if (!fam) { fs.rmSync(f.path, { force: true }); throw new Error(`${f.originalname}: not a readable font file`); }
+      fs.renameSync(f.path, path.join(store.FONTS_DIR, path.basename(f.originalname).replace(/[^\w.-]+/g, '_')));
+      fonts.push(fam);
+      continue;
+    }
     try {
       const meta = await probe(f.path);
       const a = { id: uid(meta.type === 'audio' ? 'aud' : meta.type === 'image' ? 'img' : 'vid'), name: Buffer.from(f.originalname, 'latin1').toString('utf8'), file: f.filename, ...meta };
@@ -58,11 +67,12 @@ app.post('/api/upload', upload.array('files'), wrap(async (req) => {
       throw new Error(`${f.originalname}: ${e.message}`);
     }
   }
-  return { added, ...state() };
+  if (fonts.length) invalidateFonts();
+  return { added, fonts, ...state() };
 }));
 
 // Run one editor tool (used by the UI and by the MCP server).
-app.get('/api/tools', (req, res) => res.json(TOOLS));
+app.get('/api/tools', (req, res) => res.json(TOOLS.map((t) => ({ ...t, annotations: toolAnnotations(t.name) }))));
 app.post('/api/tool/:name', wrap(async (req) => {
   const r = await executeTool(req.params.name, req.body || {}, req.get('x-source') || 'ui');
   return { ...r, ...state() };

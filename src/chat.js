@@ -1,6 +1,6 @@
 // In-app chat: Claude edits the timeline through tools.
 import Anthropic from '@anthropic-ai/sdk';
-import { TOOLS, executeTool } from './tools.js';
+import { TOOLS, executeTool, transcribedSet } from './tools.js';
 import { summarize } from './model.js';
 import * as store from './store.js';
 
@@ -14,6 +14,9 @@ Rules:
 - Act, don't ask, when the request is reasonably clear. Ask one short question only when it is truly ambiguous.
 - Use look_at_asset to see what is in a clip when the request depends on content ("the part where...", "the best moment").
 - Timeline times are seconds from the start of the final video; clip in/out are seconds within the source file.
+- Captions: add_captions transcribes speech automatically. Use get_transcript to find moments by what is said.
+- Use overlays (add_overlay) for picture-in-picture, logos and B-roll on top; batch_edit for many edits at once.
+- After visual edits (text, captions, overlays, framing), check the result with look_at_timeline before replying.
 - Short-form video defaults: 9:16, punchy cuts, titles near the top (y≈0.15) or lower third (y≈0.75), size 64-110, white text with box or outline.
 - After editing, reply in 1-3 short sentences in the user's language summarising what changed. Do not dump ids unless useful.`;
 
@@ -39,7 +42,7 @@ export async function chat(userText, { onEvent } = {}) {
     const res = await client.messages.create({
       model: MODEL,
       max_tokens: 4096,
-      system: [{ type: 'text', text: SYSTEM }, { type: 'text', text: `Current project state:\n${summarize(store.getProject())}` }],
+      system: [{ type: 'text', text: SYSTEM }, { type: 'text', text: `Current project state:\n${summarize(store.getProject(), { transcribed: transcribedSet(store.getProject()) })}` }],
       tools: TOOLS,
       messages: history,
     });

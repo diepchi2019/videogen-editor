@@ -9,22 +9,71 @@ export const TRANSITIONS = [
 ];
 
 export const ASPECTS = { '9:16': [1080, 1920], '16:9': [1920, 1080], '1:1': [1080, 1080], '4:5': [1080, 1350] };
+export const FITS = ['contain', 'cover', 'blur'];
+export const MOTIONS = ['none', 'zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down'];
+export const TEXT_ANIM_IN = ['none', 'fade', 'pop', 'slideup', 'slidedown', 'slideleft', 'slideright', 'zoom', 'typewriter'];
+export const TEXT_ANIM_OUT = ['none', 'fade', 'pop', 'slideup', 'slidedown', 'zoom'];
+export const AUDIO_ROLES = ['music', 'sfx', 'voice'];
+export const OVERLAY_FITS = ['free', 'contain', 'cover'];
+export const OVERLAY_ANIMS = ['none', 'fade'];
+export const CAPTION_MODES = ['line', 'karaoke', 'word', 'single'];
+
+// Text style presets: values applied first, explicit input wins.
+export const TEXT_STYLES = {
+  plain: { outline: 0, shadow: 0, box: false },
+  outline: { outline: 6, outlineColor: '#000000', shadow: 0, box: false },
+  bold_title: { bold: true, outline: 8, outlineColor: '#000000', shadow: 4, shadowColor: '#000000', box: false },
+  boxed: { box: true, boxColor: '#000000', outline: 0, shadow: 0 },
+  highlight: { color: '#ffde00', bold: true, outline: 7, outlineColor: '#000000', box: false, animation: 'pop' },
+  neon: { color: '#ffffff', outline: 5, outlineColor: '#ff2bd6', blur: 3, box: false, shadow: 0 },
+  subtitle: { size: 54, y: 0.82, outline: 3, outlineColor: '#000000', box: false, shadow: 0 },
+  sticker: { color: '#111111', box: true, boxColor: '#ffffff', bold: true, outline: 0, shadow: 0 },
+};
+
+// Caption style presets (see set_captions).
+export const CAPTION_STYLES = {
+  classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.75 },
+  boxed: { mode: 'line', size: 60, color: '#ffffff', box: true, boxColor: '#000000', outline: 0, maxWords: 6, y: 0.75 },
+  karaoke: { mode: 'karaoke', size: 72, color: '#ffffff', highlightColor: '#ffde00', outline: 5, maxWords: 5, y: 0.72 },
+  highlight: { mode: 'word', size: 80, color: '#ffffff', highlightColor: '#00e5ff', outline: 6, uppercase: true, maxWords: 3, y: 0.7 },
+  single: { mode: 'single', size: 120, color: '#ffffff', highlightColor: '#ffffff', outline: 8, uppercase: true, maxWords: 1, y: 0.62 },
+};
 
 export const uid = (p) => `${p}_${crypto.randomBytes(3).toString('hex')}`;
 const r3 = (n) => Math.round(n * 1000) / 1000;
 
+// Hooks the server installs (fonts live outside the pure model).
+export const env = { resolveFont: null };
+
 export function emptyProject() {
   return {
+    version: 2,
+    id: uid('proj'),
     name: 'Untitled',
     settings: { aspect: '9:16', width: 1080, height: 1920, fps: 30, background: '#000000' },
     assets: {},
     clips: [],
+    overlays: [],
     texts: [],
     music: [],
+    captions: null,
   };
 }
 
+// Bring a project from any older version up to the current shape.
+export function migrate(p) {
+  p.id ??= uid('proj');
+  p.name ??= 'Untitled';
+  p.assets ??= {};
+  for (const k of ['clips', 'overlays', 'texts', 'music']) p[k] ??= [];
+  p.captions ??= null;
+  for (const m of p.music) { m.role ??= 'music'; m.track ??= 1; }
+  p.version = 2;
+  return p;
+}
+
 export const clipDuration = (c) => (c.out - c.in) / (c.speed || 1);
+export const overlayDuration = (o) => (o.out - o.in) / (o.speed || 1);
 
 // Compute timeline positions. A transition on clip i overlaps it with clip i-1.
 export function layout(p) {
@@ -40,24 +89,112 @@ export function layout(p) {
   return { clips, duration: r3(Math.max(t, 0)), videoDuration: r3(t), textEnd };
 }
 
-export function summarize(p) {
+// Map per-asset transcripts (source seconds) onto the timeline.
+// transcripts: { [assetId]: [{ w, start, end }] }. Returns words sorted by timeline start.
+export function timelineWords(p, transcripts, sources = ['clips', 'overlays', 'voice']) {
   const L = layout(p);
+  const out = [];
+  const place = (words, srcIn, srcOut, tlStart, speed, tlEnd) => {
+    for (const w of words || []) {
+      const mid = (w.start + w.end) / 2;
+      if (mid < srcIn || mid > srcOut) continue;
+      const s = tlStart + (Math.max(w.start, srcIn) - srcIn) / speed;
+      const e = Math.min(tlEnd, tlStart + (Math.min(w.end, srcOut) - srcIn) / speed);
+      if (s < L.duration && e > s) out.push({ w: w.w, start: r3(s), end: r3(Math.min(e, L.duration)) });
+    }
+  };
+  if (sources.includes('clips')) {
+    for (const c of L.clips) if ((c.volume ?? 1) > 0) place(transcripts[c.assetId], c.in, c.out, c.start, c.speed || 1, c.end);
+  }
+  if (sources.includes('overlays')) {
+    for (const o of p.overlays) if ((o.volume ?? 1) > 0) place(transcripts[o.assetId], o.in, o.out, o.start, o.speed || 1, o.start + overlayDuration(o));
+  }
+  for (const m of p.music) {
+    if (!sources.includes(m.role) && !(sources.includes('all'))) continue;
+    place(transcripts[m.assetId], m.in, m.out, m.start, 1, m.start + (m.out - m.in));
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+// Group timed words into caption lines.
+export function groupWords(words, { maxWords = 5, maxChars = 32, maxGap = 0.6 } = {}) {
+  const lines = [];
+  let cur = null;
+  for (const w of words) {
+    const text = String(w.w).trim();
+    if (!text) continue;
+    const gapBreak = cur && w.start - cur.words[cur.words.length - 1].end > maxGap;
+    const chars = cur ? cur.words.reduce((n, x) => n + x.w.length + 1, 0) + text.length : 0;
+    if (!cur || gapBreak || cur.words.length >= maxWords || chars > maxChars || cur.sentenceEnd) {
+      cur = { words: [], sentenceEnd: false };
+      lines.push(cur);
+    }
+    cur.words.push({ w: text, start: r3(w.start), end: r3(Math.max(w.end, w.start + 0.05)) });
+    cur.sentenceEnd = /[.!?…。！？]$/.test(text);
+  }
+  return lines.map((l, i) => {
+    const next = lines[i + 1];
+    const last = l.words[l.words.length - 1].end;
+    // Hold the line a little after the last word, but never past the next line.
+    const end = Math.min(last + 0.4, next ? next.words[0].start : last + 0.4);
+    return { id: uid('cap'), start: l.words[0].start, end: r3(Math.max(end, last)), words: l.words };
+  });
+}
+
+const fmtT = (n) => Number(n).toFixed(2);
+function describeTransform(t) {
+  if (!t) return '';
+  const parts = [];
+  if (t.crop) parts.push(`crop ${['x', 'y', 'w', 'h'].map((k) => `${k}${t.crop[k]}`).join(' ')}`);
+  if (t.rotate) parts.push(`rotate ${t.rotate}°`);
+  if (t.flipH) parts.push('flipH');
+  if (t.flipV) parts.push('flipV');
+  if ((t.scale ?? 1) !== 1) parts.push(`scale ${t.scale}`);
+  if ((t.x ?? 0.5) !== 0.5 || (t.y ?? 0.5) !== 0.5) parts.push(`center (${t.x ?? 0.5},${t.y ?? 0.5})`);
+  return parts.length ? `, ${parts.join(', ')}` : '';
+}
+
+// extras: { transcribed: Set<assetId> } (optional, filled in by the server)
+export function summarize(p, extras = {}) {
+  const L = layout(p);
+  const tx = extras.transcribed || new Set();
   const assets = Object.values(p.assets).map((a) =>
-    `- ${a.id}: "${a.name}" ${a.type}${a.duration ? `, ${a.duration.toFixed(2)}s` : ''}${a.width ? `, ${a.width}x${a.height}` : ''}${a.type === 'video' ? (a.hasAudio ? ', has audio' : ', no audio') : ''}`);
+    `- ${a.id}: "${a.name}" ${a.type}${a.duration ? `, ${a.duration.toFixed(2)}s` : ''}${a.width ? `, ${a.width}x${a.height}` : ''}${a.type === 'video' ? (a.hasAudio ? ', has audio' : ', no audio') : ''}${tx.has(a.id) ? ', transcript ready' : ''}`);
   const clips = L.clips.map((c) =>
     `- #${c.index + 1} ${c.id}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
+    describeTransform(c.transform) +
+    (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : ''));
+  const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
+    `- ${o.id} (track ${o.track}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
+    (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
+    `${o.opacity !== 1 ? `, opacity ${o.opacity}` : ''}${o.rotate ? `, rotate ${o.rotate}°` : ''}${o.crop ? `, crop x${o.crop.x} y${o.crop.y} w${o.crop.w} h${o.crop.h}` : ''}` +
+    `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}`);
   const texts = p.texts.map((x) =>
-    `- ${x.id}: "${x.text}" ${x.start.toFixed(2)}-${x.end.toFixed(2)}s at (${x.x},${x.y}) size ${x.size} color ${x.color}${x.box ? ' with box' : ''}${x.animation && x.animation !== 'none' ? `, anim ${x.animation}` : ''}`);
+    `- ${x.id}: "${x.text}" ${x.start.toFixed(2)}-${x.end.toFixed(2)}s at (${x.x},${x.y}) size ${x.size} color ${x.color}` +
+    `${x.font ? ` font "${x.font}"` : ''}${x.style ? ` style ${x.style}` : ''}${x.box ? ' with box' : ''}` +
+    `${x.outline ? ` outline ${x.outline}${x.outlineColor ? ' ' + x.outlineColor : ''}` : ''}${x.shadow ? ` shadow ${x.shadow}` : ''}` +
+    `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}`);
   const music = p.music.map((m) =>
-    `- ${m.id}: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s`);
+    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s`);
+  let captions = '(none)';
+  if (p.captions?.lines?.length) {
+    const st = p.captions.style;
+    const shown = p.captions.lines.slice(0, extras.full ? Infinity : 40);
+    captions = `${p.captions.lines.length} lines, style ${st.preset} (mode ${st.mode}, size ${st.size}, y ${st.y}${st.font ? `, font "${st.font}"` : ''})\n` +
+      shown.map((l) => `- ${l.id} ${fmtT(l.start)}-${fmtT(l.end)}s: ${l.words.map((w) => w.w).join(' ')}`).join('\n') +
+      (shown.length < p.captions.lines.length ? `\n- … ${p.captions.lines.length - shown.length} more (get_timeline detail=full)` : '');
+  }
   return [
+    `Project: "${p.name}" (${p.id})`,
     `Canvas: ${p.settings.aspect} (${p.settings.width}x${p.settings.height}) @${p.settings.fps}fps, background ${p.settings.background}`,
     `Total duration: ${L.duration.toFixed(2)}s`,
     `Media library:\n${assets.join('\n') || '(empty)'}`,
     `Video track (plays in order):\n${clips.join('\n') || '(empty)'}`,
+    `Overlays (picture-in-picture, logos, B-roll on top of the video track; higher track = on top):\n${overlays.join('\n') || '(none)'}`,
     `Text overlays:\n${texts.join('\n') || '(none)'}`,
-    `Music/audio track:\n${music.join('\n') || '(none)'}`,
+    `Captions:\n${captions}`,
+    `Audio tracks (music, sound effects, voice):\n${music.join('\n') || '(none)'}`,
   ].join('\n\n');
 }
 
@@ -69,6 +206,37 @@ const num = (v, name, min = -Infinity, max = Infinity) => {
   if (!Number.isFinite(n) || n < min || n > max) fail(`${name} must be a number between ${min} and ${max}`);
   return n;
 };
+const bool = (v) => (v === undefined || v === null ? undefined : v === true || v === 'true' || v === 1);
+const oneOf = (v, list, name) => {
+  if (v === undefined || v === null) return undefined;
+  if (!list.includes(v)) fail(`${name} must be one of: ${list.join(', ')}`);
+  return v;
+};
+// Colors go into ffmpeg filter graphs and ASS files, so only plain hex is allowed.
+export function color(v, name = 'color') {
+  if (v === undefined || v === null) return undefined;
+  const s = String(v).trim();
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
+  if (!m) fail(`${name} must be a hex color like #ffde00 (got "${s}")`);
+  const h = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  return `#${h.toLowerCase()}`;
+}
+function font(v) {
+  if (v === undefined || v === null || v === '') return undefined;
+  if (!env.resolveFont) return String(v);
+  const f = env.resolveFont(String(v));
+  if (!f) fail(`Unknown font "${v}". Call list_fonts to see installed fonts, or import a .ttf/.otf file with import_media.`);
+  return f;
+}
+function crop(v) {
+  if (v === undefined) return undefined;
+  if (v === null || v === false) return null;
+  const c = {};
+  for (const k of ['x', 'y', 'w', 'h']) c[k] = num(v[k], `crop.${k}`, 0, 1) ?? (k === 'w' || k === 'h' ? 1 : 0);
+  if (c.w < 0.05 || c.h < 0.05) fail('crop.w and crop.h must be at least 0.05');
+  if (c.x + c.w > 1.0001 || c.y + c.h > 1.0001) fail('crop must stay inside the frame: x + w <= 1 and y + h <= 1');
+  return c.x === 0 && c.y === 0 && c.w === 1 && c.h === 1 ? null : c;
+}
 
 function findClip(p, id) {
   const i = p.clips.findIndex((c) => c.id === id || `#${p.clips.indexOf(c) + 1}` === id);
@@ -77,7 +245,7 @@ function findClip(p, id) {
 }
 const findIn = (arr, id, kind) => {
   const i = arr.findIndex((x) => x.id === id);
-  if (i < 0) fail(`No ${kind} ${id}`);
+  if (i < 0) fail(`No ${kind} ${id}. ${kind}s: ${arr.map((x) => x.id).join(', ') || 'none'}`);
   return i;
 };
 function asset(p, id, types) {
@@ -94,6 +262,88 @@ function clampTransition(p, i) {
   c.transition.duration = r3(Math.min(c.transition.duration, max));
 }
 const clampAll = (p) => p.clips.forEach((_, i) => clampTransition(p, i));
+
+// Shared by add_text / update_text. Applies style preset first, explicit values win.
+function applyText(t, input, isNew) {
+  if (input.style !== undefined && input.style !== null && input.style !== '') {
+    const preset = TEXT_STYLES[input.style];
+    if (!preset) fail(`style must be one of: ${Object.keys(TEXT_STYLES).join(', ')}`);
+    t.style = input.style;
+    for (const [k, v] of Object.entries(preset)) if (input[k] === undefined) t[k] = v;
+  }
+  for (const [k, min, max] of [['x', 0, 1], ['y', 0, 1], ['size', 8, 400], ['outline', 0, 40], ['shadow', 0, 40], ['blur', 0, 20]]) {
+    const v = num(input[k], k, min, max); if (v !== undefined) t[k] = r3(v);
+  }
+  for (const k of ['color', 'boxColor', 'outlineColor', 'shadowColor']) { const v = color(input[k], k); if (v) t[k] = v; }
+  for (const k of ['box', 'bold', 'italic']) { const v = bool(input[k]); if (v !== undefined) t[k] = v; }
+  const f = font(input.font); if (f) t.font = f;
+  const ai = oneOf(input.animation, TEXT_ANIM_IN, 'animation'); if (ai) t.animation = ai;
+  const ao = oneOf(input.animationOut, TEXT_ANIM_OUT, 'animationOut'); if (ao) t.animationOut = ao;
+  if (input.text !== undefined) { if (!String(input.text)) fail('text cannot be empty'); t.text = String(input.text); }
+  if (isNew) {
+    t.x ??= 0.5; t.y ??= 0.5; t.size ??= 72; t.color ??= '#ffffff'; t.box ??= false; t.boxColor ??= '#000000';
+    t.animation ??= 'none'; t.animationOut ??= 'none'; t.bold ??= true;
+  }
+}
+
+function applyTransform(c, input) {
+  const has = ['crop', 'rotate', 'flipH', 'flipV', 'scale', 'x', 'y'].some((k) => input[k] !== undefined);
+  if (bool(input.resetTransform)) delete c.transform;
+  if (!has) return;
+  const t = { ...(c.transform || {}) };
+  const cr = crop(input.crop); if (cr !== undefined) { if (cr) t.crop = cr; else delete t.crop; }
+  const rot = num(input.rotate, 'rotate', -360, 360); if (rot !== undefined) t.rotate = r3(((rot % 360) + 360) % 360);
+  const fh = bool(input.flipH); if (fh !== undefined) t.flipH = fh;
+  const fv = bool(input.flipV); if (fv !== undefined) t.flipV = fv;
+  const s = num(input.scale, 'scale', 0.1, 5); if (s !== undefined) t.scale = r3(s);
+  const x = num(input.x, 'x', -1, 2); if (x !== undefined) t.x = r3(x);
+  const y = num(input.y, 'y', -1, 2); if (y !== undefined) t.y = r3(y);
+  for (const k of Object.keys(t)) if (t[k] === false || (k === 'rotate' && t[k] === 0)) delete t[k];
+  if (t.scale === 1) delete t.scale;
+  if (t.x === 0.5) delete t.x;
+  if (t.y === 0.5) delete t.y;
+  if (Object.keys(t).length) c.transform = t; else delete c.transform;
+}
+
+function applyOverlay(o, input, a) {
+  const sp = num(input.speed, 'speed', 0.25, 4); if (sp !== undefined) o.speed = sp;
+  const max = a.type === 'image' ? 3600 : a.duration;
+  const i0 = num(input.in, 'in', 0, max); if (i0 !== undefined) o.in = r3(i0);
+  const o0 = num(input.out, 'out', 0, max); if (o0 !== undefined) o.out = r3(o0);
+  const st = num(input.start, 'start', 0); if (st !== undefined) o.start = r3(st);
+  const d = num(input.duration, 'duration', 0.1, 3600);
+  const e = num(input.end, 'end', 0);
+  if (e !== undefined) o.out = r3(o.in + (e - o.start) * o.speed);
+  else if (d !== undefined) o.out = r3(o.in + d * o.speed);
+  if (a.type === 'video' && o.out > a.duration) fail(`This overlay would need ${r3(o.out)}s of source but "${a.name}" is ${a.duration.toFixed(2)}s long. Shorten end/duration or lower in.`);
+  if (o.out - o.in < 0.05) fail('Overlay must be at least 0.05s long (check start/end/in/out)');
+  for (const [k, min, max2] of [['x', -1, 2], ['y', -1, 2], ['scale', 0.02, 4], ['opacity', 0, 1], ['volume', 0, 2], ['rotate', -360, 360]]) {
+    const v = num(input[k], k, min, max2); if (v !== undefined) o[k] = r3(v);
+  }
+  const tr = num(input.track, 'track', 1, 20); if (tr !== undefined) o.track = Math.round(tr);
+  const f = oneOf(input.fit, OVERLAY_FITS, 'fit'); if (f) o.fit = f;
+  const an = oneOf(input.animation, OVERLAY_ANIMS, 'animation'); if (an) o.animation = an;
+  const cr = crop(input.crop); if (cr !== undefined) { if (cr) o.crop = cr; else delete o.crop; }
+  for (const k of ['flipH', 'flipV']) { const v = bool(input[k]); if (v !== undefined) o[k] = v; }
+}
+
+function captionStyle(base, input) {
+  const st = { ...base };
+  if (input.preset !== undefined) {
+    const pr = CAPTION_STYLES[input.preset];
+    if (!pr) fail(`preset must be one of: ${Object.keys(CAPTION_STYLES).join(', ')}`);
+    Object.assign(st, pr, { preset: input.preset });
+  }
+  const m = oneOf(input.mode, CAPTION_MODES, 'mode'); if (m) st.mode = m;
+  for (const [k, min, max] of [['size', 8, 400], ['y', 0, 1], ['outline', 0, 40], ['maxWords', 1, 12]]) {
+    const v = num(input[k], k, min, max); if (v !== undefined) st[k] = k === 'maxWords' ? Math.round(v) : r3(v);
+  }
+  for (const k of ['color', 'highlightColor', 'outlineColor', 'boxColor']) { const v = color(input[k], k); if (v) st[k] = v; }
+  for (const k of ['uppercase', 'box', 'bold']) { const v = bool(input[k]); if (v !== undefined) st[k] = v; }
+  const f = font(input.font); if (f) st.font = f;
+  return st;
+}
+const DEFAULT_CAPTION = { preset: 'classic', ...CAPTION_STYLES.classic, highlightColor: '#ffde00', outlineColor: '#000000', boxColor: '#000000', bold: true, box: false };
 
 // Each op: (project, input) => message. Ops mutate the project.
 export const ops = {
@@ -132,6 +382,7 @@ export const ops = {
     if (t <= lc.start + 0.05 || t >= lc.end - 0.05) fail(`Split time ${t}s must be inside clip (${lc.start}-${lc.end}s)`);
     const srcT = r3(c.in + (t - lc.start) * c.speed);
     const second = { ...structuredClone(c), id: uid('clip'), in: srcT, transition: { type: 'none', duration: 0.5 } };
+    // A zoom/pan restarts on each half; that is how CapCut behaves too.
     c.out = srcT;
     p.clips.splice(i + 1, 0, second);
     clampAll(p);
@@ -156,16 +407,20 @@ export const ops = {
     return `Moved ${c.id} to position ${pos + 1}`;
   },
 
-  set_clip(p, { clipId, speed, volume, fit }) {
+  set_clip(p, input) {
+    const { clipId, speed, volume, fit, motion, motionIntensity } = input;
     const c = p.clips[findClip(p, clipId)];
-    if (fit !== undefined) {
-      if (!['contain', 'cover', 'blur'].includes(fit)) fail('fit must be contain, cover or blur');
-      c.fit = fit;
-    }
+    const f = oneOf(fit, FITS, 'fit'); if (f) c.fit = f;
     const s = num(speed, 'speed', 0.25, 4); if (s !== undefined) c.speed = s;
     const v = num(volume, 'volume', 0, 2); if (v !== undefined) c.volume = v;
+    applyTransform(c, input);
+    const mo = oneOf(motion, MOTIONS, 'motion');
+    const mi = num(motionIntensity, 'motionIntensity', 0.02, 0.6);
+    if (mo === 'none') delete c.motion;
+    else if (mo) c.motion = { preset: mo, intensity: mi ?? c.motion?.intensity ?? 0.15 };
+    else if (mi !== undefined) { if (!c.motion) fail('Set motion (e.g. zoom_in) before motionIntensity'); c.motion.intensity = mi; }
     clampAll(p);
-    return `Updated ${c.id}: speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}`;
+    return `Updated ${c.id}: speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}`;
   },
 
   set_transition(p, { clipId, type, duration }) {
@@ -177,29 +432,48 @@ export const ops = {
     return `Transition into ${p.clips[i].id}: ${type} ${p.clips[i].transition.duration}s`;
   },
 
-  add_text(p, { text, start, end, x, y, size, color, box, boxColor, animation }) {
-    if (!text) fail('text is required');
-    const L = layout(p);
-    const s = num(start, 'start', 0) ?? 0;
-    const e = num(end, 'end', 0) ?? Math.max(s + 3, Math.min(L.duration, s + 3));
-    if (e <= s) fail('end must be after start');
-    const t = {
-      id: uid('text'), text: String(text), start: r3(s), end: r3(e),
-      x: num(x, 'x', 0, 1) ?? 0.5, y: num(y, 'y', 0, 1) ?? 0.5,
-      size: num(size, 'size', 8, 400) ?? 72, color: color || '#ffffff',
-      box: !!box, boxColor: boxColor || '#000000', animation: animation || 'none',
+  add_overlay(p, input) {
+    const a = asset(p, input.assetId, ['video', 'image']);
+    const o = {
+      id: uid('ov'), assetId: a.id, track: 1, start: 0, in: 0, out: 0, speed: 1,
+      fit: 'free', x: 0.5, y: 0.5, scale: 0.4, rotate: 0, opacity: 1, volume: a.type === 'video' && a.hasAudio ? 1 : 0, animation: 'none',
     };
+    if (input.duration === undefined && input.end === undefined && input.out === undefined) {
+      o.out = a.type === 'image' ? 3 : a.duration;
+    }
+    applyOverlay(o, input, a);
+    if (o.out <= o.in) fail('Overlay out must be greater than in');
+    p.overlays.push(o);
+    return `Added overlay ${o.id} "${a.name}" ${o.start}-${r3(o.start + overlayDuration(o))}s on track ${o.track}`;
+  },
+
+  set_overlay(p, input) {
+    const o = p.overlays[findIn(p.overlays, input.overlayId, 'overlay')];
+    applyOverlay(o, input, p.assets[o.assetId]);
+    return `Updated overlay ${o.id}: ${o.start}-${r3(o.start + overlayDuration(o))}s, ${o.fit === 'free' ? `center (${o.x},${o.y}) width ${o.scale}` : `fit ${o.fit}`}, opacity ${o.opacity}`;
+  },
+
+  delete_overlay(p, { overlayId }) {
+    const [o] = p.overlays.splice(findIn(p.overlays, overlayId, 'overlay'), 1);
+    return `Deleted overlay ${o.id}`;
+  },
+
+  add_text(p, input) {
+    if (!input.text) fail('text is required');
+    const L = layout(p);
+    const s = num(input.start, 'start', 0) ?? 0;
+    const e = num(input.end, 'end', 0) ?? Math.max(s + 3, Math.min(L.duration, s + 3));
+    if (e <= s) fail('end must be after start');
+    const t = { id: uid('text'), start: r3(s), end: r3(e) };
+    applyText(t, input, true);
     p.texts.push(t);
     return `Added text ${t.id} "${t.text}" ${t.start}-${t.end}s`;
   },
 
   update_text(p, { textId, ...rest }) {
     const t = p.texts[findIn(p.texts, textId, 'text')];
-    for (const k of ['start', 'end', 'x', 'y', 'size']) {
-      const v = num(rest[k], k, 0, k === 'x' || k === 'y' ? 1 : Infinity); if (v !== undefined) t[k] = r3(v);
-    }
-    for (const k of ['text', 'color', 'boxColor', 'animation']) if (rest[k] !== undefined) t[k] = String(rest[k]);
-    if (rest.box !== undefined) t.box = !!rest.box;
+    for (const k of ['start', 'end']) { const v = num(rest[k], k, 0); if (v !== undefined) t[k] = r3(v); }
+    applyText(t, rest, false);
     if (t.end <= t.start) fail('end must be after start');
     return `Updated text ${t.id}`;
   },
@@ -209,31 +483,94 @@ export const ops = {
     return `Deleted text ${t.id}`;
   },
 
-  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut }) {
+  // Replace all captions with lines built from timed words (timeline seconds).
+  set_captions(p, input) {
+    const words = input.words;
+    if (!Array.isArray(words) || !words.length) fail('No words to caption. Is there speech in the clips? Run transcribe_asset / get_transcript to check.');
+    for (const w of words) {
+      if (typeof w.w !== 'string' || !Number.isFinite(+w.start) || !Number.isFinite(+w.end)) fail('words must be [{w, start, end}] with timeline seconds');
+    }
+    // First captions start from the classic preset; re-captioning keeps the current style unless overridden.
+    const st = captionStyle(p.captions?.style || DEFAULT_CAPTION, { ...input, preset: input.preset ?? (p.captions ? undefined : 'classic') });
+    const lines = groupWords(words.map((w) => ({ w: w.w, start: +w.start, end: +w.end })), { maxWords: st.maxWords });
+    p.captions = { style: st, lines };
+    return `Captions: ${lines.length} lines (${words.length} words), style ${st.preset}, mode ${st.mode}`;
+  },
+
+  update_captions(p, input) {
+    if (!p.captions) fail('No captions yet. Use add_captions first.');
+    const { lineId, text, start, end } = input;
+    if (lineId) {
+      const l = p.captions.lines[findIn(p.captions.lines, lineId, 'caption line')];
+      const s = num(start, 'start', 0) ?? l.start, e = num(end, 'end', 0) ?? l.end;
+      if (e <= s) fail('end must be after start');
+      if (text !== undefined) {
+        const ws = String(text).trim().split(/\s+/).filter(Boolean);
+        if (!ws.length) fail('text cannot be empty; use delete_captions with lineId to remove a line');
+        if (ws.length === l.words.length && s === l.start && e === l.end) ws.forEach((w, i) => { l.words[i].w = w; });
+        else { // Spread the new words evenly over the line.
+          const step = (e - s) / ws.length;
+          l.words = ws.map((w, i) => ({ w, start: r3(s + i * step), end: r3(s + (i + 1) * step) }));
+        }
+      } else if (s !== l.start || e !== l.end) {
+        const k = (e - s) / (l.end - l.start);
+        l.words = l.words.map((w) => ({ w: w.w, start: r3(s + (w.start - l.start) * k), end: r3(s + (w.end - l.start) * k) }));
+      }
+      l.start = r3(s); l.end = r3(e);
+    }
+    const keys = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'uppercase', 'box', 'bold', 'font'];
+    if (keys.some((k) => input[k] !== undefined)) {
+      const before = p.captions.style.maxWords;
+      p.captions.style = captionStyle(p.captions.style, input);
+      if (p.captions.style.maxWords !== before) {
+        p.captions.lines = groupWords(p.captions.lines.flatMap((l) => l.words), { maxWords: p.captions.style.maxWords });
+      }
+    }
+    return `Captions updated: ${p.captions.lines.length} lines, style ${p.captions.style.preset}, mode ${p.captions.style.mode}`;
+  },
+
+  delete_captions(p, { lineId }) {
+    if (!p.captions) fail('There are no captions');
+    if (lineId) {
+      p.captions.lines.splice(findIn(p.captions.lines, lineId, 'caption line'), 1);
+      if (!p.captions.lines.length) p.captions = null;
+      return `Deleted caption line ${lineId}`;
+    }
+    p.captions = null;
+    return 'Deleted all captions';
+  },
+
+  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut, role, track }) {
     const a = asset(p, assetId, ['audio', 'video']);
     if (a.type === 'video' && !a.hasAudio) fail('That video has no audio track');
+    const rl = oneOf(role, AUDIO_ROLES, 'role') ?? 'music';
     const i0 = num(tin, 'in', 0, a.duration) ?? 0;
     const o = num(out, 'out', 0, a.duration) ?? a.duration;
     if (o <= i0) fail('out must be greater than in');
     const m = {
-      id: uid('music'), assetId, start: num(start, 'start', 0) ?? 0, in: r3(i0), out: r3(o),
-      volume: num(volume, 'volume', 0, 2) ?? 0.6, fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? 1,
+      id: uid(rl === 'music' ? 'music' : rl), assetId, role: rl,
+      track: Math.round(num(track, 'track', 1, 20) ?? (rl === 'music' ? 1 : rl === 'voice' ? 2 : 3)),
+      start: num(start, 'start', 0) ?? 0, in: r3(i0), out: r3(o),
+      volume: num(volume, 'volume', 0, 2) ?? (rl === 'music' ? 0.6 : 1),
+      fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? (rl === 'music' ? 1 : 0),
     };
     p.music.push(m);
-    return `Added music ${m.id} from "${a.name}" at ${m.start}s`;
+    return `Added ${rl} ${m.id} from "${a.name}" at ${m.start}s on audio track ${m.track}`;
   },
 
   update_music(p, { musicId, ...rest }) {
-    const m = p.music[findIn(p.music, musicId, 'music')];
+    const m = p.music[findIn(p.music, musicId, 'audio item')];
     const lim = { start: [0, 1e6], in: [0, 1e6], out: [0, 1e6], volume: [0, 2], fadeIn: [0, 30], fadeOut: [0, 30] };
     for (const k of Object.keys(lim)) { const v = num(rest[k], k, ...lim[k]); if (v !== undefined) m[k] = r3(v); }
+    const rl = oneOf(rest.role, AUDIO_ROLES, 'role'); if (rl) m.role = rl;
+    const tr = num(rest.track, 'track', 1, 20); if (tr !== undefined) m.track = Math.round(tr);
     if (m.out <= m.in) fail('out must be greater than in');
-    return `Updated music ${m.id}`;
+    return `Updated ${m.role} ${m.id}`;
   },
 
   delete_music(p, { musicId }) {
-    const [m] = p.music.splice(findIn(p.music, musicId, 'music'), 1);
-    return `Deleted music ${m.id}`;
+    const [m] = p.music.splice(findIn(p.music, musicId, 'audio item'), 1);
+    return `Deleted ${m.role || 'music'} ${m.id}`;
   },
 
   set_canvas(p, { aspect, background, fps }) {
@@ -242,15 +579,26 @@ export const ops = {
       p.settings.aspect = aspect;
       [p.settings.width, p.settings.height] = ASPECTS[aspect];
     }
-    if (background) p.settings.background = background;
+    const bg = color(background, 'background'); if (bg) p.settings.background = bg;
     const f = num(fps, 'fps', 10, 60); if (f) p.settings.fps = Math.round(f);
     return `Canvas: ${p.settings.aspect} ${p.settings.width}x${p.settings.height}, bg ${p.settings.background}, ${p.settings.fps}fps`;
   },
 
+  rename_project(p, { name }) {
+    if (!name || !String(name).trim()) fail('name is required');
+    p.name = String(name).trim().slice(0, 120);
+    return `Renamed project to "${p.name}"`;
+  },
+
   clear_timeline(p) {
-    p.clips = []; p.texts = []; p.music = [];
+    p.clips = []; p.texts = []; p.music = []; p.overlays = []; p.captions = null;
     return 'Cleared timeline (media library kept)';
   },
 };
+
+// Ids of every editable item, used by batch_edit to resolve "$N" references.
+export function allIds(p) {
+  return new Set([...p.clips, ...p.overlays, ...p.texts, ...p.music, ...(p.captions?.lines || [])].map((x) => x.id));
+}
 
 export { OpError };

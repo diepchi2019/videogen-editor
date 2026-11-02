@@ -10,6 +10,7 @@
   <header>
     <div class="brand">VideoGen</div>
     <div class="hgroup">
+      <select id="project" title="Project"></select>
       <button id="undo" title="Undo (Ctrl+Z)">↶ Undo</button>
       <button id="redo" title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
       <select id="aspect" title="Canvas">
@@ -35,6 +36,7 @@
         <div id="stage">
           <div class="layer" data-l="0"><video playsinline preload="auto"></video><img alt="" /></div>
           <div class="layer" data-l="1"><video playsinline preload="auto"></video><img alt="" /></div>
+          <div id="overlays"></div>
           <div id="texts"></div>
           <div id="stageEmpty">Add clips to start</div>
         </div>
@@ -73,11 +75,12 @@
       </div>
     </div>
     <div id="tlBody">
-      <div class="track-labels"><div class="tl-ruler-label"></div><div>Video</div><div>Text</div><div>Music</div></div>
+      <div class="track-labels"><div class="tl-ruler-label"></div><div>Video</div><div>Overlay</div><div>Text</div><div>Audio</div></div>
       <div id="tlScroll">
         <div id="tlInner">
           <div id="ruler"></div>
           <div class="track" id="trackVideo"></div>
+          <div class="track" id="trackOverlay"></div>
           <div class="track" id="trackText"></div>
           <div class="track" id="trackMusic"></div>
           <div id="playhead"></div>

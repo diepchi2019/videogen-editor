@@ -17,7 +17,8 @@ const TRANSITIONS = ['none', 'fade', 'dissolve', 'fadeblack', 'fadewhite', 'wipe
 let P = null;      // project
 let L = null;      // layout
 let jobs = [];
-let sel = null;    // { kind: 'clip'|'text'|'music', id }
+let projects = [];
+let sel = null;    // { kind: 'clip'|'overlay'|'text'|'music', id }
 let time = 0, playing = false, playStart = 0, playFrom = 0;
 let pps = 80;      // timeline pixels per second
 
@@ -34,20 +35,39 @@ async function tool(name, input = {}) {
   return r;
 }
 function setState(s) {
+  const switched = P && s.project.id !== P.id;
   P = s.project; L = s.layout;
   if (s.jobs) jobs = s.jobs;
+  if (s.projects) projects = s.projects;
+  else if (switched) fetch('/api/state').then((r) => r.json()).then((j) => { projects = j.projects || projects; renderProjects(); });
   if (sel && !findSel()) sel = null;
   renderAll();
 }
 const findSel = () => sel && (sel.kind === 'clip' ? L.clips.find((c) => c.id === sel.id)
-  : sel.kind === 'text' ? P.texts.find((t) => t.id === sel.id) : P.music.find((m) => m.id === sel.id));
+  : sel.kind === 'text' ? P.texts.find((t) => t.id === sel.id) : sel.kind === 'overlay' ? P.overlays.find((o) => o.id === sel.id)
+    : P.music.find((m) => m.id === sel.id));
+const ovDur = (o) => (o.out - o.in) / (o.speed || 1);
 function toast(msg) { addMsg('error', String(msg)); }
 
 // ---------- Render ----------
 function renderAll() {
   $('#aspect').value = P.settings.aspect;
-  renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true);
+  renderProjects(); renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true);
 }
+
+function renderProjects() {
+  const box = $('#project');
+  const list = projects.length ? projects : [{ id: P.id, name: P.name }];
+  box.replaceChildren(...list.map((x) => h('option', { value: x.id, selected: x.id === P.id }, x.name)),
+    h('option', { value: '__new' }, '+ New project…'));
+}
+$('#project').onchange = async (e) => {
+  const v = e.target.value;
+  if (v === '__new') {
+    const name = prompt('Project name', 'New project');
+    if (name) await tool('create_project', { name }); else renderProjects();
+  } else if (v !== P.id) await tool('open_project', { projectId: v });
+};
 
 function renderAssets() {
   const box = $('#assets');
@@ -130,6 +150,8 @@ function renderFrame(force) {
   });
   for (const ly of layers) if (!used.has(ly)) { ly.el.style.display = 'none'; ly.video.pause(); ly.bg.pause(); }
 
+  renderOverlays(t);
+
   // Music
   for (const m of P.music) {
     let el = musicEls.get(m.id);
@@ -157,6 +179,63 @@ function renderFrame(force) {
   }
 }
 
+const ovEls = new Map();
+function renderOverlays(t) {
+  const box = $('#overlays');
+  const keep = new Set();
+  const sorted = [...P.overlays].sort((a, b) => a.track - b.track || a.start - b.start);
+  sorted.forEach((o, z) => {
+    const a = P.assets[o.assetId];
+    if (!a) return;
+    let el = ovEls.get(o.id);
+    const tag = a.type === 'image' ? 'IMG' : 'VIDEO';
+    if (!el || el.tagName !== tag) {
+      el?.remove();
+      el = h(tag.toLowerCase(), { class: 'ov-media', playsinline: true, preload: 'auto' });
+      ovEls.set(o.id, el); box.append(el);
+    }
+    keep.add(o.id);
+    const on = t >= o.start && t < o.start + ovDur(o);
+    el.style.display = on ? 'block' : 'none';
+    const src = `/media/${a.file}`;
+    if (a.type === 'image') { if (el.getAttribute('src') !== src) el.src = src; }
+    else if (on) syncVideo(el, src, o.in + (t - o.start) * o.speed, o.speed, o.volume, playing);
+    else el.pause();
+    if (!on) return;
+    const full = o.fit === 'cover' || o.fit === 'contain';
+    Object.assign(el.style, {
+      zIndex: String(z + 1), opacity: String(o.opacity), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
+      left: full ? '50%' : `${o.x * 100}%`, top: full ? '50%' : `${o.y * 100}%`,
+      width: full ? '100%' : `${o.scale * 100}%`, height: full ? '100%' : 'auto',
+      transform: `translate(-50%, -50%) rotate(${o.rotate || 0}deg) scale(${o.flipH ? -1 : 1}, ${o.flipV ? -1 : 1})`,
+    });
+  });
+  for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
+}
+
+function renderCaption(t, k) {
+  const c = P.captions;
+  if (!c) return null;
+  const l = c.lines.find((x) => t >= x.start && t < x.end);
+  if (!l) return null;
+  const st = c.style;
+  const up = (w) => (st.uppercase ? w.toUpperCase() : w);
+  const cur = l.words.findIndex((w, i) => t >= w.start && (i + 1 >= l.words.length || t < l.words[i + 1].start));
+  const words = st.mode === 'single' ? (cur >= 0 ? [l.words[cur]] : []) : l.words;
+  const size = st.size * k;
+  return h('div', {
+    class: 'ov-caption',
+    style: {
+      top: `${st.y * 100}%`, fontSize: `${size}px`, color: st.color,
+      background: st.box ? hexA(st.boxColor || '#000000', 0.6) : 'transparent', padding: st.box ? `${size * 0.3}px` : '0',
+      textShadow: st.box ? 'none' : `0 0 ${Math.max(2, (st.outline || 4) * k * 2)}px ${st.outlineColor || '#000'}, 0 0 2px #000`,
+    },
+  }, ...words.map((w, i) => {
+    const lit = st.mode === 'karaoke' ? t >= w.start : st.mode === 'word' ? l.words.indexOf(w) === cur : st.mode === 'single';
+    return h('span', { style: { color: lit ? st.highlightColor : st.color } }, up(w.w) + (i < words.length - 1 ? ' ' : ''));
+  }));
+}
+
 function renderTexts(t) {
   const st = $('#stage');
   const k = st.clientWidth / P.settings.width;
@@ -180,6 +259,8 @@ function renderTexts(t) {
     el.addEventListener('pointerdown', (e) => dragTextOnStage(e, x));
     return el;
   }));
+  const cap = renderCaption(t, k);
+  if (cap) box.append(cap);
 }
 const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
 
@@ -219,7 +300,7 @@ function seek(t) { time = Math.max(0, Math.min(L.duration, t)); if (playing) { p
 
 // ---------- Timeline ----------
 function renderTimeline() {
-  const dur = Math.max(L.duration, ...P.texts.map((t) => t.end), ...P.music.map((m) => m.start + m.out - m.in), 10);
+  const dur = Math.max(L.duration, ...P.texts.map((t) => t.end), ...P.music.map((m) => m.start + m.out - m.in), ...P.overlays.map((o) => o.start + ovDur(o)), 10);
   const inner = $('#tlInner');
   inner.style.width = `${dur * pps + 200}px`;
   // ruler
@@ -261,6 +342,20 @@ function renderTimeline() {
     addAsset(a, pos);
   };
 
+  // overlay track (one lane per overlay track number, top lane = highest track)
+  const ovTracks = [...new Set(P.overlays.map((o) => o.track))].sort((a, b) => a - b);
+  const olh = 40 / Math.max(1, ovTracks.length);
+  $('#trackOverlay').replaceChildren(...P.overlays.map((o) => {
+    const a = P.assets[o.assetId];
+    const b = h('div', {
+      class: `block overlay${sel?.id === o.id ? ' selected' : ''}`,
+      style: { left: `${o.start * pps}px`, width: `${Math.max(4, ovDur(o) * pps)}px`, top: `${6 + (ovTracks.length - 1 - ovTracks.indexOf(o.track)) * olh}px`, height: `${olh - (ovTracks.length > 1 ? 2 : 0)}px`, backgroundImage: a?.thumb ? `url(${a.thumb})` : 'none' },
+      title: `${a?.name} (track ${o.track})`,
+    }, `⧉ ${a?.name}`);
+    b.addEventListener('pointerdown', (e) => rangeDrag(e, 'overlay', o, 'move'));
+    return b;
+  }));
+
   // text track
   // Overlapping texts go into separate lanes.
   const lanes = [];
@@ -279,8 +374,11 @@ function renderTimeline() {
   }));
   // music track
   const tm = $('#trackMusic');
+  const aTracks = [...new Set(P.music.map((m) => m.track || 1))].sort((a, b) => a - b);
+  const alh = 40 / Math.max(1, aTracks.length);
   tm.replaceChildren(...P.music.map((m) => {
-    const b = h('div', { class: `block music${sel?.id === m.id ? ' selected' : ''}`, style: { left: `${m.start * pps}px`, width: `${Math.max(4, (m.out - m.in) * pps)}px` } }, `♪ ${P.assets[m.assetId]?.name}`);
+    const icon = m.role === 'sfx' ? '✦' : m.role === 'voice' ? '🎙' : '♪';
+    const b = h('div', { class: `block music${sel?.id === m.id ? ' selected' : ''}`, style: { left: `${m.start * pps}px`, width: `${Math.max(4, (m.out - m.in) * pps)}px`, top: `${6 + aTracks.indexOf(m.track || 1) * alh}px`, height: `${alh - (aTracks.length > 1 ? 2 : 0)}px` } }, `${icon} ${P.assets[m.assetId]?.name}`);
     b.addEventListener('pointerdown', (e) => rangeDrag(e, 'music', m, 'move'));
     return b;
   }));
@@ -351,6 +449,7 @@ function rangeDrag(e, kind, item, mode) {
     if (kind === 'text') tool('update_text', mode === 'move'
       ? { textId: item.id, start: +(item.start + d).toFixed(3), end: +(item.end + d).toFixed(3) }
       : { textId: item.id, end: +(item.end + d).toFixed(3) });
+    else if (kind === 'overlay') tool('set_overlay', { overlayId: item.id, start: +(item.start + d).toFixed(3) });
     else tool('update_music', { musicId: item.id, start: +(item.start + d).toFixed(3) });
   };
   window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
@@ -363,7 +462,7 @@ $('#ruler').addEventListener('pointerdown', (e) => {
   window.addEventListener('pointermove', go);
   window.addEventListener('pointerup', () => window.removeEventListener('pointermove', go), { once: true });
 });
-for (const id of ['#trackVideo', '#trackText', '#trackMusic']) {
+for (const id of ['#trackVideo', '#trackOverlay', '#trackText', '#trackMusic']) {
   $(id).addEventListener('pointerdown', (e) => {
     if (e.target === e.currentTarget) { seek((e.clientX - e.currentTarget.getBoundingClientRect().left) / pps); select(null); }
   });
@@ -414,10 +513,25 @@ function renderInspector() {
         ...['none', 'fade', 'pop', 'slideup'].map((a) => h('option', { value: a, selected: (x.animation || 'none') === a }, a)))),
       h('button', { class: 'small danger', onclick: () => tool('delete_text', { textId: x.id }) }, 'Delete'),
     ];
+  } else if (sel.kind === 'overlay') {
+    const o = it;
+    content = [
+      h('span', { class: 'title' }, `Overlay · ${P.assets[o.assetId]?.name}`),
+      field('Start', o.start, (v) => tool('set_overlay', { overlayId: o.id, start: v })),
+      field('Dur', +ovDur(o).toFixed(2), (v) => tool('set_overlay', { overlayId: o.id, duration: v })),
+      h('label', {}, 'Fit', h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, fit: e.target.value }) },
+        ...['free', 'cover', 'contain'].map((f) => h('option', { value: f, selected: o.fit === f }, f)))),
+      field('X', o.x, (v) => tool('set_overlay', { overlayId: o.id, x: v }), { step: '0.05' }),
+      field('Y', o.y, (v) => tool('set_overlay', { overlayId: o.id, y: v }), { step: '0.05' }),
+      field('Width', o.scale, (v) => tool('set_overlay', { overlayId: o.id, scale: v }), { step: '0.05' }),
+      field('Opacity', o.opacity, (v) => tool('set_overlay', { overlayId: o.id, opacity: v }), { min: 0, max: 1, step: '0.1' }),
+      P.assets[o.assetId]?.type === 'video' ? field('Volume', o.volume, (v) => tool('set_overlay', { overlayId: o.id, volume: v }), { min: 0, max: 2, step: '0.1' }) : null,
+      h('button', { class: 'small danger', onclick: () => tool('delete_overlay', { overlayId: o.id }) }, 'Delete'),
+    ];
   } else {
     const m = it;
     content = [
-      h('span', { class: 'title' }, `Music · ${P.assets[m.assetId]?.name}`),
+      h('span', { class: 'title' }, `${m.role || 'music'} · ${P.assets[m.assetId]?.name}`),
       field('Start', m.start, (v) => tool('update_music', { musicId: m.id, start: v })),
       field('In', m.in, (v) => tool('update_music', { musicId: m.id, in: v })),
       field('Out', m.out, (v) => tool('update_music', { musicId: m.id, out: v })),
@@ -432,7 +546,7 @@ function renderInspector() {
 
 // ---------- Export ----------
 function renderJobs() {
-  const recent = jobs.slice(-3).reverse();
+  const recent = jobs.filter((j) => !j.kind || j.kind === 'export').slice(-3).reverse();
   $('#jobs').replaceChildren(...recent.map((j) => j.status === 'running'
     ? h('span', {}, `Rendering ${j.quality}… ${Math.round(j.progress * 100)}%`)
     : j.status === 'done' ? h('a', { href: `/exports/${j.file}`, target: '_blank', title: j.file }, `▶ ${j.quality} ready`)
@@ -521,7 +635,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'Space') { e.preventDefault(); playing ? pause() : play(); }
   else if (e.key === 's' || e.key === 'S') tool('split_clip', { at: +time.toFixed(3) });
   else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) {
-    const it = { clip: ['delete_clip', 'clipId'], text: ['delete_text', 'textId'], music: ['delete_music', 'musicId'] }[sel.kind];
+    const it = { clip: ['delete_clip', 'clipId'], overlay: ['delete_overlay', 'overlayId'], text: ['delete_text', 'textId'], music: ['delete_music', 'musicId'] }[sel.kind];
     tool(it[0], { [it[1]]: sel.id });
   } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); tool(e.shiftKey ? 'redo' : 'undo'); }
   else if (e.key === 'ArrowRight') seek(time + (e.shiftKey ? 1 : 1 / P.settings.fps));
@@ -529,4 +643,8 @@ window.addEventListener('keydown', (e) => {
   else if (e.key === 'Home') seek(0);
 });
 
-api('/api/state').then(() => requestAnimationFrame(tick));
+api('/api/state').then(() => {
+  const m = /t=([\d.]+)/.exec(location.hash); // deep link: /#t=12.5 opens at that time
+  if (m) seek(+m[1]);
+  requestAnimationFrame(tick);
+});
