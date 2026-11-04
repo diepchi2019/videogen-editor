@@ -17,6 +17,7 @@ export const AUDIO_ROLES = ['music', 'sfx', 'voice'];
 export const OVERLAY_FITS = ['free', 'contain', 'cover'];
 export const OVERLAY_ANIMS = ['none', 'fade'];
 export const CAPTION_MODES = ['line', 'karaoke', 'word', 'single'];
+export const REGION_MODES = ['fill', 'patch'];
 
 // Text style presets: values applied first, explicit input wins.
 export const TEXT_STYLES = {
@@ -164,7 +165,8 @@ export function summarize(p, extras = {}) {
     `- #${c.index + 1} ${c.id}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
-    (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : ''));
+    (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
+    (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : ''));
   const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
     `- ${o.id} (track ${o.track}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
@@ -305,6 +307,24 @@ function applyTransform(c, input) {
   if (Object.keys(t).length) c.transform = t; else delete c.transform;
 }
 
+const describeRegion = (r) =>
+  `${r.id} ${r.mode} x${r.x} y${r.y} w${r.w} h${r.h} source ${fmtT(r.from)}-${fmtT(r.to)}s${r.mode === 'patch' ? ` from frame ${fmtT(r.patchAt)}s` : ''}`;
+
+// Find a region by id in any clip (split clips share region ids). Returns [{clip, index}].
+function findRegions(p, regionId, clipId) {
+  const clips = clipId ? [p.clips[findClip(p, clipId)]] : p.clips;
+  const hits = [];
+  for (const c of clips) {
+    const i = (c.regions || []).findIndex((r) => r.id === regionId);
+    if (i >= 0) hits.push({ clip: c, index: i });
+  }
+  if (!hits.length) {
+    const all = clips.flatMap((c) => (c.regions || []).map((r) => r.id));
+    fail(`No region ${regionId}. Regions: ${[...new Set(all)].join(', ') || 'none'}`);
+  }
+  return hits;
+}
+
 function applyOverlay(o, input, a) {
   const sp = num(input.speed, 'speed', 0.25, 4); if (sp !== undefined) o.speed = sp;
   const max = a.type === 'image' ? 3600 : a.duration;
@@ -430,6 +450,63 @@ export const ops = {
     p.clips[i].transition = { type, duration: num(duration, 'duration', 0.1, 5) ?? 0.5 };
     clampTransition(p, i);
     return `Transition into ${p.clips[i].id}: ${type} ${p.clips[i].transition.duration}s`;
+  },
+
+  // Swap the media under a clip, keeping its timing, transform, motion, transition and regions.
+  replace_clip_asset(p, { clipId, assetId, in: tin, out, clearRegions }) {
+    const c = p.clips[findClip(p, clipId)];
+    const a = asset(p, assetId, ['video', 'image']);
+    const max = a.type === 'image' ? 3600 : a.duration;
+    const ni = num(tin, 'in', 0, max) ?? c.in;
+    const no = num(out, 'out', 0, max) ?? c.out;
+    if (no > max + 0.001) fail(`Clip uses source ${c.in}-${c.out}s but "${a.name}" is only ${a.duration.toFixed(2)}s long. Pass in/out that fit inside it.`);
+    if (no - ni < 0.05) fail('out must be at least 0.05s after in');
+    const old = p.assets[c.assetId];
+    c.assetId = a.id; c.in = r3(ni); c.out = r3(no);
+    if (bool(clearRegions)) delete c.regions;
+    else if (c.regions && a.type === 'image') c.regions = c.regions.filter((r) => r.mode !== 'patch');
+    if (c.regions && !c.regions.length) delete c.regions;
+    clampAll(p);
+    const kept = c.regions?.length ? `; kept ${c.regions.length} removed region(s)` : '';
+    const dims = old?.width && a.width && (old.width / old.height).toFixed(3) !== (a.width / a.height).toFixed(3)
+      ? ` Note: aspect changed (${old.width}x${old.height} -> ${a.width}x${a.height}), check crop/regions with look_at_timeline.` : '';
+    return `${c.id} now uses "${a.name}" (source ${c.in}-${c.out}s)${kept}.${dims}`;
+  },
+
+  // Hide something burned into the source video (subtitle, watermark, logo) on one clip.
+  // Box and times are in SOURCE terms, so the region follows trims, splits and speed changes.
+  remove_region(p, input) {
+    const c = p.clips[findClip(p, input.clipId)];
+    const a = p.assets[c.assetId];
+    const r = { id: uid('reg') };
+    for (const k of ['x', 'y']) r[k] = r3(num(input[k], k, 0, 1) ?? fail(`${k} is required (fraction of the source frame, 0-1)`));
+    for (const k of ['w', 'h']) r[k] = r3(num(input[k], k, 0.005, 1) ?? fail(`${k} is required (fraction of the source frame)`));
+    if (r.x + r.w > 1.0001 || r.y + r.h > 1.0001) fail('The box must stay inside the frame: x + w <= 1 and y + h <= 1');
+    const max = a.type === 'image' ? 3600 : a.duration;
+    r.from = r3(num(input.from, 'from', 0, max) ?? c.in);
+    r.to = r3(num(input.to, 'to', 0, max) ?? c.out);
+    if (r.to <= r.from) fail('to must be after from (source seconds)');
+    r.mode = oneOf(input.mode, REGION_MODES, 'mode') ?? 'fill';
+    if (r.mode === 'patch') {
+      if (a.type !== 'video') fail('mode patch needs a video clip; use mode fill on images');
+      const at = num(input.patchAt, 'patchAt', 0, Math.max(0, a.duration - 0.05));
+      if (at === undefined) fail('mode patch needs patchAt: a source time where this box shows a clean background (e.g. just before or after the text, in the same shot)');
+      if (at >= r.from && at <= r.to) fail(`patchAt ${at}s is inside ${r.from}-${r.to}s, so it would copy the text itself. Pick a clean frame outside that range.`);
+      r.patchAt = r3(at);
+      r.feather = r3(num(input.feather, 'feather', 0, 0.5) ?? 0.15);
+    }
+    (c.regions ||= []).push(r);
+    const outside = r.to <= c.in || r.from >= c.out ? ` Note: the clip only uses source ${c.in}-${c.out}s, so this is not visible yet.` : '';
+    return `Added region ${r.id} on ${c.id}: ${describeRegion(r)}.${outside} Check it with look_at_timeline.`;
+  },
+
+  delete_region(p, { regionId, clipId }) {
+    const hits = findRegions(p, regionId, clipId);
+    for (const { clip, index } of hits.reverse()) {
+      clip.regions.splice(index, 1);
+      if (!clip.regions.length) delete clip.regions;
+    }
+    return `Deleted region ${regionId}${hits.length > 1 ? ` from ${hits.length} clips` : ''}`;
   },
 
   add_overlay(p, input) {
@@ -598,7 +675,7 @@ export const ops = {
 
 // Ids of every editable item, used by batch_edit to resolve "$N" references.
 export function allIds(p) {
-  return new Set([...p.clips, ...p.overlays, ...p.texts, ...p.music, ...(p.captions?.lines || [])].map((x) => x.id));
+  return new Set([...p.clips, ...p.clips.flatMap((c) => c.regions || []), ...p.overlays, ...p.texts, ...p.music, ...(p.captions?.lines || [])].map((x) => x.id));
 }
 
 export { OpError };

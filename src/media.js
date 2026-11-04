@@ -10,7 +10,9 @@ export function run(cmd, args, { onStderr } = {}) {
     const out = [], err = [];
     p.stdout.on('data', (d) => out.push(d));
     p.stderr.on('data', (d) => { err.push(d); onStderr?.(d.toString()); });
-    p.on('error', reject);
+    p.on('error', (e) => reject(e.code === 'ENOENT'
+      ? new Error(`${cmd} not found on PATH. Install ffmpeg (it includes ffprobe), e.g. "winget install Gyan.FFmpeg", then restart the editor.`)
+      : e));
     p.on('close', (code) => code === 0
       ? resolve(Buffer.concat(out))
       : reject(new Error(`${cmd} exited ${code}: ${Buffer.concat(err).toString().slice(-1500)}`)));

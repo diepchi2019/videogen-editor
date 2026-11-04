@@ -1,7 +1,7 @@
 // Tool definitions shared by the in-app Claude chat and the MCP server.
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS,
-  CAPTION_MODES, CAPTION_STYLES, summarize, timelineWords, layout, env, ops,
+  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, summarize, timelineWords, layout, env, ops,
 } from './model.js';
 import * as store from './store.js';
 import { extractFrames } from './media.js';
@@ -76,6 +76,31 @@ export const TOOLS = [
   },
   { name: 'set_transition', description: `Set the transition INTO a clip from the previous clip (not allowed on the first clip). Use type "none" to remove. Clips overlap by the duration.`, input_schema: S({ clipId: s('Clip id (clip #2 or later)'), type: s('Transition type', { enum: TRANSITIONS }), duration: n('Seconds, 0.1-5 (default 0.5)') }, ['clipId', 'type']) },
 
+  {
+    name: 'replace_clip_asset',
+    description: 'Swap the media file under a main-track clip (e.g. a re-encoded or cleaned version, or a different take) while keeping its in/out, speed, volume, fit, transform, motion, transition and removed regions. ' +
+      'If the new file is shorter than the clip\'s out point, pass in/out that fit.',
+    input_schema: S({ clipId: s('Clip id'), assetId: s('Asset id of the new video or image'), in: n('New source start seconds (default: keep)'), out: n('New source end seconds (default: keep)'), clearRegions: b('Drop the clip\'s removed regions (use when the new file no longer has the text)') }, ['clipId', 'assetId']),
+  },
+  {
+    name: 'remove_region',
+    description: 'Hide something burned into a clip\'s source video (hardcoded subtitle, watermark, logo, timestamp) inside a box, for a source-time range. Non-destructive: applied at export and in look_at_timeline (not in the browser preview). ' +
+      'Find the box and times with look_at_asset first, and make the box a little larger than the text. ' +
+      'mode fill (default) rebuilds the box from the pixels around it: always works, but looks soft/smudged on detailed backgrounds. ' +
+      'mode patch copies the box from a clean frame of the same shot (patchAt) with soft edges: sharp, real detail, best when the camera and that area are mostly still (it is a still image, so motion there will look frozen). ' +
+      'Keep from-to inside ONE shot: a patch that runs past a scene cut pastes the old shot\'s pixels onto the new one (end a little before the cut). ' +
+      'Check the result with look_at_timeline. Splitting or trimming the clip keeps the region in place.',
+    input_schema: S({
+      clipId: s('Clip id'), x: n('Box left, fraction of the source frame width 0-1'), y: n('Box top, fraction of the source frame height 0-1'),
+      w: n('Box width, fraction 0-1'), h: n('Box height, fraction 0-1'),
+      from: n('Source seconds where the text appears (default: clip in)'), to: n('Source seconds where it disappears (default: clip out)'),
+      mode: s('fill = interpolate from surroundings; patch = copy from a clean frame', { enum: REGION_MODES }),
+      patchAt: n('patch mode: source seconds of a frame where this box is clean (same shot, outside from-to)'),
+      feather: n('patch mode: soft edge as a fraction of the box\'s smaller side, 0-0.5 (default 0.15)'),
+    }, ['clipId', 'x', 'y', 'w', 'h']),
+  },
+  { name: 'delete_region', description: 'Remove a region added with remove_region (the original pixels come back). Region ids are listed with each clip in get_timeline.', input_schema: S({ regionId: s('Region id'), clipId: s('Optional: only this clip (a split clip shares region ids)') }, ['regionId']) },
+
   { name: 'add_overlay', description: 'Put a video or image ON TOP of the main video track at a timeline time: picture-in-picture, logo/watermark, B-roll cutaway (fit cover), reaction cam. Overlays do not shift other clips.', input_schema: S({ assetId: s('Asset id'), ...overlayProps }, ['assetId']) },
   { name: 'set_overlay', description: 'Change an overlay (timing, position, size, opacity, crop, volume...).', input_schema: S({ overlayId: s('Overlay id'), ...overlayProps }, ['overlayId']) },
   { name: 'delete_overlay', description: 'Remove an overlay.', input_schema: S({ overlayId: s('Overlay id') }, ['overlayId']) },
@@ -104,7 +129,7 @@ export const TOOLS = [
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
 const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status']);
-const DESTRUCTIVE = new Set(['delete_clip', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions']);
+const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
   destructiveHint: DESTRUCTIVE.has(name),

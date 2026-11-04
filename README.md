@@ -38,7 +38,7 @@ Now in Claude Code: *"import ~/Videos/beach1.mp4 and beach2.mp4 into videogen, m
 
 ## Tools Claude can use
 
-`get_timeline`, `look_at_asset`, `add_clip`, `trim_clip`, `split_clip`, `delete_clip`, `move_clip`, `set_clip` (speed, volume, fit: contain/cover/blur), `set_transition` (fade, dissolve, slides, wipes, circleopen, zoomin, pixelize…), `add_text` / `update_text` / `delete_text` (animations: fade, pop, slideup), `add_music` / `update_music` / `delete_music`, `set_canvas`, `undo` / `redo`, `export_video`, `export_status`, plus `import_media` over MCP.
+`get_timeline`, `look_at_asset`, `add_clip`, `trim_clip`, `split_clip`, `delete_clip`, `move_clip`, `set_clip` (speed, volume, fit: contain/cover/blur), `replace_clip_asset` (swap the file, keep the clip's settings), `remove_region` / `delete_region` (hide burned-in subtitles, watermarks, logos: `fill` or `patch` from a clean frame), `set_transition` (fade, dissolve, slides, wipes, circleopen, zoomin, pixelize…), `add_text` / `update_text` / `delete_text` (animations: fade, pop, slideup), `add_music` / `update_music` / `delete_music`, `set_canvas`, `undo` / `redo`, `export_video`, `export_status`, plus `import_media` over MCP.
 
 ## Keyboard
 

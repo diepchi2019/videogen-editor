@@ -51,6 +51,40 @@ function geometry(t, fill) {
   return f;
 }
 
+// Pixel box of a region on a sw x sh source frame. delogo needs a 1px margin inside the frame.
+function regionBox(r, sw, sh) {
+  const x = Math.max(1, Math.round(r.x * sw)), y = Math.max(1, Math.round(r.y * sh));
+  const w = Math.max(2, Math.min(sw - 1 - x, Math.round(r.w * sw)));
+  const h = Math.max(2, Math.min(sh - 1 - y, Math.round(r.h * sh)));
+  return { x, y, w, h };
+}
+
+// Remove regions from clip i's source frames. Times are source seconds; the stream starts at clip.in.
+// Returns the label of the cleaned stream (still at source speed). Patch regions add one input each.
+function regionFilters(c, a, i, n, file, args, filters, nextInput) {
+  const regs = (c.regions || []).filter((r) => r.to > c.in && r.from < c.out);
+  if (!regs.length || !a.width) return null;
+  let cur = `rg${i}_0`;
+  filters.push(`[${n}:v]setpts=PTS-STARTPTS[${cur}]`);
+  regs.forEach((r, j) => {
+    const b = regionBox(r, a.width, a.height);
+    const en = `enable='between(t,${f3(Math.max(0, r.from - c.in))},${f3(r.to - c.in)})'`;
+    const next = `rg${i}_${j + 1}`;
+    if (r.mode === 'patch' && a.type === 'video') {
+      args.push('-ss', f3(r.patchAt), '-t', '0.5', '-i', file);
+      const m = nextInput();
+      const F = Math.round(Math.min(b.w, b.h) * (r.feather ?? 0.15) / 2);
+      const alpha = F >= 1 ? `,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='255*min(1,min(min(X,W-1-X),min(Y,H-1-Y))/${F})'` : '';
+      filters.push(`[${m}:v]trim=end_frame=1,setpts=PTS-STARTPTS,crop=${b.w}:${b.h}:${b.x}:${b.y},format=rgba${alpha}[pt${i}_${j}]`);
+      filters.push(`[${cur}][pt${i}_${j}]overlay=${b.x}:${b.y}:eof_action=repeat:${en}[${next}]`);
+    } else {
+      filters.push(`[${cur}]delogo=x=${b.x}:y=${b.y}:w=${b.w}:h=${b.h}:${en}[${next}]`);
+    }
+    cur = next;
+  });
+  return cur;
+}
+
 // Ken Burns on a WxH frame. Zoompan works on a 2x frame to reduce jitter.
 export function motionFilter(m, W, H, fps, dur) {
   const I = m.intensity ?? 0.15, N = Math.max(1, Math.round(dur * fps));
@@ -96,7 +130,8 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const sp = c.speed || 1;
     const T = c.transform || {};
     const tail = `setsar=1,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=duration=${f3(dur)},setpts=PTS-STARTPTS,settb=AVTB[v${i}]`;
-    const head = [`[${n}:v]setpts=(PTS-STARTPTS)/${sp}`, ...geometry(T, bg)].join(',');
+    const cleaned = regionFilters(c, a, i, n, file, args, filters, () => input++);
+    const head = [cleaned ? `[${cleaned}]setpts=PTS/${sp}` : `[${n}:v]setpts=(PTS-STARTPTS)/${sp}`, ...geometry(T, bg)].join(',');
     const fit = c.fit || 'contain';
     const fitOut = `fit${i}`;
     if (fit === 'cover') {

@@ -62,6 +62,56 @@ test('set_clip transform, motion and validation', () => {
   assert.match(M.summarize(p), /flipV, motion pan_left 0.3/);
 });
 
+test('remove_region: validation, defaults, split keeps it, delete, summary', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', in: 2, out: 8 });
+  const id = p.clips[0].id;
+  run(p, 'remove_region', { clipId: id, x: 0.1, y: 0.85, w: 0.5, h: 0.06 });
+  const r = p.clips[0].regions[0];
+  assert.deepEqual([r.mode, r.from, r.to], ['fill', 2, 8]); // defaults to the clip's source range
+  assert.throws(() => run(p, 'remove_region', { clipId: id, x: 0.6, y: 0.1, w: 0.5, h: 0.1 }), /inside the frame/);
+  assert.throws(() => run(p, 'remove_region', { clipId: id, y: 0.1, w: 0.5, h: 0.1 }), /x is required/);
+  assert.throws(() => run(p, 'remove_region', { clipId: id, x: 0, y: 0, w: 0.1, h: 0.1, from: 5, to: 4 }), /to must be after from/);
+  assert.throws(() => run(p, 'remove_region', { clipId: id, x: 0, y: 0, w: 0.1, h: 0.1, mode: 'patch', from: 4, to: 5 }), /needs patchAt/);
+  assert.throws(() => run(p, 'remove_region', { clipId: id, x: 0, y: 0, w: 0.1, h: 0.1, mode: 'patch', from: 4, to: 5, patchAt: 4.5 }), /copy the text itself/);
+  run(p, 'remove_region', { clipId: id, x: 0.2, y: 0.8, w: 0.4, h: 0.07, mode: 'patch', from: 4, to: 5, patchAt: 5.1 });
+  assert.equal(p.clips[0].regions[1].feather, 0.15);
+  assert.match(M.summarize(p), /removed regions: reg_\w+ fill x0\.1 y0\.85 w0\.5 h0\.06 source 2\.00-8\.00s; reg_\w+ patch .* from frame 5\.10s/);
+  // Split: both halves keep the (source-relative) regions; delete removes them everywhere.
+  run(p, 'split_clip', { at: 3 });
+  assert.equal(p.clips[1].regions.length, 2);
+  const msg = run(p, 'delete_region', { regionId: r.id });
+  assert.match(msg, /from 2 clips/);
+  assert.equal(p.clips[0].regions.length, 1);
+  assert.throws(() => run(p, 'delete_region', { regionId: 'reg_nope' }), /No region reg_nope/);
+  assert.throws(() => run(p, 'remove_region', { clipId: id, x: 0, y: 0, w: 0.1, h: 0.1, mode: 'blur' }), /mode must be one of/);
+});
+
+test('replace_clip_asset keeps clip settings and checks length', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_b', out: 4 });
+  run(p, 'add_clip', { assetId: 'vid_a', in: 1, out: 5 });
+  const c = p.clips[1];
+  run(p, 'set_clip', { clipId: c.id, speed: 2, volume: 0.5, fit: 'blur', flipH: true, motion: 'zoom_in' });
+  run(p, 'set_transition', { clipId: c.id, type: 'fade', duration: 0.4 });
+  run(p, 'remove_region', { clipId: c.id, x: 0.1, y: 0.8, w: 0.3, h: 0.05, mode: 'patch', from: 2, to: 3, patchAt: 3.5 });
+  const before = structuredClone(c);
+  run(p, 'replace_clip_asset', { clipId: c.id, assetId: 'vid_b' });
+  assert.equal(c.assetId, 'vid_b');
+  for (const k of ['id', 'in', 'out', 'speed', 'volume', 'fit', 'transform', 'motion', 'transition', 'regions']) assert.deepEqual(c[k], before[k], k);
+  assert.equal(p.clips.indexOf(c), 1);
+  // vid_b is 6s: out 8 does not fit
+  run(p, 'trim_clip', { clipId: c.id, out: 5.5 });
+  run(p, 'replace_clip_asset', { clipId: p.clips[0].id, assetId: 'vid_a', in: 6, out: 9 });
+  assert.throws(() => run(p, 'replace_clip_asset', { clipId: p.clips[0].id, assetId: 'vid_b' }), /only 6\.00s long/);
+  assert.throws(() => run(p, 'replace_clip_asset', { clipId: c.id, assetId: 'aud_m' }), /expected video\/image/);
+  // Image: patch regions are dropped (no frames to copy from); clearRegions drops all.
+  run(p, 'replace_clip_asset', { clipId: c.id, assetId: 'img_c' });
+  assert.equal(c.regions, undefined);
+  run(p, 'replace_clip_asset', { clipId: c.id, assetId: 'vid_a', clearRegions: true });
+  assert.equal(c.regions, undefined);
+});
+
 test('overlays: timing, defaults, source length check', () => {
   const p = project();
   run(p, 'add_overlay', { assetId: 'img_c', start: 2, duration: 4, x: 0.8, y: 0.15, scale: 0.2 });
@@ -259,4 +309,31 @@ test('render graph: overlays, transforms, motion, ASS, frames mode', () => {
     assert.ok(fr.args.includes('mjpeg'));
   } finally { fs.rmSync(fr.tmpDir, { recursive: true, force: true }); }
   assert.equal(motionFilter({ preset: 'none' }, 540, 960, 30, 2), null);
+});
+
+test('render graph: removed regions (fill = delogo, patch = clean-frame overlay)', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', in: 2, out: 8 });   // 1920x1080 source
+  const id = p.clips[0].id;
+  run(p, 'set_clip', { clipId: id, speed: 2 });
+  run(p, 'remove_region', { clipId: id, x: 0.25, y: 0.9, w: 0.5, h: 0.05, from: 3, to: 4 });
+  run(p, 'remove_region', { clipId: id, x: 0.1, y: 0.8, w: 0.2, h: 0.1, mode: 'patch', from: 5, to: 6, patchAt: 6.5 });
+  run(p, 'remove_region', { clipId: id, x: 0, y: 0, w: 0.1, h: 0.1, from: 9, to: 10 }); // outside the clip: skipped
+  const { graph, args, tmpDir } = buildCommand(p, 'out.mp4', { quality: 'draft' });
+  try {
+    // Times are relative to the clip's source in-point, applied before the speed change.
+    assert.match(graph, /\[0:v\]setpts=PTS-STARTPTS\[rg0_0\]/);
+    assert.match(graph, /\[rg0_0\]delogo=x=480:y=972:w=960:h=54:enable='between\(t,1\.000,2\.000\)'\[rg0_1\]/);
+    assert.match(graph, /\[1:v\]trim=end_frame=1,setpts=PTS-STARTPTS,crop=384:108:192:864,format=rgba,geq=.*\/8\)'\[pt0_1\]/);
+    assert.match(graph, /\[rg0_1\]\[pt0_1\]overlay=192:864:eof_action=repeat:enable='between\(t,3\.000,4\.000\)'\[rg0_2\]/);
+    assert.match(graph, /\[rg0_2\]setpts=PTS\/2,/);
+    assert.ok(!/rg0_3/.test(graph));
+    assert.deepEqual(args.slice(args.indexOf('6.500') - 1, args.indexOf('6.500') + 5), ['-ss', '6.500', '-t', '0.5', '-i', path.join(store.MEDIA_DIR, 'a.mp4')]);
+    assert.match(graph, /\[0:a\]aformat/); // clip audio still from input 0
+  } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  // Boxes touching the frame edge keep the 1px margin delogo needs.
+  run(p, 'delete_region', { regionId: p.clips[0].regions[0].id });
+  run(p, 'remove_region', { clipId: id, x: 0, y: 0.9, w: 1, h: 0.1 });
+  const e = buildCommand(p, 'out.mp4', { quality: 'draft' });
+  try { assert.match(e.graph, /delogo=x=1:y=972:w=1918:h=107:/); } finally { fs.rmSync(e.tmpDir, { recursive: true, force: true }); }
 });
