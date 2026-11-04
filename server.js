@@ -5,7 +5,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import * as store from './src/store.js';
 import { layout, uid } from './src/model.js';
-import { probe, makeThumb } from './src/media.js';
+import { probe, makeThumb, needsProxy, proxyPath, startProxy } from './src/media.js';
+import { waveform } from './src/audio.js';
 import { TOOLS, executeTool, toolAnnotations } from './src/tools.js';
 import { invalidateFonts, readFamily } from './src/fonts.js';
 import { chat, resetChat } from './src/chat.js';
@@ -18,6 +19,12 @@ app.use(express.static(path.resolve('public')));
 app.use('/media', express.static(store.MEDIA_DIR));
 app.use('/thumbs', express.static(path.join(store.DATA_DIR, 'thumbs')));
 app.use('/exports', express.static(store.EXPORT_DIR));
+// Preview playback: the 720p proxy when there is one, else the original file.
+app.get('/preview/:file', (req, res) => {
+  const f = path.basename(req.params.file);
+  const proxy = proxyPath(f);
+  res.sendFile(fs.existsSync(proxy) ? proxy : path.join(store.MEDIA_DIR, f), (e) => { if (e && !res.headersSent) res.status(404).end(); });
+});
 
 const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects() });
 const wrap = (fn) => async (req, res) => {
@@ -62,6 +69,7 @@ app.post('/api/upload', upload.array('files'), wrap(async (req) => {
       a.thumb = await makeThumb(a).catch(() => null);
       store.addAsset(a);
       added.push(a);
+      if (needsProxy(a)) startProxy(a);
     } catch (e) {
       fs.rmSync(f.path, { force: true });
       throw new Error(`${f.originalname}: ${e.message}`);
@@ -84,5 +92,12 @@ app.post('/api/chat', wrap(async (req) => {
 }));
 app.post('/api/chat/reset', wrap(() => { resetChat(); return { ok: true }; }));
 app.get('/api/jobs/:id', wrap((req) => getJob(req.params.id) || { error: 'not found' }));
+// Waveform peaks (0-100, PEAKS_PER_SEC per second of source) for drawing audio on the timeline.
+app.get('/api/waveform/:assetId', wrap(async (req) => {
+  const a = store.getProject().assets[req.params.assetId];
+  if (!a) throw new Error('No such asset');
+  const w = await waveform(a);
+  return { pps: w.pps, duration: w.duration, peaks: w.peaks };
+}));
 
 app.listen(PORT, () => console.log(`VideoGen editor running at http://localhost:${PORT}`));

@@ -2,7 +2,8 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DATA_DIR } from './store.js';
+import { DATA_DIR, PROXY_DIR } from './store.js';
+import { createJob, finishJob } from './jobs.js';
 
 export function run(cmd, args, { onStderr } = {}) {
   return new Promise((resolve, reject) => {
@@ -36,7 +37,37 @@ export async function probe(file) {
     duration: type === 'image' ? null : Number(j.format.duration || v?.duration || a?.duration || 0),
     width, height,
     hasAudio: !!a,
+    ...(type === 'video' ? { codec: v.codec_name } : {}),
   };
+}
+
+// ---------- Proxies: small H.264 copies for smooth browser preview of 4K / HEVC / ProRes files ----------
+const BROWSER_CODECS = new Set(['h264', 'vp8', 'vp9', 'av1']);
+export const proxyPath = (file) => path.join(PROXY_DIR, `${file}.mp4`);
+export const hasProxy = (a) => fs.existsSync(proxyPath(a.file));
+export function needsProxy(a) {
+  if (a.type !== 'video') return false;
+  return (a.codec && !BROWSER_CODECS.has(a.codec)) || (a.width || 0) * (a.height || 0) > 2560 * 1440;
+}
+// Short side 720, frequent keyframes for scrubbing. onProgress(0..1).
+export async function makeProxy(a, onProgress) {
+  const out = proxyPath(a.file), tmp = `${out}.part.mp4`;
+  await run('ffmpeg', ['-y', '-nostdin', '-i', path.join(DATA_DIR, 'media', a.file),
+    '-vf', "scale=w='if(gte(iw,ih),-2,720)':h='if(gte(iw,ih),720,-2)'", '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-g', '15',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', tmp], {
+    onStderr: (s) => { const m = /time=(\d+):(\d+):([\d.]+)/.exec(s); if (m && a.duration) onProgress?.(Math.min(0.99, (+m[1] * 3600 + +m[2] * 60 + +m[3]) / a.duration)); },
+  });
+  fs.renameSync(tmp, out);
+  return out;
+}
+const proxyJobs = new Map(); // media file -> job
+export function startProxy(a) {
+  const running = proxyJobs.get(a.file);
+  if (running?.status === 'running') return running;
+  const job = createJob('proxy', { file: a.file, asset: a.id, name: a.name });
+  proxyJobs.set(a.file, job);
+  makeProxy(a, (p) => { job.progress = p; }).then(() => finishJob(job, null), (e) => finishJob(job, e.message));
+  return job;
 }
 
 export async function makeThumb(asset) {

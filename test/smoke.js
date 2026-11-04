@@ -97,6 +97,35 @@ try {
     console.log('skip - captions (no whisper model in models/ggml-base.bin)');
   }
 
+  // --- Phase 2: color, effects, animations, keyframes, beats, ducking, waveforms, proxies ---
+  s = await tool('get_timeline');
+  const P2 = s.layout.clips;
+  await tool('set_color', { clipId: P2[0].id, filter: 'cinematic', filterIntensity: 0.7, saturation: 1.2 });
+  await tool('add_effect', { clipId: P2[1].id, type: 'zoom_pulse', rate: 2 });
+  await tool('add_effect', { clipId: P2[3].id, type: 'light_leak' });
+  await tool('set_clip', { clipId: P2[2].id, animIn: 'slide_up' });
+  await tool('set_keyframes', { overlayId: s.project.overlays[0].id, property: 'x', keyframes: [{ t: 0, value: 0.85 }, { t: 4, value: 0.15 }] });
+  const musicItem = s.project.music.find((m) => m.role === 'music');
+  await tool('update_music', { musicId: musicItem.id, duck: 0.6 });
+  const an = await tool('analyze_audio', { musicId: musicItem.id });
+  ok(/tempo [\d.]+ BPM/.test(an.content), `analyze_audio: ${an.content.split('\n')[2].slice(0, 50)}…`);
+  const mb = await tool('mark_beats', { musicId: musicItem.id });
+  ok(/^Marked \d+ beats/.test(mb.content) && mb.project.markers.length > 4, mb.content.split('. ')[0]);
+  const fitBeats = await tool('fit_clips_to_beats', { every: 2 });
+  ok(/Cut \d of 4 clips on the beat/.test(fitBeats.content), fitBeats.content.split(';')[0]);
+  s = await tool('get_timeline');
+  ok(['filter cinematic', 'effects: fx_', 'anim in slide_up', 'keyframes: x', 'ducks under speech', 'beat markers'].every((x) => s.content.includes(x)), 'summary shows Phase 2 fields');
+  const wf = await (await fetch(`${BASE}/api/waveform/${mus.id}`)).json();
+  ok(wf.pps === 50 && wf.peaks.length > 100, `waveform: ${wf.peaks.length} peaks`);
+  const sizeOf = async (u) => (await fetch(u)).headers.get('content-length');
+  const before = await sizeOf(`${BASE}/preview/${vid.file}`);
+  const px = await tool('create_proxies', { assetIds: [vid.id], force: true });
+  const pjob = /job (job_\w+)/.exec(px.content)?.[1];
+  for (let i = 0; i < 150; i++) { const j = await (await fetch(`${BASE}/api/jobs/${pjob}`)).json(); if (j.status !== 'running') break; await sleep(200); }
+  const after = await sizeOf(`${BASE}/preview/${vid.file}`);
+  ok(pjob && after && after !== before && before === await sizeOf(`${BASE}/media/${vid.file}`), `proxy served from /preview (${before} -> ${after} bytes)`);
+  ok(/resolution must be one of/.test(await toolErr('export_video', { resolution: '8k' })), 'export_video validates resolution');
+
   // --- look at the finished timeline ---
   const look = await tool('look_at_timeline', { times: [0.5, 2.5, 4] });
   const imgs = look.content.filter((b) => b.type === 'image');

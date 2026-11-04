@@ -1,11 +1,13 @@
 // Tool definitions shared by the in-app Claude chat and the MCP server.
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS,
-  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, summarize, timelineWords, layout, env, ops,
+  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, summarize, timelineWords, layout, env, ops,
 } from './model.js';
 import * as store from './store.js';
-import { extractFrames } from './media.js';
-import { startExport, getJob, renderFrames } from './render.js';
+import { extractFrames, probe, needsProxy, hasProxy, startProxy } from './media.js';
+import { startExport, getJob, renderFrames, RESOLUTIONS } from './render.js';
+import { analyzeAudio, analysisText } from './audio.js';
+import path from 'node:path';
 import { waitJob } from './jobs.js';
 import { transcribe, readTranscript, hasTranscript, transcriptText } from './transcribe.js';
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
@@ -72,7 +74,43 @@ export const TOOLS = [
       scale: n('Zoom inside the canvas, 1 = fitted size (0.1-5)'), x: n('Center x 0-1 inside the canvas (0.5 = centered)'), y: n('Center y 0-1'),
       resetTransform: b('Remove crop/rotate/flip/scale/position first'),
       motion: s('Ken Burns movement over the clip', { enum: MOTIONS }), motionIntensity: n('How far to zoom/pan, 0.02-0.6 (default 0.15)'),
+      animIn: s('Entrance animation of the clip (none removes). zoom_in grows from 60%, zoom_out shrinks from 140%, slide_X moves in that direction', { enum: CLIP_ANIMS }),
+      animInDuration: n('Seconds (default 0.5)'),
+      animOut: s('Exit animation of the clip (none removes). zoom_in grows, zoom_out shrinks, slide_X leaves in that direction', { enum: CLIP_ANIMS }),
+      animOutDuration: n('Seconds (default 0.5)'),
     }, ['clipId']),
+  },
+  {
+    name: 'set_color',
+    description: 'Color-correct a clip or overlay and/or apply a filter look. Adjustments: brightness -1..1 (0 = original), contrast and saturation 0..3 (1 = original), temperature -1 (cool/blue)..1 (warm/orange), vignette 0..1. ' +
+      `Looks: ${FILTERS.filter((f) => f !== 'none').join(', ')}; filterIntensity 0-1 blends the look with the original. Only the fields you pass change; reset clears everything first.`,
+    input_schema: S({
+      clipId: s('Clip id (or give overlayId)'), overlayId: s('Overlay id'),
+      brightness: n('-1..1, 0 = original (0.1 = a little brighter)'), contrast: n('0..3, 1 = original'), saturation: n('0..3, 1 = original, 0 = grayscale'),
+      temperature: n('-1 cool .. 1 warm, 0 = original'), vignette: n('0..1 dark corners'),
+      filter: s('Look preset (none removes)', { enum: FILTERS }), filterIntensity: n('0..1 (default 1)'), reset: b('Clear all color settings first'),
+    }),
+  },
+  {
+    name: 'add_effect',
+    description: `Add a video effect to a main-track clip for a time range: ${EFFECTS.join(', ')}. ` +
+      'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative. ' +
+      'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. Export and look_at_timeline only (not shown in the browser preview).',
+    input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse: cycles per second (shake default 8, zoom_pulse default 2)') }, ['clipId', 'type']),
+  },
+  { name: 'delete_effect', description: 'Remove an effect (ids are listed with each clip in get_timeline).', input_schema: S({ effectId: s('Effect id') }, ['effectId']) },
+  {
+    name: 'set_keyframes',
+    description: `Animate a property of a clip or overlay over time with keyframes (replaces that property's keyframes; [] removes them). ` +
+      `Clip properties: ${Object.keys(KEYFRAME_PROPS.clip).join(', ')} (scale/x/y = zoom and position inside the canvas, e.g. a slow push-in or a reframe that follows the subject). ` +
+      `Overlay properties: ${Object.keys(KEYFRAME_PROPS.overlay).join(', ')} (x/y/scale need fit free). ` +
+      'Each keyframe is {t, value} with t in TIMELINE seconds within the item; between keyframes values ease (or move linearly), before the first and after the last they hold. While keyframed, the static value of that property is ignored.',
+    input_schema: S({
+      clipId: s('Clip id (or give overlayId)'), overlayId: s('Overlay id'),
+      property: s('Property to animate', { enum: [...new Set([...Object.keys(KEYFRAME_PROPS.clip), ...Object.keys(KEYFRAME_PROPS.overlay)])] }),
+      keyframes: { type: 'array', description: 'e.g. [{t:2,value:1},{t:4,value:1.3}]', items: { type: 'object', properties: { t: n('Timeline seconds'), value: n('Value at that time') }, required: ['t', 'value'] } },
+      easing: s('ease (default, smooth) or linear', { enum: ['ease', 'linear'] }),
+    }, ['property', 'keyframes']),
   },
   { name: 'set_transition', description: `Set the transition INTO a clip from the previous clip (not allowed on the first clip). Use type "none" to remove. Clips overlap by the duration.`, input_schema: S({ clipId: s('Clip id (clip #2 or later)'), type: s('Transition type', { enum: TRANSITIONS }), duration: n('Seconds, 0.1-5 (default 0.5)') }, ['clipId', 'type']) },
 
@@ -116,20 +154,35 @@ export const TOOLS = [
   { name: 'update_captions', description: 'Restyle captions, or fix one line (lineId + text and/or start/end). Changing maxWords regroups all lines.', input_schema: S({ lineId: s('Caption line id (from get_timeline)'), text: s('Corrected words for that line'), start: n('Line start s'), end: n('Line end s'), ...captionStyleProps }) },
   { name: 'delete_captions', description: 'Delete one caption line (lineId) or all captions.', input_schema: S({ lineId: s('Optional line id') }) },
 
-  { name: 'add_music', description: 'Add an audio item: music (default), sfx (sound effect) or voice (voiceover). Mixed under the clip audio. Each role gets its own track by default (music 1, voice 2, sfx 3).', input_schema: S({ assetId: s('Asset id (audio, or a video with audio)'), role: s('music, sfx or voice', { enum: AUDIO_ROLES }), track: n('Audio track 1-20'), start: n('Timeline start seconds (default 0)'), in: n('Source start s'), out: n('Source end s'), volume: n('0-2 (music default 0.6, others 1)'), fadeIn: n('Seconds'), fadeOut: n('Seconds (music default 1)') }, ['assetId']) },
-  { name: 'update_music', description: 'Change an audio item (music, sfx or voice).', input_schema: S({ musicId: s('Audio item id'), role: s('Role', { enum: AUDIO_ROLES }), track: n('Track'), start: n('s'), in: n('s'), out: n('s'), volume: n('0-2'), fadeIn: n('s'), fadeOut: n('s') }, ['musicId']) },
+  { name: 'add_music', description: 'Add an audio item: music (default), sfx (sound effect) or voice (voiceover). Mixed under the clip audio. Each role gets its own track by default (music 1, voice 2, sfx 3).', input_schema: S({ assetId: s('Asset id (audio, or a video with audio)'), role: s('music, sfx or voice', { enum: AUDIO_ROLES }), track: n('Audio track 1-20'), start: n('Timeline start seconds (default 0)'), in: n('Source start s'), out: n('Source end s'), volume: n('0-2 (music default 0.6, others 1)'), fadeIn: n('Seconds'), fadeOut: n('Seconds (music default 1)'), duck: n('0-1: automatically lower this audio while someone speaks (clip audio and voice items). 0 = off, 0.6 = typical') }, ['assetId']) },
+  { name: 'update_music', description: 'Change an audio item (music, sfx or voice). duck 0-1 lowers it under speech (0 = off; export only, not in the browser preview).', input_schema: S({ musicId: s('Audio item id'), role: s('Role', { enum: AUDIO_ROLES }), track: n('Track'), start: n('s'), in: n('s'), out: n('s'), volume: n('0-2'), fadeIn: n('s'), fadeOut: n('s'), duck: n('0-1 ducking under speech, 0 = off') }, ['musicId']) },
+  { name: 'analyze_audio', description: 'Analyse an audio or video asset: tempo (BPM) and beat times, loudness, and silences, all in SOURCE seconds. Use it to plan cuts on the beat, find quiet gaps, or pick a music section. Cached per file.', input_schema: S({ assetId: s('Asset id (or give musicId to analyse what an audio item uses)'), musicId: s('Audio item id: limits the result to the part it plays'), from: n('Source seconds'), to: n('Source seconds'), force: b('Re-run even if cached') }) },
+  { name: 'mark_beats', description: 'Detect the beats of an audio item (music) and put them on the timeline as beat markers (replaces old beat markers). Then fit_clips_to_beats cuts on them, or use the times for effects/text.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
+  { name: 'fit_clips_to_beats', description: 'Cut to the beat: trims each main-track clip\'s out point so every cut (and the end) lands on a beat marker. every = beats per clip (1 = cut on every beat, 2 = every other, 4 = once per bar). Clips whose source is too short are kept and reported. Needs beat markers (mark_beats).', input_schema: S({ every: n('Beats per clip (default 1)'), skipBeats: n('Ignore this many beat markers at the start (default 0)') }) },
+  { name: 'add_markers', description: 'Add timeline markers (notes or beats) at timeline seconds.', input_schema: S({ times: { type: 'array', items: { type: 'number' }, description: 'Timeline seconds' }, kind: s('note (default) or beat', { enum: ['note', 'beat'] }), label: s('Optional label'), replace: b('Remove existing markers of this kind first') }, ['times']) },
+  { name: 'delete_markers', description: 'Delete markers: by ids, by kind, or all.', input_schema: S({ kind: s('Only this kind', { enum: ['note', 'beat'] }), markerIds: { type: 'array', items: { type: 'string' }, description: 'Marker ids' } }) },
   { name: 'delete_music', description: 'Remove an audio item.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
   { name: 'set_canvas', description: 'Change output format.', input_schema: S({ aspect: s('Aspect ratio', { enum: Object.keys(ASPECTS) }), background: s('Hex background color for letterboxing'), fps: n('Frames per second') }) },
   { name: 'clear_timeline', description: 'Remove all clips, overlays, texts, captions and audio (keeps the media library). Only when the user clearly asks to start over.', input_schema: S({}) },
   { name: 'undo', description: 'Undo the last edit.', input_schema: S({}) },
   { name: 'redo', description: 'Redo the last undone edit.', input_schema: S({}) },
-  { name: 'export_video', description: 'Render the timeline to an MP4 file with ffmpeg. With wait=true it returns when the file is ready (with its path); otherwise it returns a job id for export_status.', input_schema: S({ quality: s('draft (fast, half resolution) or final', { enum: ['draft', 'final'] }), wait: b('Wait until done (up to 10 min)') }) },
+  {
+    name: 'export_video',
+    description: 'Render the timeline to an MP4 file with ffmpeg. With wait=true it returns when the file is ready (with its path); otherwise it returns a job id for export_status. ' +
+      'Defaults: canvas size and fps, CPU x264. resolution sets the short side (e.g. 720p for a quick share, 2160p for 4K); encoder gpu uses NVIDIA/Intel/AMD hardware encoding (much faster), auto uses it when available.',
+    input_schema: S({
+      quality: s('draft (fast, half resolution) or final', { enum: ['draft', 'final'] }), wait: b('Wait until done (up to 10 min)'),
+      resolution: s('Short side of the output (overrides draft scaling)', { enum: Object.keys(RESOLUTIONS) }), fps: n('Output frames per second (default: canvas fps)'),
+      bitrate: n('Video bitrate in Mbps (default: constant quality)'), encoder: s('cpu (default), gpu or auto', { enum: ['cpu', 'gpu', 'auto'] }),
+    }),
+  },
   { name: 'export_status', description: 'Check an export or other job.', input_schema: S({ jobId: s('Job id') }, ['jobId']) },
+  { name: 'create_proxies', description: 'Make small preview copies (720p H.264) of video files the browser cannot play smoothly (4K, HEVC, ProRes...). Imports do this automatically; use it for older imports. Export always uses the original files.', input_schema: S({ assetIds: { type: 'array', items: { type: 'string' }, description: 'Default: every video that needs one' }, force: b('Also make proxies for videos that do not need one') }) },
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status']);
-const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions']);
+const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio']);
+const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
   destructiveHint: DESTRUCTIVE.has(name),
@@ -143,7 +196,7 @@ const imageBlocks = (title, frames, label) => [{ type: 'text', text: title }, ..
   { type: 'text', text: label(f) },
   { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.data } },
 ])];
-const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.file ? ` file: ${j.path} (URL /exports/${j.file})` : ''}`;
+const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}`;
 
 // Returns { content: string | Array<content block>, isError?: boolean }
 export async function executeTool(name, input = {}, source = 'claude') {
@@ -235,8 +288,51 @@ export async function executeTool(name, input = {}, source = 'claude') {
 
       case 'undo': return { content: store.undo(source) };
       case 'redo': return { content: store.redo(source) };
+      case 'analyze_audio': {
+        const p = store.getProject();
+        const m = input.musicId ? p.music.find((x) => x.id === input.musicId) : null;
+        if (input.musicId && !m) return { content: `No audio item ${input.musicId}`, isError: true };
+        const a = p.assets[m ? m.assetId : input.assetId];
+        if (!a) return { content: `No asset ${input.assetId}. Give assetId or musicId.`, isError: true };
+        const r = await analyzeAudio(a, { force: !!input.force });
+        const from = input.from !== undefined ? Number(input.from) : m ? m.in : 0;
+        const to = input.to !== undefined ? Number(input.to) : m ? m.out : Infinity;
+        return { content: analysisText(a, r, { from, to }) + (m ? `\n(${m.id} plays source ${m.in}-${m.out}s from timeline ${m.start}s: timeline = ${m.start} + (source - ${m.in}))` : '') };
+      }
+      case 'mark_beats': {
+        const p = store.getProject();
+        const m = p.music.find((x) => x.id === input.musicId);
+        if (!m) return { content: `No audio item ${input.musicId}. Audio items: ${p.music.map((x) => x.id).join(', ') || 'none'}`, isError: true };
+        const r = await analyzeAudio(p.assets[m.assetId]);
+        if (!r.bpm) return { content: `No steady beat found in "${p.assets[m.assetId].name}".`, isError: true };
+        const times = r.beats.filter((b) => b >= m.in && b <= m.out).map((b) => Math.round((m.start + b - m.in) * 1000) / 1000);
+        if (!times.length) return { content: `No beats inside the part ${m.id} plays (${m.in}-${m.out}s).`, isError: true };
+        store.apply('add_markers', { times, kind: 'beat', replace: true }, source);
+        return { content: `Marked ${times.length} beats (${r.bpm} BPM, confidence ${r.confidence}) at timeline ${times[0]}s … ${times[times.length - 1]}s. Next: fit_clips_to_beats, or use the marker times for effects and text.` };
+      }
+      case 'create_proxies': {
+        const p = store.getProject();
+        const ids = Array.isArray(input.assetIds) && input.assetIds.length ? input.assetIds : Object.keys(p.assets);
+        const started = [], skipped = [];
+        for (const id of ids) {
+          const a = p.assets[id];
+          if (!a || a.type !== 'video') { if (input.assetIds) skipped.push(`${id}: not a video`); continue; }
+          const meta = a.codec ? a : { ...a, ...(await probe(path.join(store.MEDIA_DIR, a.file))) };
+          if (!input.force && !needsProxy(meta)) { if (input.assetIds) skipped.push(`${a.name}: plays fine without one`); continue; }
+          if (hasProxy(a) && !input.force) { skipped.push(`${a.name}: already has one`); continue; }
+          const j = startProxy(meta);
+          started.push(`${a.name} (job ${j.id})`);
+        }
+        return { content: `${started.length ? `Making proxies: ${started.join(', ')}. The preview switches to them when done.` : 'No proxies needed.'}${skipped.length ? `\nSkipped: ${skipped.join('; ')}` : ''}` };
+      }
       case 'export_video': {
-        let job = startExport(store.getProject(), input.quality || 'final');
+        if (input.resolution !== undefined && !RESOLUTIONS[input.resolution]) return { content: `resolution must be one of: ${Object.keys(RESOLUTIONS).join(', ')}`, isError: true };
+        const fps = input.fps === undefined ? undefined : Number(input.fps);
+        if (fps !== undefined && !(fps >= 10 && fps <= 120)) return { content: 'fps must be between 10 and 120', isError: true };
+        const bitrate = input.bitrate === undefined ? undefined : Number(input.bitrate);
+        if (bitrate !== undefined && !(bitrate >= 0.5 && bitrate <= 200)) return { content: 'bitrate must be between 0.5 and 200 Mbps', isError: true };
+        if (input.encoder !== undefined && !['cpu', 'gpu', 'auto'].includes(input.encoder)) return { content: 'encoder must be cpu, gpu or auto', isError: true };
+        let job = startExport(store.getProject(), { quality: input.quality || 'final', resolution: input.resolution, fps, bitrate, encoder: input.encoder || 'cpu' });
         if (job.status === 'error') return { content: `Export failed: ${job.error}`, isError: true };
         if (!input.wait) return { content: `Export started, job ${job.id}. Output: ${job.path} (URL /exports/${job.file})` };
         job = await waitJob(job.id, 600000);

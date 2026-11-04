@@ -49,6 +49,119 @@ const findSel = () => sel && (sel.kind === 'clip' ? L.clips.find((c) => c.id ===
 const ovDur = (o) => (o.out - o.in) / (o.speed || 1);
 function toast(msg) { addMsg('error', String(msg)); }
 
+// ---------- Preview helpers (browser approximations of what ffmpeg renders) ----------
+const FILTERS = ['none', 'bw', 'sepia', 'vintage', 'warm', 'cool', 'vivid', 'cinematic', 'matte', 'noir', 'dramatic'];
+const CLIP_ANIMS = ['none', 'fade', 'zoom_in', 'zoom_out', 'slide_left', 'slide_right', 'slide_up', 'slide_down'];
+const proxied = new Set(); // media files whose proxy finished during this session
+// Videos play through /preview/, which serves the 720p proxy when there is one.
+const mediaSrc = (a) => (a.type === 'video' ? `/preview/${a.file}${proxied.has(a.file) ? '?proxy' : ''}` : `/media/${a.file}`);
+const ease = (p) => p * p * (3 - 2 * p);
+const clamp01 = (x) => Math.min(1, Math.max(0, x));
+// Same as kfAt in src/model.js.
+function kfAt(tr, t) {
+  const ps = tr.points;
+  if (t <= ps[0].t) return ps[0].v;
+  for (let i = 1; i < ps.length; i++) {
+    if (t <= ps[i].t) { const a = ps[i - 1], b = ps[i]; let k = (t - a.t) / (b.t - a.t); if (tr.easing !== 'linear') k = ease(k); return a.v + (b.v - a.v) * k; }
+  }
+  return ps[ps.length - 1].v;
+}
+const kfVal = (item, prop, lt, fallback) => (item.keyframes?.[prop] ? kfAt(item.keyframes[prop], lt) : fallback);
+// CSS versions of the looks in src/render.js LOOKS: [function, value, identity], scaled by filterIntensity.
+const LOOK_CSS = {
+  bw: [['grayscale', 1, 0]], sepia: [['sepia', 1, 0]],
+  vintage: [['sepia', 0.35, 0], ['contrast', 0.9, 1], ['brightness', 1.05, 1], ['saturate', 0.85, 1]],
+  warm: [['sepia', 0.2, 0], ['saturate', 1.15, 1], ['hue-rotate', -8, 0]],
+  cool: [['hue-rotate', 12, 0], ['saturate', 1.05, 1], ['brightness', 1.02, 1]],
+  vivid: [['saturate', 1.45, 1], ['contrast', 1.08, 1]],
+  cinematic: [['contrast', 1.12, 1], ['saturate', 0.9, 1], ['hue-rotate', -5, 0]],
+  matte: [['contrast', 0.8, 1], ['brightness', 1.05, 1], ['saturate', 0.85, 1]],
+  noir: [['grayscale', 1, 0], ['contrast', 1.4, 1]],
+  dramatic: [['contrast', 1.3, 1], ['saturate', 0.75, 1], ['brightness', 0.92, 1]],
+};
+function colorCss(c) {
+  if (!c) return '';
+  const f = [];
+  if (c.brightness) f.push(`brightness(${1 + c.brightness * 0.8})`);
+  if ((c.contrast ?? 1) !== 1) f.push(`contrast(${c.contrast})`);
+  if ((c.saturation ?? 1) !== 1) f.push(`saturate(${c.saturation})`);
+  if (c.temperature) f.push(c.temperature > 0 ? `sepia(${c.temperature * 0.35})` : `hue-rotate(${-c.temperature * 15}deg)`);
+  const I = c.filterIntensity ?? 1;
+  for (const [fn, v, id] of LOOK_CSS[c.filter] || []) { const x = id + (v - id) * I; f.push(fn === 'hue-rotate' ? `${fn}(${x}deg)` : `${fn}(${x})`); }
+  return f.join(' ');
+}
+// Clip in/out animation at clip-local time lt: opacity, offset (fractions of the canvas) and scale.
+function clipAnim(c, lt) {
+  let op = 1, tx = 0, ty = 0, s = 1;
+  const dur = c.duration;
+  if (c.animIn) {
+    const e = ease(clamp01(lt / Math.min(c.animIn.duration, dur / 2)));
+    ({ fade: () => { op *= e; }, zoom_in: () => { s *= 0.6 + 0.4 * e; }, zoom_out: () => { s *= 1.4 - 0.4 * e; }, slide_left: () => { tx += 1 - e; },
+      slide_right: () => { tx -= 1 - e; }, slide_up: () => { ty += 1 - e; }, slide_down: () => { ty -= 1 - e; } })[c.animIn.type]?.();
+  }
+  if (c.animOut) {
+    const D = Math.min(c.animOut.duration, dur / 2), e = ease(clamp01((lt - (dur - D)) / D));
+    ({ fade: () => { op *= 1 - e; }, zoom_in: () => { s *= 1 + 0.4 * e; }, zoom_out: () => { s *= 1 - 0.4 * e; }, slide_left: () => { tx -= e; },
+      slide_right: () => { tx += e; }, slide_up: () => { ty -= e; }, slide_down: () => { ty += e; } })[c.animOut.type]?.();
+  }
+  return { op, tx, ty, s };
+}
+// CSS for the incoming and outgoing layer at transition progress k (0..1), mirroring ffmpeg xfade.
+function transitionCss(type, k) {
+  const pc = (v) => `${(v * 100).toFixed(2)}%`;
+  const r = { in: {}, out: {}, swap: false };
+  switch (type) {
+    case 'wipeleft': case 'smoothleft': r.in.clipPath = `inset(0 0 0 ${pc(1 - k)})`; break;
+    case 'wiperight': case 'smoothright': r.in.clipPath = `inset(0 ${pc(1 - k)} 0 0)`; break;
+    case 'wipeup': r.in.clipPath = `inset(${pc(1 - k)} 0 0 0)`; break;
+    case 'wipedown': r.in.clipPath = `inset(0 0 ${pc(1 - k)} 0)`; break;
+    case 'slideleft': r.in.transform = `translateX(${pc(1 - k)})`; r.out.transform = `translateX(${pc(-k)})`; break;
+    case 'slideright': r.in.transform = `translateX(${pc(k - 1)})`; r.out.transform = `translateX(${pc(k)})`; break;
+    case 'slideup': r.in.transform = `translateY(${pc(1 - k)})`; r.out.transform = `translateY(${pc(-k)})`; break;
+    case 'slidedown': r.in.transform = `translateY(${pc(k - 1)})`; r.out.transform = `translateY(${pc(k)})`; break;
+    case 'circleopen': r.in.clipPath = `circle(${pc(k)} at 50% 50%)`; break;
+    case 'circleclose': r.out.clipPath = `circle(${pc(1 - k)} at 50% 50%)`; r.swap = true; break;
+    case 'radial': r.in.maskImage = r.in.webkitMaskImage = `conic-gradient(#000 ${k * 360}deg, transparent 0)`; break;
+    case 'zoomin': r.out.transform = `scale(${1 + k})`; r.out.opacity = String(1 - k); r.in.opacity = String(k); break;
+    case 'fadeblack': r.out.filter = `brightness(${Math.max(0, 1 - 2 * k)})`; r.in.opacity = k < 0.5 ? '0' : '1'; r.in.filter = `brightness(${Math.max(0, 2 * k - 1)})`; break;
+    case 'fadewhite': r.out.filter = `brightness(${1 + 6 * Math.min(1, 2 * k)})`; r.in.opacity = k < 0.5 ? '0' : '1'; r.in.filter = `brightness(${1 + 6 * Math.max(0, 2 - 2 * k)})`; break;
+    case 'hblur': r.in.opacity = String(k); r.in.filter = `blur(${(1 - k) * 12}px)`; r.out.filter = `blur(${k * 12}px)`; break;
+    default: r.in.opacity = String(k); // fade, dissolve, pixelize, distance
+  }
+  return r;
+}
+const LAYER_RESET = { transform: '', clipPath: '', maskImage: '', webkitMaskImage: '', filter: '', opacity: '1' };
+
+// Waveform peaks per asset, fetched once: { pps, peaks } | 'loading' | 'none'.
+const waves = new Map();
+function wave(a) {
+  if (!waves.has(a.id)) {
+    waves.set(a.id, 'loading');
+    fetch(`/api/waveform/${a.id}`).then((r) => r.json())
+      .then((w) => { waves.set(a.id, w.peaks ? w : 'none'); if (w.peaks) renderTimeline(); })
+      .catch(() => waves.set(a.id, 'none'));
+  }
+  const w = waves.get(a.id);
+  return typeof w === 'object' ? w : null;
+}
+// Canvas drawing source seconds srcIn..srcOut of the asset's audio across widthPx.
+function waveCanvas(a, srcIn, srcOut, widthPx, heightPx, cls) {
+  const w = wave(a);
+  if (!w || srcOut <= srcIn) return null;
+  const cw = Math.max(1, Math.min(4000, Math.round(widthPx)));
+  const cv = h('canvas', { class: `wave ${cls}`, width: cw, height: heightPx });
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = 'rgba(255,255,255,.85)';
+  for (let x = 0; x < cw; x++) {
+    const i0 = Math.floor((srcIn + ((srcOut - srcIn) * x) / cw) * w.pps), i1 = Math.floor((srcIn + ((srcOut - srcIn) * (x + 1)) / cw) * w.pps);
+    let m = 0;
+    for (let i = i0; i <= i1 && i < w.peaks.length; i++) if (w.peaks[i] > m) m = w.peaks[i];
+    const hh = Math.max(1, (m / 100) * heightPx);
+    ctx.fillRect(x, (heightPx - hh) / 2, 1, hh);
+  }
+  return cv;
+}
+
 // ---------- Render ----------
 function renderAll() {
   $('#aspect').value = P.settings.aspect;
@@ -121,17 +234,28 @@ function renderFrame(force) {
   const active = L.clips.filter((c) => t >= c.start && t < c.end);
   if (!active.length && L.clips.length && t >= L.duration - 0.001) active.push(L.clips[L.clips.length - 1]);
   const used = new Set();
+  // During a transition the later clip is "in" and the earlier one "out".
+  const incoming = active.find((c) => c.overlap && t < c.start + c.overlap);
+  const tr = incoming && transitionCss(incoming.transition?.type, clamp01((t - incoming.start) / incoming.overlap));
   active.forEach((c, n) => {
     const ly = layers[c.index % 2];
     used.add(ly);
     const a = P.assets[c.assetId];
-    const src = `/media/${a.file}`;
+    const src = mediaSrc(a);
     const fit = c.fit || 'contain';
     ly.el.style.display = 'block';
-    ly.el.style.zIndex = String(n + 1);
     ly.el.style.background = P.settings.background;
-    // Preview approximates every transition as a crossfade.
-    ly.el.style.opacity = c.overlap && t < c.start + c.overlap ? String((t - c.start) / c.overlap) : '1';
+    const role = !tr ? null : c === incoming ? 'in' : 'out';
+    Object.assign(ly.el.style, LAYER_RESET, role ? tr[role] : {});
+    ly.el.style.zIndex = String(tr?.swap ? active.length - n : n + 1);
+    // Clip transform, keyframes and in/out animation on the media element; color as a CSS filter.
+    const T = c.transform || {}, lt = t - c.start, an = clipAnim(c, lt);
+    const s = kfVal(c, 'scale', lt, T.scale ?? 1) * an.s, x = kfVal(c, 'x', lt, T.x ?? 0.5) + an.tx, y = kfVal(c, 'y', lt, T.y ?? 0.5) + an.ty;
+    const mediaStyle = {
+      transform: `translate(${(x - 0.5) * 100}%, ${(y - 0.5) * 100}%) rotate(${T.rotate || 0}deg) scale(${s * (T.flipH ? -1 : 1)}, ${s * (T.flipV ? -1 : 1)})`,
+      opacity: String(an.op), filter: colorCss(c.color),
+    };
+    Object.assign(ly.video.style, mediaStyle); Object.assign(ly.img.style, mediaStyle);
     const fitCss = fit === 'cover' ? 'cover' : 'contain';
     if (a.type === 'image') {
       ly.video.style.display = 'none'; ly.video.pause();
@@ -143,7 +267,7 @@ function renderFrame(force) {
       ly.img.style.display = 'none';
       ly.video.style.display = 'block'; ly.video.style.objectFit = fitCss;
       const st = Math.min(c.in + (t - c.start) * c.speed, c.out - 0.01);
-      syncVideo(ly.video, src, st, c.speed, c.volume, playing);
+      syncVideo(ly.video, src, st, c.speed, kfVal(c, 'volume', lt, c.volume), playing);
       if (fit === 'blur') { ly.bg.style.display = 'block'; syncVideo(ly.bg, src, st, c.speed, null, playing); }
       else { ly.bg.style.display = 'none'; ly.bg.pause(); }
     }
@@ -197,17 +321,21 @@ function renderOverlays(t) {
     keep.add(o.id);
     const on = t >= o.start && t < o.start + ovDur(o);
     el.style.display = on ? 'block' : 'none';
-    const src = `/media/${a.file}`;
+    const src = mediaSrc(a);
+    const lt = t - o.start;
+    const vol = kfVal(o, 'volume', lt, o.volume);
     if (a.type === 'image') { if (el.getAttribute('src') !== src) el.src = src; }
-    else if (on) syncVideo(el, src, o.in + (t - o.start) * o.speed, o.speed, o.volume, playing);
+    else if (on) syncVideo(el, src, o.in + lt * o.speed, o.speed, vol, playing);
     else el.pause();
     if (!on) return;
     const full = o.fit === 'cover' || o.fit === 'contain';
+    const fade = o.animation === 'fade' ? clamp01(Math.min(lt, ovDur(o) - lt) / 0.3) : 1;
     Object.assign(el.style, {
-      zIndex: String(z + 1), opacity: String(o.opacity), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
-      left: full ? '50%' : `${o.x * 100}%`, top: full ? '50%' : `${o.y * 100}%`,
-      width: full ? '100%' : `${o.scale * 100}%`, height: full ? '100%' : 'auto',
-      transform: `translate(-50%, -50%) rotate(${o.rotate || 0}deg) scale(${o.flipH ? -1 : 1}, ${o.flipV ? -1 : 1})`,
+      zIndex: String(z + 1), opacity: String(kfVal(o, 'opacity', lt, o.opacity) * fade), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
+      left: full ? '50%' : `${kfVal(o, 'x', lt, o.x) * 100}%`, top: full ? '50%' : `${kfVal(o, 'y', lt, o.y) * 100}%`,
+      width: full ? '100%' : `${kfVal(o, 'scale', lt, o.scale) * 100}%`, height: full ? '100%' : 'auto',
+      transform: `translate(-50%, -50%) rotate(${kfVal(o, 'rotate', lt, o.rotate || 0)}deg) scale(${o.flipH ? -1 : 1}, ${o.flipV ? -1 : 1})`,
+      filter: colorCss(o.color),
     });
   });
   for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
@@ -307,7 +435,11 @@ function renderTimeline() {
   const step = pps > 120 ? 0.5 : pps > 50 ? 1 : pps > 20 ? 5 : 10;
   const ticks = [];
   for (let t = 0; t <= dur + 2; t += step) ticks.push(h('div', { class: 'tick', style: { left: `${t * pps}px` } }, t % 1 === 0 ? fmt(t).replace(/\.0$/, '') : ''));
-  $('#ruler').replaceChildren(...ticks);
+  const marks = (P.markers || []).map((m) => h('div', {
+    class: `mk ${m.kind}`, style: { left: `${m.t * pps}px` }, title: `${m.kind}${m.label ? ` "${m.label}"` : ''} at ${m.t.toFixed(2)}s`,
+    onpointerdown: (e) => { e.stopPropagation(); seek(m.t); },
+  }, m.kind === 'note' && m.label ? m.label : ''));
+  $('#ruler').replaceChildren(...ticks, ...marks);
 
   // video track
   const tv = $('#trackVideo');
@@ -317,7 +449,8 @@ function renderTimeline() {
       class: `block clip${sel?.id === c.id ? ' selected' : ''}`,
       style: { left: `${c.start * pps}px`, width: `${Math.max(4, c.duration * pps)}px`, backgroundImage: a.thumb ? `url(${a.thumb})` : 'none' },
       title: `${a.name} ${c.in.toFixed(2)}-${c.out.toFixed(2)}s`,
-    }, h('span', {}, `${c.speed !== 1 ? c.speed + 'x · ' : ''}${a.name}`),
+    }, h('span', {}, `${c.speed !== 1 ? c.speed + 'x · ' : ''}${c.color?.filter ? `◐ ` : ''}${c.effects?.length ? '✦ ' : ''}${a.name}`),
+    a.type === 'video' && a.hasAudio ? waveCanvas(a, c.in, c.out, c.duration * pps, 14, 'clipwave') : null,
     h('div', { class: 'handle l', onpointerdown: (e) => trimDrag(e, c, 'in') }),
     h('div', { class: 'handle r', onpointerdown: (e) => trimDrag(e, c, 'out') }));
     b.addEventListener('pointerdown', (e) => { if (!e.target.classList.contains('handle')) clipDrag(e, c); });
@@ -378,7 +511,11 @@ function renderTimeline() {
   const alh = 40 / Math.max(1, aTracks.length);
   tm.replaceChildren(...P.music.map((m) => {
     const icon = m.role === 'sfx' ? '✦' : m.role === 'voice' ? '🎙' : '♪';
-    const b = h('div', { class: `block music${sel?.id === m.id ? ' selected' : ''}`, style: { left: `${m.start * pps}px`, width: `${Math.max(4, (m.out - m.in) * pps)}px`, top: `${6 + aTracks.indexOf(m.track || 1) * alh}px`, height: `${alh - (aTracks.length > 1 ? 2 : 0)}px` } }, `${icon} ${P.assets[m.assetId]?.name}`);
+    const ma = P.assets[m.assetId];
+    const bh = alh - (aTracks.length > 1 ? 2 : 0);
+    const b = h('div', { class: `block music${sel?.id === m.id ? ' selected' : ''}`, style: { left: `${m.start * pps}px`, width: `${Math.max(4, (m.out - m.in) * pps)}px`, top: `${6 + aTracks.indexOf(m.track || 1) * alh}px`, height: `${bh}px` } },
+      ma ? waveCanvas(ma, m.in, m.out, (m.out - m.in) * pps, Math.max(8, Math.round(bh - 4)), 'musicwave') : null,
+      h('span', {}, `${icon} ${m.duck ? '⇣ ' : ''}${ma?.name}`));
     b.addEventListener('pointerdown', (e) => rangeDrag(e, 'music', m, 'move'));
     return b;
   }));
@@ -478,6 +615,21 @@ function select(kind, id, focusTransition) {
 function field(label, value, onchange, attrs = {}) {
   return h('label', {}, label, h('input', { type: 'number', step: '0.1', value, ...attrs, onchange: (e) => onchange(+e.target.value) }));
 }
+const lookSelect = (target, color) => h('label', {}, 'Look', h('select', { onchange: (e) => tool('set_color', { ...target, filter: e.target.value }) },
+  ...FILTERS.map((f) => h('option', { value: f, selected: (color?.filter || 'none') === f }, f))));
+function colorFields(target, color) {
+  const c = color || {};
+  return [
+    lookSelect(target, color),
+    c.filter ? field('Mix', c.filterIntensity ?? 1, (v) => tool('set_color', { ...target, filterIntensity: v }), { min: 0, max: 1, step: '0.1' }) : null,
+    field('Bright', c.brightness ?? 0, (v) => tool('set_color', { ...target, brightness: v }), { min: -1, max: 1, step: '0.05' }),
+    field('Contrast', c.contrast ?? 1, (v) => tool('set_color', { ...target, contrast: v }), { min: 0, max: 3, step: '0.05' }),
+    field('Sat', c.saturation ?? 1, (v) => tool('set_color', { ...target, saturation: v }), { min: 0, max: 3, step: '0.05' }),
+    field('Temp', c.temperature ?? 0, (v) => tool('set_color', { ...target, temperature: v }), { min: -1, max: 1, step: '0.1' }),
+  ];
+}
+const animSelect = (c, key, label) => h('label', {}, label, h('select', { onchange: (e) => tool('set_clip', { clipId: c.id, [key]: e.target.value }) },
+  ...CLIP_ANIMS.map((a) => h('option', { value: a, selected: (c[key]?.type || 'none') === a }, a))));
 function renderInspector() {
   const box = $('#inspector');
   const it = findSel();
@@ -496,6 +648,9 @@ function renderInspector() {
       c.index > 0 ? h('label', {}, 'Transition in', h('select', { id: 'insp-trans', onchange: (e) => tool('set_transition', { clipId: c.id, type: e.target.value, duration: c.transition?.duration || 0.5 }) },
         ...TRANSITIONS.map((t) => h('option', { value: t, selected: (c.transition?.type || 'none') === t }, t)))) : null,
       c.index > 0 && c.transition?.type !== 'none' ? field('Dur', c.transition.duration, (v) => tool('set_transition', { clipId: c.id, type: c.transition.type, duration: v }), { min: 0.1, max: 5 }) : null,
+      animSelect(c, 'animIn', 'Anim in'), animSelect(c, 'animOut', 'Anim out'),
+      ...colorFields({ clipId: c.id }, c.color),
+      c.effects?.length ? h('span', { class: 'note', title: 'Effects show in export and look_at_timeline' }, `✦ ${c.effects.map((e) => e.type).join(', ')}`) : null,
       h('button', { class: 'small', onclick: () => tool('split_clip', { at: time, clipId: c.id }) }, '✂ Split at playhead'),
       h('button', { class: 'small danger', onclick: () => tool('delete_clip', { clipId: c.id }) }, 'Delete'),
     ];
@@ -526,6 +681,8 @@ function renderInspector() {
       field('Width', o.scale, (v) => tool('set_overlay', { overlayId: o.id, scale: v }), { step: '0.05' }),
       field('Opacity', o.opacity, (v) => tool('set_overlay', { overlayId: o.id, opacity: v }), { min: 0, max: 1, step: '0.1' }),
       P.assets[o.assetId]?.type === 'video' ? field('Volume', o.volume, (v) => tool('set_overlay', { overlayId: o.id, volume: v }), { min: 0, max: 2, step: '0.1' }) : null,
+      lookSelect({ overlayId: o.id }, o.color),
+      o.keyframes ? h('span', { class: 'note' }, `◆ keyframes: ${Object.keys(o.keyframes).join(', ')}`) : null,
       h('button', { class: 'small danger', onclick: () => tool('delete_overlay', { overlayId: o.id }) }, 'Delete'),
     ];
   } else {
@@ -538,6 +695,8 @@ function renderInspector() {
       field('Volume', m.volume, (v) => tool('update_music', { musicId: m.id, volume: v }), { min: 0, max: 2, step: '0.05' }),
       field('Fade in', m.fadeIn, (v) => tool('update_music', { musicId: m.id, fadeIn: v })),
       field('Fade out', m.fadeOut, (v) => tool('update_music', { musicId: m.id, fadeOut: v })),
+      m.role !== 'voice' ? field('Duck', m.duck || 0, (v) => tool('update_music', { musicId: m.id, duck: v }), { min: 0, max: 1, step: '0.1', title: 'Lower under speech (export only)' }) : null,
+      h('button', { class: 'small', title: 'Detect beats and add beat markers', onclick: () => tool('mark_beats', { musicId: m.id }) }, '♩ Mark beats'),
       h('button', { class: 'small danger', onclick: () => tool('delete_music', { musicId: m.id }) }, 'Delete'),
     ];
   }
@@ -546,8 +705,13 @@ function renderInspector() {
 
 // ---------- Export ----------
 function renderJobs() {
+  // Finished proxies: reload those videos from the proxy.
+  let fresh = false;
+  for (const j of jobs) if (j.kind === 'proxy' && j.status === 'done' && !proxied.has(j.file)) { proxied.add(j.file); fresh = true; }
+  if (fresh && P) renderFrame(true);
+  const proxies = jobs.filter((j) => j.kind === 'proxy' && j.status === 'running');
   const recent = jobs.filter((j) => !j.kind || j.kind === 'export').slice(-3).reverse();
-  $('#jobs').replaceChildren(...recent.map((j) => j.status === 'running'
+  $('#jobs').replaceChildren(...proxies.map((j) => h('span', { title: `Making a smooth preview copy of ${j.name}` }, `Preparing preview ${Math.round(j.progress * 100)}%`)), ...recent.map((j) => j.status === 'running'
     ? h('span', {}, `Rendering ${j.quality}… ${Math.round(j.progress * 100)}%`)
     : j.status === 'done' ? h('a', { href: `/exports/${j.file}`, target: '_blank', title: j.file }, `▶ ${j.quality} ready`)
       : h('span', { style: { color: 'var(--danger)' }, title: j.error }, 'Render failed')));

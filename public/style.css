@@ -99,6 +99,14 @@ main { display: grid; grid-template-columns: 240px minmax(0, 1fr) 340px; min-hei
 .handle.l { left: 0; } .handle.r { right: 0; }
 #playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); pointer-events: none; z-index: 5; }
 #playhead::before { content: ""; position: absolute; top: 0; left: -5px; border: 6px solid transparent; border-top-color: var(--danger); }
+.wave { position: absolute; left: 0; width: 100%; pointer-events: none; }
+.wave.clipwave { bottom: 0; height: 14px; opacity: .55; }
+.wave.musicwave { top: 2px; height: calc(100% - 4px); opacity: .35; }
+.block.music span { position: relative; }
+.mk { position: absolute; top: 0; height: 100%; z-index: 2; cursor: pointer; }
+.mk.beat { width: 1px; background: var(--accent); opacity: .8; }
+.mk.note { border-left: 2px solid var(--textc); padding-left: 3px; font-size: 10px; color: var(--textc); white-space: nowrap; }
+.insp .note { color: var(--muted); font-size: 11px; }
 .drop-marker { position: absolute; top: 2px; bottom: 2px; width: 3px; background: var(--accent); z-index: 4; }
 
 #dropOverlay { position: fixed; inset: 0; background: rgba(25, 211, 197, .15); border: 3px dashed var(--accent); display: none; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; z-index: 100; pointer-events: none; }

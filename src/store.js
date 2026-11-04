@@ -10,8 +10,9 @@ export const PROJECTS_DIR = path.join(DATA_DIR, 'projects');
 export const TRASH_DIR = path.join(DATA_DIR, 'trash');
 export const ANALYSIS_DIR = path.join(DATA_DIR, 'analysis');
 export const FONTS_DIR = path.join(DATA_DIR, 'fonts');
+export const PROXY_DIR = path.join(DATA_DIR, 'proxies');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
-for (const d of [DATA_DIR, MEDIA_DIR, EXPORT_DIR, PROJECTS_DIR, TRASH_DIR, ANALYSIS_DIR, FONTS_DIR, path.join(DATA_DIR, 'thumbs')]) fs.mkdirSync(d, { recursive: true });
+for (const d of [DATA_DIR, MEDIA_DIR, EXPORT_DIR, PROJECTS_DIR, TRASH_DIR, ANALYSIS_DIR, FONTS_DIR, PROXY_DIR, path.join(DATA_DIR, 'thumbs')]) fs.mkdirSync(d, { recursive: true });
 
 const projectFile = (id) => path.join(PROJECTS_DIR, id, 'project.json');
 const projectIds = () => fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })

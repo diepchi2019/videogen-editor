@@ -18,6 +18,31 @@ export const OVERLAY_FITS = ['free', 'contain', 'cover'];
 export const OVERLAY_ANIMS = ['none', 'fade'];
 export const CAPTION_MODES = ['line', 'karaoke', 'word', 'single'];
 export const REGION_MODES = ['fill', 'patch'];
+export const CLIP_ANIMS = ['none', 'fade', 'zoom_in', 'zoom_out', 'slide_left', 'slide_right', 'slide_up', 'slide_down'];
+// Color filter presets (looks). render.js maps them to ffmpeg filters, public/app.js to CSS filters.
+export const FILTERS = ['none', 'bw', 'sepia', 'vintage', 'warm', 'cool', 'vivid', 'cinematic', 'matte', 'noir', 'dramatic'];
+export const EFFECTS = ['shake', 'zoom_pulse', 'glitch', 'rgb_split', 'flash', 'blur', 'vhs', 'light_leak', 'invert'];
+// Animatable properties and their value ranges.
+export const KEYFRAME_PROPS = {
+  clip: { scale: [0.1, 5], x: [-1, 2], y: [-1, 2], volume: [0, 2] },
+  overlay: { x: [-1, 2], y: [-1, 2], scale: [0.02, 4], opacity: [0, 1], rotate: [-720, 720], volume: [0, 2] },
+};
+const COLOR_KEYS = [['brightness', -1, 1, 0], ['contrast', 0, 3, 1], ['saturation', 0, 3, 1], ['temperature', -1, 1, 0], ['vignette', 0, 1, 0]];
+
+// Value of a keyframe track {easing, points:[{t,v}]} at local time t (points sorted by t).
+export function kfAt(track, t) {
+  const ps = track.points;
+  if (t <= ps[0].t) return ps[0].v;
+  for (let i = 1; i < ps.length; i++) {
+    if (t <= ps[i].t) {
+      const a = ps[i - 1], b = ps[i];
+      let k = (t - a.t) / (b.t - a.t);
+      if (track.easing !== 'linear') k = k * k * (3 - 2 * k);
+      return a.v + (b.v - a.v) * k;
+    }
+  }
+  return ps[ps.length - 1].v;
+}
 
 // Text style presets: values applied first, explicit input wins.
 export const TEXT_STYLES = {
@@ -58,6 +83,7 @@ export function emptyProject() {
     texts: [],
     music: [],
     captions: null,
+    markers: [],
   };
 }
 
@@ -66,7 +92,7 @@ export function migrate(p) {
   p.id ??= uid('proj');
   p.name ??= 'Untitled';
   p.assets ??= {};
-  for (const k of ['clips', 'overlays', 'texts', 'music']) p[k] ??= [];
+  for (const k of ['clips', 'overlays', 'texts', 'music', 'markers']) p[k] ??= [];
   p.captions ??= null;
   for (const m of p.music) { m.role ??= 'music'; m.track ??= 1; }
   p.version = 2;
@@ -154,6 +180,26 @@ function describeTransform(t) {
   if ((t.x ?? 0.5) !== 0.5 || (t.y ?? 0.5) !== 0.5) parts.push(`center (${t.x ?? 0.5},${t.y ?? 0.5})`);
   return parts.length ? `, ${parts.join(', ')}` : '';
 }
+function describeColor(c) {
+  if (!c) return '';
+  const parts = COLOR_KEYS.filter(([k, , , d]) => c[k] !== undefined && c[k] !== d).map(([k]) => `${k} ${c[k]}`);
+  if (c.filter) parts.push(`filter ${c.filter}${(c.filterIntensity ?? 1) !== 1 ? ` ${c.filterIntensity}` : ''}`);
+  return parts.length ? `, color: ${parts.join(' ')}` : '';
+}
+// Keyframe times are stored relative to the item; show them in timeline seconds.
+function describeKeyframes(item, start) {
+  if (!item.keyframes) return '';
+  return ', keyframes: ' + Object.entries(item.keyframes).map(([prop, tr]) =>
+    `${prop} ${tr.points.map((q) => `${fmtT(start + q.t)}s=${q.v}`).join(' ')}${tr.easing === 'linear' ? ' (linear)' : ''}`).join('; ');
+}
+function describeAnims(c) {
+  const a = [];
+  if (c.animIn) a.push(`anim in ${c.animIn.type} ${c.animIn.duration}s`);
+  if (c.animOut) a.push(`anim out ${c.animOut.type} ${c.animOut.duration}s`);
+  return a.length ? `, ${a.join(', ')}` : '';
+}
+const describeEffects = (c, start) => (c.effects?.length
+  ? `, effects: ${c.effects.map((e) => `${e.id} ${e.type} ${fmtT(start + e.from)}-${fmtT(start + e.to)}s intensity ${e.intensity}${e.type === 'zoom_pulse' || e.type === 'shake' ? ` rate ${e.rate}/s` : ''}`).join('; ')}` : '');
 
 // extras: { transcribed: Set<assetId> } (optional, filled in by the server)
 export function summarize(p, extras = {}) {
@@ -165,20 +211,29 @@ export function summarize(p, extras = {}) {
     `- #${c.index + 1} ${c.id}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
+    describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
     (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : ''));
   const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
     `- ${o.id} (track ${o.track}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
     `${o.opacity !== 1 ? `, opacity ${o.opacity}` : ''}${o.rotate ? `, rotate ${o.rotate}°` : ''}${o.crop ? `, crop x${o.crop.x} y${o.crop.y} w${o.crop.w} h${o.crop.h}` : ''}` +
-    `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}`);
+    `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}` +
+    describeColor(o.color) + describeKeyframes(o, o.start));
   const texts = p.texts.map((x) =>
     `- ${x.id}: "${x.text}" ${x.start.toFixed(2)}-${x.end.toFixed(2)}s at (${x.x},${x.y}) size ${x.size} color ${x.color}` +
     `${x.font ? ` font "${x.font}"` : ''}${x.style ? ` style ${x.style}` : ''}${x.box ? ' with box' : ''}` +
     `${x.outline ? ` outline ${x.outline}${x.outlineColor ? ' ' + x.outlineColor : ''}` : ''}${x.shadow ? ` shadow ${x.shadow}` : ''}` +
     `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}`);
   const music = p.music.map((m) =>
-    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s`);
+    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}`);
+  const markers = p.markers || [];
+  const byKind = {};
+  for (const mk of markers) (byKind[mk.kind] ||= []).push(mk);
+  const markerText = Object.entries(byKind).map(([kind, list]) => {
+    const shown = list.slice(0, extras.full ? Infinity : 24).map((mk) => `${fmtT(mk.t)}${mk.label ? ` "${mk.label}"` : ''}`).join(', ');
+    return `- ${list.length} ${kind} markers: ${shown}${list.length > 24 && !extras.full ? ', …' : ''}`;
+  }).join('\n');
   let captions = '(none)';
   if (p.captions?.lines?.length) {
     const st = p.captions.style;
@@ -197,6 +252,7 @@ export function summarize(p, extras = {}) {
     `Text overlays:\n${texts.join('\n') || '(none)'}`,
     `Captions:\n${captions}`,
     `Audio tracks (music, sound effects, voice):\n${music.join('\n') || '(none)'}`,
+    ...(markers.length ? [`Markers (timeline seconds):\n${markerText}`] : []),
   ].join('\n\n');
 }
 
@@ -307,6 +363,38 @@ function applyTransform(c, input) {
   if (Object.keys(t).length) c.transform = t; else delete c.transform;
 }
 
+// Divide clip-relative data (effects, keyframes, in/out animations) between the halves of a split at local time cut.
+function splitTimed(first, second, cut) {
+  if (first.effects) {
+    second.effects = first.effects.filter((e) => e.to > cut).map((e) => ({ ...e, from: r3(Math.max(0, e.from - cut)), to: r3(e.to - cut) }));
+    first.effects = first.effects.filter((e) => e.from < cut).map((e) => ({ ...e, to: r3(Math.min(e.to, cut)) }));
+    for (const c of [first, second]) if (!c.effects.length) delete c.effects;
+  }
+  if (first.keyframes) {
+    const k1 = {}, k2 = {};
+    for (const [prop, tr] of Object.entries(first.keyframes)) {
+      const mid = r3(kfAt(tr, cut));
+      k1[prop] = { ...tr, points: [...tr.points.filter((q) => q.t < cut), { t: r3(cut), v: mid }] };
+      k2[prop] = { ...tr, points: [{ t: 0, v: mid }, ...tr.points.filter((q) => q.t > cut).map((q) => ({ t: r3(q.t - cut), v: q.v }))] };
+    }
+    first.keyframes = k1; second.keyframes = k2;
+  }
+  delete first.animOut; delete second.animIn;
+}
+
+// clipId or overlayId -> the item plus its timeline start and duration.
+function timedTarget(p, { clipId, overlayId }) {
+  if (clipId) {
+    const i = findClip(p, clipId), lc = layout(p).clips[i];
+    return { kind: 'clip', item: p.clips[i], start: lc.start, dur: lc.duration };
+  }
+  if (overlayId) {
+    const o = p.overlays[findIn(p.overlays, overlayId, 'overlay')];
+    return { kind: 'overlay', item: o, start: o.start, dur: overlayDuration(o) };
+  }
+  return fail('Give clipId or overlayId');
+}
+
 const describeRegion = (r) =>
   `${r.id} ${r.mode} x${r.x} y${r.y} w${r.w} h${r.h} source ${fmtT(r.from)}-${fmtT(r.to)}s${r.mode === 'patch' ? ` from frame ${fmtT(r.patchAt)}s` : ''}`;
 
@@ -403,6 +491,7 @@ export const ops = {
     const srcT = r3(c.in + (t - lc.start) * c.speed);
     const second = { ...structuredClone(c), id: uid('clip'), in: srcT, transition: { type: 'none', duration: 0.5 } };
     // A zoom/pan restarts on each half; that is how CapCut behaves too.
+    splitTimed(c, second, t - lc.start);
     c.out = srcT;
     p.clips.splice(i + 1, 0, second);
     clampAll(p);
@@ -439,8 +528,15 @@ export const ops = {
     if (mo === 'none') delete c.motion;
     else if (mo) c.motion = { preset: mo, intensity: mi ?? c.motion?.intensity ?? 0.15 };
     else if (mi !== undefined) { if (!c.motion) fail('Set motion (e.g. zoom_in) before motionIntensity'); c.motion.intensity = mi; }
+    for (const [k, dk] of [['animIn', 'animInDuration'], ['animOut', 'animOutDuration']]) {
+      const ty = oneOf(input[k], CLIP_ANIMS, k);
+      const d = num(input[dk], dk, 0.1, 5);
+      if (ty === 'none') delete c[k];
+      else if (ty) c[k] = { type: ty, duration: r3(d ?? c[k]?.duration ?? 0.5) };
+      else if (d !== undefined) { if (!c[k]) fail(`Set ${k} (e.g. fade) before ${dk}`); c[k].duration = r3(d); }
+    }
     clampAll(p);
-    return `Updated ${c.id}: speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}`;
+    return `Updated ${c.id}: speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}${describeAnims(c)}`;
   },
 
   set_transition(p, { clipId, type, duration }) {
@@ -507,6 +603,128 @@ export const ops = {
       if (!clip.regions.length) delete clip.regions;
     }
     return `Deleted region ${regionId}${hits.length > 1 ? ` from ${hits.length} clips` : ''}`;
+  },
+
+  // Color adjust + filter look on a clip or overlay.
+  set_color(p, input) {
+    const { item } = timedTarget(p, input);
+    const c = bool(input.reset) ? {} : { ...(item.color || {}) };
+    for (const [k, min, max, def] of COLOR_KEYS) {
+      const v = num(input[k], k, min, max);
+      if (v !== undefined) c[k] = r3(v);
+      if (c[k] === def) delete c[k];
+    }
+    const f = oneOf(input.filter, FILTERS, 'filter');
+    if (f === 'none') { delete c.filter; delete c.filterIntensity; } else if (f) c.filter = f;
+    const fi = num(input.filterIntensity, 'filterIntensity', 0, 1);
+    if (fi !== undefined) { if (!c.filter) fail('Set filter (e.g. vintage) before filterIntensity'); c.filterIntensity = r3(fi); }
+    if (c.filterIntensity === 1) delete c.filterIntensity;
+    if (Object.keys(c).length) item.color = c; else delete item.color;
+    return `Color of ${item.id}: ${describeColor(item.color).replace(/^, color: /, '') || 'original'}`;
+  },
+
+  add_effect(p, input) {
+    if (!input.clipId) fail('clipId is required (effects go on main-track clips)');
+    const { item: c, start, dur } = timedTarget(p, { clipId: input.clipId });
+    const type = oneOf(input.type, EFFECTS, 'type') ?? fail(`type is required: ${EFFECTS.join(', ')}`);
+    const s = num(input.start, 'start', 0) ?? start;
+    const e = num(input.end, 'end', 0) ?? start + dur;
+    const from = Math.max(0, s - start), to = Math.min(dur, e - start);
+    if (to - from < 0.05) fail(`start/end must overlap the clip (timeline ${fmtT(start)}-${fmtT(start + dur)}s) by at least 0.05s`);
+    const fx = { id: uid('fx'), type, from: r3(from), to: r3(to), intensity: r3(num(input.intensity, 'intensity', 0, 1) ?? 0.5) };
+    if (type === 'shake' || type === 'zoom_pulse') fx.rate = r3(num(input.rate, 'rate', 0.1, 20) ?? (type === 'shake' ? 8 : 2));
+    (c.effects ||= []).push(fx);
+    return `Added effect ${fx.id} ${type} on ${c.id} at ${fmtT(start + fx.from)}-${fmtT(start + fx.to)}s (intensity ${fx.intensity})`;
+  },
+
+  delete_effect(p, { effectId }) {
+    let n = 0;
+    for (const c of p.clips) {
+      const before = c.effects?.length || 0;
+      if (!before) continue;
+      c.effects = c.effects.filter((e) => e.id !== effectId);
+      n += before - c.effects.length;
+      if (!c.effects.length) delete c.effects;
+    }
+    if (!n) fail(`No effect ${effectId}. Effects: ${p.clips.flatMap((c) => (c.effects || []).map((e) => e.id)).join(', ') || 'none'}`);
+    return `Deleted effect ${effectId}`;
+  },
+
+  // Animate a property over time. keyframes: [{t (timeline seconds), value}]; [] removes the animation.
+  set_keyframes(p, input) {
+    const { kind, item, start, dur } = timedTarget(p, input);
+    const ranges = KEYFRAME_PROPS[kind];
+    const prop = input.property;
+    if (!ranges[prop]) fail(`property must be one of: ${Object.keys(ranges).join(', ')} (for ${kind}s)`);
+    const kfs = input.keyframes;
+    if (!Array.isArray(kfs)) fail('keyframes must be an array of {t, value} with t in timeline seconds; [] removes the animation');
+    if (!kfs.length) {
+      if (item.keyframes) { delete item.keyframes[prop]; if (!Object.keys(item.keyframes).length) delete item.keyframes; }
+      return `Removed ${prop} keyframes from ${item.id}`;
+    }
+    const byT = new Map();
+    kfs.forEach((k, i) => {
+      const t = num(k?.t ?? k?.time, `keyframes[${i}].t`, start - 0.01, start + dur + 0.01);
+      if (t === undefined) fail(`keyframes[${i}].t is required: timeline seconds within ${fmtT(start)}-${fmtT(start + dur)}s`);
+      const v = num(k.value ?? k.v, `keyframes[${i}].value`, ...ranges[prop]);
+      if (v === undefined) fail(`keyframes[${i}].value is required`);
+      byT.set(r3(Math.min(dur, Math.max(0, t - start))), r3(v));
+    });
+    const points = [...byT].map(([t, v]) => ({ t, v })).sort((a, b) => a.t - b.t);
+    const easing = oneOf(input.easing, ['ease', 'linear'], 'easing') ?? 'ease';
+    (item.keyframes ||= {})[prop] = { easing, points };
+    const note = kind === 'overlay' && ['x', 'y', 'scale'].includes(prop) && item.fit !== 'free' ? ` Note: ${prop} only applies with fit free.` : '';
+    return `Keyframed ${prop} of ${item.id}: ${points.map((q) => `${fmtT(start + q.t)}s=${q.v}`).join(', ')} (${easing}).${note}`;
+  },
+
+  add_markers(p, { times, kind, label, replace }) {
+    if (!Array.isArray(times) || !times.length) fail('times must be a non-empty array of timeline seconds');
+    const k = oneOf(kind, ['beat', 'note'], 'kind') ?? 'note';
+    p.markers ||= [];
+    if (bool(replace)) p.markers = p.markers.filter((m) => m.kind !== k);
+    for (const [i, t] of times.entries()) {
+      const mk = { id: uid('mk'), t: r3(num(t, `times[${i}]`, 0)), kind: k };
+      if (label) mk.label = String(label).slice(0, 60);
+      p.markers.push(mk);
+    }
+    p.markers.sort((a, b) => a.t - b.t);
+    return `Added ${times.length} ${k} marker(s)${bool(replace) ? ` (replaced old ${k} markers)` : ''}`;
+  },
+
+  delete_markers(p, { kind, markerIds }) {
+    const before = (p.markers || []).length;
+    const ids = Array.isArray(markerIds) ? new Set(markerIds) : null;
+    p.markers = (p.markers || []).filter((m) => !(ids ? ids.has(m.id) : !kind || m.kind === kind));
+    return `Deleted ${before - p.markers.length} marker(s)`;
+  },
+
+  // Trim clip out-points so every cut lands on a beat marker (every N beats).
+  fit_clips_to_beats(p, input) {
+    const every = Math.round(num(input.every, 'every', 1, 64) ?? 1);
+    const skip = Math.round(num(input.skipBeats, 'skipBeats', 0, 1000) ?? 0);
+    const beats = (p.markers || []).filter((m) => m.kind === 'beat').map((m) => m.t).sort((a, b) => a - b);
+    if (beats.length < 2) fail('Need beat markers. Run mark_beats on the music first (or add_markers with kind beat).');
+    if (!p.clips.length) fail('The video track is empty');
+    const grid = beats.filter((_, k) => k >= skip && (k - skip) % every === 0);
+    let notes = [], cut = 0;
+    const pass = () => {
+      notes = []; cut = 0;
+      let s = 0;
+      p.clips.forEach((c, i) => {
+        const next = p.clips[i + 1];
+        const ov = next?.transition && next.transition.type !== 'none' ? next.transition.duration : 0;
+        const a = p.assets[c.assetId];
+        const maxLen = a.type === 'image' ? 3600 : (a.duration - c.in) / (c.speed || 1);
+        const g = grid.find((x) => x > s + 0.2);
+        if (g === undefined) { notes.push(`#${i + 1} kept (no beat left after ${fmtT(s)}s)`); s += clipDuration(c) - ov; return; }
+        if (g - s + ov > maxLen + 1e-6) { notes.push(`#${i + 1} kept: its source is too short to reach the beat at ${fmtT(g)}s`); s += clipDuration(c) - ov; return; }
+        c.out = r3(c.in + (g - s + ov) * (c.speed || 1));
+        s = g; cut++;
+      });
+    };
+    pass(); clampAll(p); pass(); clampAll(p); // second pass: transitions may have been clamped
+    const L = layout(p);
+    return `Cut ${cut} of ${p.clips.length} clips on the beat (every ${every} beat${every > 1 ? 's' : ''}); video is now ${fmtT(L.duration)}s.${notes.length ? ` ${notes.join('; ')}.` : ''}`;
   },
 
   add_overlay(p, input) {
@@ -617,7 +835,7 @@ export const ops = {
     return 'Deleted all captions';
   },
 
-  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut, role, track }) {
+  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut, role, track, duck }) {
     const a = asset(p, assetId, ['audio', 'video']);
     if (a.type === 'video' && !a.hasAudio) fail('That video has no audio track');
     const rl = oneOf(role, AUDIO_ROLES, 'role') ?? 'music';
@@ -631,14 +849,16 @@ export const ops = {
       volume: num(volume, 'volume', 0, 2) ?? (rl === 'music' ? 0.6 : 1),
       fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? (rl === 'music' ? 1 : 0),
     };
+    const dk = num(duck, 'duck', 0, 1); if (dk) m.duck = r3(dk);
     p.music.push(m);
     return `Added ${rl} ${m.id} from "${a.name}" at ${m.start}s on audio track ${m.track}`;
   },
 
   update_music(p, { musicId, ...rest }) {
     const m = p.music[findIn(p.music, musicId, 'audio item')];
-    const lim = { start: [0, 1e6], in: [0, 1e6], out: [0, 1e6], volume: [0, 2], fadeIn: [0, 30], fadeOut: [0, 30] };
+    const lim = { start: [0, 1e6], in: [0, 1e6], out: [0, 1e6], volume: [0, 2], fadeIn: [0, 30], fadeOut: [0, 30], duck: [0, 1] };
     for (const k of Object.keys(lim)) { const v = num(rest[k], k, ...lim[k]); if (v !== undefined) m[k] = r3(v); }
+    if (m.duck === 0) delete m.duck;
     const rl = oneOf(rest.role, AUDIO_ROLES, 'role'); if (rl) m.role = rl;
     const tr = num(rest.track, 'track', 1, 20); if (tr !== undefined) m.track = Math.round(tr);
     if (m.out <= m.in) fail('out must be greater than in');
@@ -668,14 +888,14 @@ export const ops = {
   },
 
   clear_timeline(p) {
-    p.clips = []; p.texts = []; p.music = []; p.overlays = []; p.captions = null;
+    p.clips = []; p.texts = []; p.music = []; p.overlays = []; p.captions = null; p.markers = [];
     return 'Cleared timeline (media library kept)';
   },
 };
 
 // Ids of every editable item, used by batch_edit to resolve "$N" references.
 export function allIds(p) {
-  return new Set([...p.clips, ...p.clips.flatMap((c) => c.regions || []), ...p.overlays, ...p.texts, ...p.music, ...(p.captions?.lines || [])].map((x) => x.id));
+  return new Set([...p.clips, ...p.clips.flatMap((c) => [...(c.regions || []), ...(c.effects || [])]), ...(p.markers || []), ...p.overlays, ...p.texts, ...p.music, ...(p.captions?.lines || [])].map((x) => x.id));
 }
 
 export { OpError };

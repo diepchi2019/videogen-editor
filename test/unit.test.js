@@ -112,6 +112,91 @@ test('replace_clip_asset keeps clip settings and checks length', () => {
   assert.equal(c.regions, undefined);
 });
 
+test('set_color: adjustments, looks, validation, summary', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a' });
+  const id = p.clips[0].id;
+  run(p, 'set_color', { clipId: id, brightness: 0.1, saturation: 1.3, filter: 'vintage', filterIntensity: 0.5 });
+  assert.deepEqual(p.clips[0].color, { brightness: 0.1, saturation: 1.3, filter: 'vintage', filterIntensity: 0.5 });
+  run(p, 'set_color', { clipId: id, saturation: 1, filterIntensity: 1 }); // defaults are dropped
+  assert.deepEqual(p.clips[0].color, { brightness: 0.1, filter: 'vintage' });
+  assert.match(M.summarize(p), /color: brightness 0\.1 filter vintage/);
+  assert.throws(() => run(p, 'set_color', { clipId: id, filter: 'lomo' }), /filter must be one of/);
+  assert.throws(() => run(p, 'set_color', { clipId: id, contrast: 5 }), /contrast must be a number between 0 and 3/);
+  run(p, 'set_color', { clipId: id, reset: true, filter: 'none' });
+  assert.equal(p.clips[0].color, undefined);
+  assert.throws(() => run(p, 'set_color', { clipId: id, filterIntensity: 0.5 }), /Set filter/);
+  run(p, 'add_overlay', { assetId: 'img_c', start: 1, duration: 2 });
+  run(p, 'set_color', { overlayId: p.overlays[0].id, filter: 'bw' });
+  assert.equal(p.overlays[0].color.filter, 'bw');
+  assert.throws(() => run(p, 'set_color', { brightness: 0.1 }), /Give clipId or overlayId/);
+});
+
+test('effects, keyframes and clip animations: timeline in, clip-local stored, split divides them', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_b', out: 4 });           // timeline 0-4
+  run(p, 'add_clip', { assetId: 'vid_a', in: 0, out: 6 });    // timeline 4-10
+  const id = p.clips[1].id;
+  run(p, 'add_effect', { clipId: id, type: 'shake', start: 5, end: 7, intensity: 0.8 });
+  run(p, 'add_effect', { clipId: id, type: 'zoom_pulse' });
+  assert.deepEqual(p.clips[1].effects.map((e) => [e.type, e.from, e.to, e.rate]), [['shake', 1, 3, 8], ['zoom_pulse', 0, 6, 2]]);
+  assert.throws(() => run(p, 'add_effect', { clipId: id, type: 'shake', start: 0, end: 3 }), /must overlap the clip/);
+  assert.throws(() => run(p, 'add_effect', { clipId: id, type: 'wobble' }), /type must be one of/);
+  run(p, 'set_keyframes', { clipId: id, property: 'scale', keyframes: [{ t: 8, value: 1.4 }, { t: 4, value: 1 }] });
+  assert.deepEqual(p.clips[1].keyframes.scale, { easing: 'ease', points: [{ t: 0, v: 1 }, { t: 4, v: 1.4 }] });
+  assert.equal(M.kfAt(p.clips[1].keyframes.scale, 2), 1.2);
+  assert.throws(() => run(p, 'set_keyframes', { clipId: id, property: 'opacity', keyframes: [{ t: 5, value: 1 }] }), /property must be one of: scale, x, y, volume/);
+  assert.throws(() => run(p, 'set_keyframes', { clipId: id, property: 'scale', keyframes: [{ t: 11, value: 1 }] }), /keyframes\[0\]\.t must be/);
+  assert.throws(() => run(p, 'set_keyframes', { clipId: id, property: 'volume', keyframes: [{ t: 5, value: 3 }] }), /value must be a number between 0 and 2/);
+  run(p, 'set_clip', { clipId: id, animIn: 'slide_left', animOut: 'zoom_out', animOutDuration: 0.8 });
+  assert.deepEqual([p.clips[1].animIn, p.clips[1].animOut], [{ type: 'slide_left', duration: 0.5 }, { type: 'zoom_out', duration: 0.8 }]);
+  assert.match(M.summarize(p), /anim in slide_left 0\.5s, anim out zoom_out 0\.8s, effects: fx_\w+ shake 5\.00-7\.00s intensity 0\.8 rate 8\/s; fx_\w+ zoom_pulse 4\.00-10\.00s.*keyframes: scale 4\.00s=1 8\.00s=1\.4/);
+  // Split at timeline 6 (clip-local 2): effects, keyframes and animations are divided.
+  run(p, 'split_clip', { at: 6 });
+  const [a, b] = [p.clips[1], p.clips[2]];
+  assert.deepEqual(a.effects.map((e) => [e.type, e.from, e.to]), [['shake', 1, 2], ['zoom_pulse', 0, 2]]);
+  assert.deepEqual(b.effects.map((e) => [e.type, e.from, e.to]), [['shake', 0, 1], ['zoom_pulse', 0, 4]]);
+  assert.deepEqual(a.keyframes.scale.points, [{ t: 0, v: 1 }, { t: 2, v: 1.2 }]);
+  assert.deepEqual(b.keyframes.scale.points, [{ t: 0, v: 1.2 }, { t: 2, v: 1.4 }]);
+  assert.ok(a.animIn && !a.animOut && !b.animIn && b.animOut);
+  // delete_effect removes it from both halves; [] removes keyframes.
+  run(p, 'delete_effect', { effectId: a.effects[0].id });
+  assert.deepEqual([a.effects.length, b.effects.length], [1, 1]);
+  run(p, 'set_keyframes', { clipId: a.id, property: 'scale', keyframes: [] });
+  assert.equal(a.keyframes, undefined);
+  // Overlay keyframes and the fit note.
+  run(p, 'add_overlay', { assetId: 'img_c', start: 1, duration: 4, fit: 'cover' });
+  assert.match(run(p, 'set_keyframes', { overlayId: p.overlays[0].id, property: 'x', keyframes: [{ t: 1, value: 0.2 }, { t: 5, value: 0.8 }] }), /only applies with fit free/);
+});
+
+test('markers, mark-free beat cutting and ducking', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', out: 3 });
+  run(p, 'add_clip', { assetId: 'img_c', duration: 3 });
+  run(p, 'add_clip', { assetId: 'vid_b', in: 5.8, out: 6 });   // only 0.2s of source left: too short to reach a beat
+  run(p, 'add_clip', { assetId: 'vid_a', in: 5, out: 9 });
+  run(p, 'set_transition', { clipId: p.clips[1].id, type: 'fade', duration: 0.2 });
+  assert.throws(() => run(p, 'fit_clips_to_beats', {}), /Need beat markers/);
+  const beats = Array.from({ length: 20 }, (_, k) => 0.5 + k * 0.5); // 120 BPM from 0.5s
+  run(p, 'add_markers', { times: beats, kind: 'beat' });
+  run(p, 'add_markers', { times: [3], label: 'drop' });
+  assert.equal(p.markers.length, 21);
+  assert.match(M.summarize(p), /20 beat markers: 0\.50, 1\.00.*\n- 1 note markers: 3\.00 "drop"/);
+  const msg = run(p, 'fit_clips_to_beats', { every: 2 });
+  assert.match(msg, /Cut 3 of 4 clips on the beat \(every 2 beats\).*#3 kept: its source is too short/);
+  const L = M.layout(p);
+  // Every other beat: 0.5, 1.5, 2.5... Clip 2 starts on 0.5 even with its 0.2s fade (clip 1 runs on under the
+  // transition), clip 3 is kept (0.2s), clip 4 snaps its end to the next grid beat.
+  assert.deepEqual(L.clips.map((c) => [c.start, c.end]), [[0, 0.7], [0.5, 1.5], [1.5, 1.7], [1.7, 2.5]]);
+  run(p, 'delete_markers', { kind: 'beat' });
+  assert.equal(p.markers.length, 1);
+  run(p, 'add_music', { assetId: 'aud_m', duck: 0.6 });
+  assert.equal(p.music[0].duck, 0.6);
+  assert.match(M.summarize(p), /ducks under speech \(amount 0\.6\)/);
+  run(p, 'update_music', { musicId: p.music[0].id, duck: 0 });
+  assert.equal(p.music[0].duck, undefined);
+});
+
 test('overlays: timing, defaults, source length check', () => {
   const p = project();
   run(p, 'add_overlay', { assetId: 'img_c', start: 2, duration: 4, x: 0.8, y: 0.15, scale: 0.2 });
@@ -311,6 +396,63 @@ test('render graph: overlays, transforms, motion, ASS, frames mode', () => {
   assert.equal(motionFilter({ preset: 'none' }, 540, 960, 30, 2), null);
 });
 
+test('render graph: color, clip placement/animations, effects, overlay keyframes, ducking, export options', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', out: 4 });
+  run(p, 'add_clip', { assetId: 'vid_b', out: 4 });
+  const [c1, c2] = p.clips.map((c) => c.id);
+  run(p, 'set_transition', { clipId: c2, type: 'fade', duration: 0.5 });
+  run(p, 'set_color', { clipId: c1, contrast: 1.2, temperature: 0.5, filter: 'vintage', filterIntensity: 0.4 });
+  run(p, 'set_clip', { clipId: c1, animIn: 'slide_up', animOut: 'fade' });
+  run(p, 'add_effect', { clipId: c1, type: 'zoom_pulse', start: 1, end: 2, rate: 2 });
+  run(p, 'add_effect', { clipId: c1, type: 'invert', start: 3, end: 3.5 });
+  run(p, 'set_keyframes', { clipId: c2, property: 'volume', keyframes: [{ t: 3.5, value: 0 }, { t: 5, value: 1 }], easing: 'linear' });
+  run(p, 'add_overlay', { assetId: 'img_c', start: 1, duration: 3, scale: 0.3, rotate: 10 });
+  const ov = p.overlays[0].id;
+  run(p, 'set_keyframes', { overlayId: ov, property: 'scale', keyframes: [{ t: 1, value: 0.2 }, { t: 4, value: 0.4 }] });
+  run(p, 'set_keyframes', { overlayId: ov, property: 'opacity', keyframes: [{ t: 1, value: 0 }, { t: 2, value: 1 }] });
+  run(p, 'set_keyframes', { overlayId: ov, property: 'x', keyframes: [{ t: 1, value: 0.2 }, { t: 4, value: 0.8 }], easing: 'linear' });
+  run(p, 'add_music', { assetId: 'aud_m', duck: 0.5 });
+  run(p, 'add_music', { assetId: 'aud_m', role: 'voice', start: 1, out: 2 });
+  const { graph, args, tmpDir, encoder, width, height, fps } = buildCommand(p, 'out.mp4', { resolution: '720p', fps: 25, bitrate: 6 });
+  try {
+    assert.deepEqual([width, height, fps, encoder], [720, 1280, 25, 'libx264']);
+    assert.ok(args.join(' ').includes('-c:v libx264 -preset medium -b:v 6M -maxrate 9M -bufsize 12M'));
+    // Color: adjust, then the look blended 40% over the original.
+    assert.match(graph, /\[h0\]eq=brightness=0\.000:contrast=1\.200:saturation=1\.000,colorbalance=rs=0\.075/);
+    assert.match(graph, /\[cc0l\]\[cc0o\]blend=all_mode=normal:all_opacity=0\.400\[cc0b\]/);
+    assert.match(graph, /\[cc0b\]scale=720:1280/);
+    // slide_up: Y expression is wrapped so the offset is multiplied by the canvas height.
+    assert.match(graph, /overlay=x='720\*\(0\.5\)-w\/2':y='1280\*\(0\.5\+\(1-/);
+    // Fade + effects after the tail, back to AVTB for xfade.
+    assert.match(graph, /settb=AVTB,fade=t=out:st=3\.500:d=0\.500:color=0x000000@1\[vt0\]/);
+    assert.match(graph, /zoompan=z='1\+0\.090\*between\(it,1\.000,2\.000\)/);
+    assert.match(graph, /negate=enable='between\(t,3\.000,3\.500\)'/);
+    assert.match(graph, /\[fx0_1\]settb=AVTB\[v0\]/);
+    assert.match(graph, /volume='if\(lt\(t,0\),0,if\(lt\(t,1\.5\),0\+\(1\)\*clip\(\(t-0\)\/1\.5,0,1\),1\)\)':eval=frame/);
+    // Overlay: opacity (geq) before rotate before the per-frame scale; x keyframes in overlay-local time.
+    assert.match(graph, /geq=lum=.*a='alpha\(X,Y\)\*\(if\(lt\(T,0\),0,.*rotate=a='10\*PI\/180':ow=\d+:oh=\d+:c=none,scale=w='max\(2,trunc\(720\*\(if/);
+    assert.match(graph, /overlay=x='720\*\(if\(lt\(\(t-1\.000\),0\),0\.2,/);
+    // Ducking: clip audio + voice tapped into a sidechain key.
+    assert.match(graph, /\[aj1\]asplit=2\[aj1s\]\[aj1k\]/);
+    assert.match(graph, /\[aj1k\]\[m1k\]amix=inputs=2:duration=longest:normalize=0,apad=whole_dur=7\.500\[dk0\]/);
+    assert.match(graph, /\[m0\]\[dk0\]sidechaincompress=threshold=0\.015:ratio=10\.500/);
+    assert.match(graph, /\[aj1s\]\[md0\]\[m1s\]amix=inputs=3/);
+  } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+});
+
+test('audio analysis finds tempo and beats of a click track', async () => {
+  const { analyzeSamples } = await import('../src/audio.js');
+  const rate = 22050, x = new Float32Array(rate * 12), per = 60 / 128;
+  for (let b = 0.2; b < 12; b += per) { const s = Math.round(b * rate); for (let i = 0; i < 300 && s + i < x.length; i++) x[s + i] += Math.exp(-i / 50) * Math.sin(i) * 0.8; }
+  for (let i = 0; i < x.length; i++) x[i] += Math.sin(i * 0.37) * Math.sin(i * 0.011) * 0.02; // quiet bed, like real audio
+  const r = analyzeSamples(x, rate);
+  assert.ok(Math.abs(r.bpm - 128) < 1.5, `bpm ${r.bpm}`);
+  assert.ok(r.beats.length >= 22, `beats ${r.beats.length}`);
+  for (const t of r.beats) assert.ok(Math.abs(((t - 0.2 + per / 2) % per) - per / 2) < 0.03, `beat ${t} off the grid`);
+  assert.equal(r.silences.length, 0);
+});
+
 test('render graph: removed regions (fill = delogo, patch = clean-frame overlay)', () => {
   const p = project();
   run(p, 'add_clip', { assetId: 'vid_a', in: 2, out: 8 });   // 1920x1080 source
@@ -326,7 +468,7 @@ test('render graph: removed regions (fill = delogo, patch = clean-frame overlay)
     assert.match(graph, /\[rg0_0\]delogo=x=480:y=972:w=960:h=54:enable='between\(t,1\.000,2\.000\)'\[rg0_1\]/);
     assert.match(graph, /\[1:v\]trim=end_frame=1,setpts=PTS-STARTPTS,crop=384:108:192:864,format=rgba,geq=.*\/8\)'\[pt0_1\]/);
     assert.match(graph, /\[rg0_1\]\[pt0_1\]overlay=192:864:eof_action=repeat:enable='between\(t,3\.000,4\.000\)'\[rg0_2\]/);
-    assert.match(graph, /\[rg0_2\]setpts=PTS\/2,/);
+    assert.match(graph, /\[rg0_2\]setpts=PTS\/2\[h0\]/);
     assert.ok(!/rg0_3/.test(graph));
     assert.deepEqual(args.slice(args.indexOf('6.500') - 1, args.indexOf('6.500') + 5), ['-ss', '6.500', '-t', '0.5', '-i', path.join(store.MEDIA_DIR, 'a.mp4')]);
     assert.match(graph, /\[0:a\]aformat/); // clip audio still from input 0
