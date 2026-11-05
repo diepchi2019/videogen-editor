@@ -208,14 +208,14 @@ export function summarize(p, extras = {}) {
   const assets = Object.values(p.assets).map((a) =>
     `- ${a.id}: "${a.name}" ${a.type}${a.duration ? `, ${a.duration.toFixed(2)}s` : ''}${a.width ? `, ${a.width}x${a.height}` : ''}${a.type === 'video' ? (a.hasAudio ? ', has audio' : ', no audio') : ''}${tx.has(a.id) ? ', transcript ready' : ''}`);
   const clips = L.clips.map((c) =>
-    `- #${c.index + 1} ${c.id}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
+    `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
     (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : ''));
   const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
-    `- ${o.id} (track ${o.track}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
+    `- ${o.id} (track ${o.track}${o.styleRole ? `, style ${o.styleRole}` : ''}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
     `${o.opacity !== 1 ? `, opacity ${o.opacity}` : ''}${o.rotate ? `, rotate ${o.rotate}°` : ''}${o.crop ? `, crop x${o.crop.x} y${o.crop.y} w${o.crop.w} h${o.crop.h}` : ''}` +
     `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}` +
@@ -246,6 +246,7 @@ export function summarize(p, extras = {}) {
     `Project: "${p.name}" (${p.id})`,
     `Canvas: ${p.settings.aspect} (${p.settings.width}x${p.settings.height}) @${p.settings.fps}fps, background ${p.settings.background}`,
     `Total duration: ${L.duration.toFixed(2)}s`,
+    ...(p.style ? [`Style: "${p.style.name}"${p.style.id ? ` (${p.style.id})` : ''}, new items follow its defaults`] : []),
     `Media library:\n${assets.join('\n') || '(empty)'}`,
     `Video track (plays in order):\n${clips.join('\n') || '(empty)'}`,
     `Overlays (picture-in-picture, logos, B-roll on top of the video track; higher track = on top):\n${overlays.join('\n') || '(none)'}`,
@@ -413,6 +414,22 @@ function findRegions(p, regionId, clipId) {
   return hits;
 }
 
+// Color settings (adjustments + look) merged over base; undefined when nothing is left.
+function colorFrom(base, input, prefix = '') {
+  const c = { ...(base || {}) };
+  for (const [k, min, max, def] of COLOR_KEYS) {
+    const v = num(input[k], prefix + k, min, max);
+    if (v !== undefined) c[k] = r3(v);
+    if (c[k] === def) delete c[k];
+  }
+  const f = oneOf(input.filter, FILTERS, prefix + 'filter');
+  if (f === 'none') { delete c.filter; delete c.filterIntensity; } else if (f) c.filter = f;
+  const fi = num(input.filterIntensity, prefix + 'filterIntensity', 0, 1);
+  if (fi !== undefined) { if (!c.filter) fail(`Set ${prefix}filter (e.g. vintage) before ${prefix}filterIntensity`); c.filterIntensity = r3(fi); }
+  if (c.filterIntensity === 1) delete c.filterIntensity;
+  return Object.keys(c).length ? c : undefined;
+}
+
 function applyOverlay(o, input, a) {
   const sp = num(input.speed, 'speed', 0.25, 4); if (sp !== undefined) o.speed = sp;
   const max = a.type === 'image' ? 3600 : a.duration;
@@ -453,6 +470,296 @@ function captionStyle(base, input) {
 }
 const DEFAULT_CAPTION = { preset: 'classic', ...CAPTION_STYLES.classic, highlightColor: '#ffde00', outlineColor: '#000000', boxColor: '#000000', bold: true, box: false };
 
+// ---------- Reel styles ----------
+// A style is a saved look: canvas, clip defaults, title text style, caption style, music mix,
+// and optional intro / outro clips and a logo overlay (each with the asset record it uses).
+// apply_style restyles the project and stores the defaults in p.style, so later add_clip /
+// add_text / add_captions / add_music follow the style too.
+export const STYLE_PARTS = ['canvas', 'clips', 'texts', 'captions', 'music', 'intro', 'outro', 'logo'];
+const STYLE_KEY = { texts: 'title' };
+const TITLE_KEYS = ['style', 'font', 'size', 'color', 'bold', 'italic', 'outline', 'outlineColor', 'shadow', 'shadowColor', 'blur', 'box', 'boxColor', 'animation', 'animationOut', 'x', 'y'];
+const CAPTION_KEYS = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'uppercase', 'box', 'bold', 'font'];
+const COLOR_INPUT_KEYS = [...COLOR_KEYS.map(([k]) => k), 'filter', 'filterIntensity'];
+const MUSIC_KEYS = [['volume', 0, 2], ['fadeIn', 0, 30], ['fadeOut', 0, 30], ['duck', 0, 1]];
+const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o?.[k] !== undefined && o[k] !== null).map((k) => [k, o[k]]));
+const defined = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v !== undefined));
+
+// {type, duration} or a bare type string. Type 'none' is kept: it means "remove" when applied.
+function timedSpec(v, dur, list, name) {
+  if (v === undefined || v === null || v === '') return undefined;
+  const type = oneOf(typeof v === 'string' ? v : v.type, list, name) ?? fail(`${name} needs a type: ${list.join(', ')}`);
+  const d = num(dur ?? (typeof v === 'object' ? v.duration : undefined), `${name} duration`, 0.1, 5) ?? 0.5;
+  return { type, duration: r3(d) };
+}
+
+function clipStyle(src) {
+  const o = {};
+  const f = oneOf(src.fit, FITS, 'clips.fit'); if (f) o.fit = f;
+  const tr = timedSpec(src.transition, src.transitionDuration, TRANSITIONS, 'clips.transition'); if (tr) o.transition = tr;
+  for (const k of ['animIn', 'animOut']) { const a = timedSpec(src[k], src[`${k}Duration`], CLIP_ANIMS, `clips.${k}`); if (a) o[k] = a; }
+  const col = colorFrom({}, { ...(src.color || {}), ...pick(src, COLOR_INPUT_KEYS) }, 'clips.'); if (col) o.color = col;
+  if (src.imageMotion) {
+    const m = src.imageMotion;
+    const preset = oneOf(typeof m === 'string' ? m : m.preset, MOTIONS, 'clips.imageMotion');
+    const mi = num(src.imageMotionIntensity ?? m.intensity, 'clips.imageMotionIntensity', 0.02, 0.6);
+    if (preset) o.imageMotion = { preset, intensity: r3(mi ?? 0.15) };
+  }
+  return o;
+}
+
+const SAFE_FILE = /^[\w.-]+$/;
+// Intro / outro clip or logo overlay saved with the asset it shows.
+function styleItem(v, kind, name) {
+  const a = v?.asset;
+  if (!a || typeof a.file !== 'string' || !SAFE_FILE.test(a.file) || !['video', 'image'].includes(a.type)) fail(`${name} needs a video or image from the media library`);
+  const item = structuredClone(v[kind]);
+  if (!item || typeof item !== 'object') fail(`${name} is missing its ${kind} settings`);
+  const rec = structuredClone(a);
+  if (typeof rec.id !== 'string' || !/^[\w-]+$/.test(rec.id)) rec.id = uid(a.type === 'image' ? 'img' : 'vid');
+  delete item.id; delete item.styleRole;
+  item.assetId = rec.id;
+  return { asset: rec, [kind]: item };
+}
+
+// Validate a style (from save_style input, a stored file, or a built-in) into its canonical shape.
+export function normalizeStyle(input = {}) {
+  const name = String(input.name ?? '').trim().slice(0, 80);
+  if (!name) fail('name is required');
+  const st = { name };
+  if (input.description) st.description = String(input.description).slice(0, 300);
+  if (input.canvas) {
+    const cv = input.canvas, c = {};
+    if (cv.aspect !== undefined) { if (!ASPECTS[cv.aspect]) fail(`canvas.aspect must be one of ${Object.keys(ASPECTS).join(', ')}`); c.aspect = cv.aspect; }
+    const fps = num(cv.fps, 'canvas.fps', 10, 60); if (fps) c.fps = Math.round(fps);
+    const bg = color(cv.background, 'canvas.background'); if (bg) c.background = bg;
+    if (Object.keys(c).length) st.canvas = c;
+  }
+  if (input.clips) { const c = clipStyle(input.clips); if (Object.keys(c).length) st.clips = c; }
+  if (input.title) {
+    const t = {};
+    applyText(t, pick(input.title, TITLE_KEYS), false);
+    if (Object.keys(t).length) st.title = t;
+  }
+  if (input.captions) { const c = captionStyle({}, pick(input.captions, CAPTION_KEYS)); if (Object.keys(c).length) st.captions = c; }
+  if (input.music) {
+    const m = {};
+    for (const [k, min, max] of MUSIC_KEYS) { const v = num(input.music[k], `music.${k}`, min, max); if (v !== undefined) m[k] = r3(v); }
+    if (Object.keys(m).length) st.music = m;
+  }
+  for (const k of ['intro', 'outro']) if (input[k]) st[k] = styleItem(input[k], 'clip', k);
+  if (input.logo) st.logo = styleItem(input.logo, 'overlay', 'logo');
+  return st;
+}
+
+// Raw style input captured from a project (feed it to normalizeStyle). Intro/outro/logo come from
+// the given ids, or from items an earlier apply_style added.
+export function styleFromProject(p, { titleTextId, introClipId, outroClipId, logoOverlayId } = {}) {
+  const s = { canvas: pick(p.settings, ['aspect', 'fps', 'background']) };
+  const body = p.clips.filter((c) => !c.styleRole);
+  if (body[0]) {
+    const c0 = body[0];
+    const c = { fit: c0.fit || 'contain', ...pick(c0, ['color', 'animIn', 'animOut']) };
+    const withTr = p.clips.find((x, i) => i > 0 && !x.styleRole && x.transition?.type && x.transition.type !== 'none');
+    if (withTr) c.transition = withTr.transition;
+    else if (body.length > 1) c.transition = 'none';
+    const img = body.find((x) => p.assets[x.assetId]?.type === 'image' && x.motion);
+    if (img) c.imageMotion = img.motion;
+    s.clips = c;
+  }
+  const t = titleTextId ? p.texts[findIn(p.texts, titleTextId, 'text')] : p.texts[0];
+  if (t) s.title = pick(t, TITLE_KEYS);
+  if (p.captions) s.captions = pick(p.captions.style, CAPTION_KEYS);
+  const m = p.music.find((x) => x.role === 'music');
+  if (m) s.music = { ...pick(m, ['volume', 'fadeIn', 'fadeOut']), duck: m.duck ?? 0 };
+  for (const [role, id] of [['intro', introClipId], ['outro', outroClipId]]) {
+    const c = id ? p.clips[findClip(p, id)] : p.clips.find((x) => x.styleRole === role);
+    if (c) s[role] = { asset: p.assets[c.assetId], clip: c };
+  }
+  const o = logoOverlayId ? p.overlays[findIn(p.overlays, logoOverlayId, 'overlay')] : p.overlays.find((x) => x.styleRole === 'logo');
+  if (o) s.logo = { asset: p.assets[o.assetId], overlay: o };
+  return s;
+}
+
+// Ready-made styles, always available (not editable or deletable).
+export const BUILTIN_STYLES = [
+  {
+    id: 'builtin_bold_reel', name: 'Bold reel', description: 'Punchy: full-frame clips, hard cuts with a zoom pop, big yellow-on-black titles, one-word-at-a-time highlight captions, music ducked under speech.',
+    canvas: { aspect: '9:16', fps: 30 },
+    clips: { fit: 'cover', transition: 'none', animIn: { type: 'zoom_out', duration: 0.3 }, color: { contrast: 1.1, saturation: 1.15 }, imageMotion: { preset: 'zoom_in', intensity: 0.15 } },
+    title: { style: 'bold_title', size: 100, y: 0.15, color: '#ffde00', animation: 'pop', animationOut: 'fade' },
+    captions: { preset: 'highlight' },
+    music: { volume: 0.5, fadeIn: 0, fadeOut: 1, duck: 0.6 },
+  },
+  {
+    id: 'builtin_clean_minimal', name: 'Clean minimal', description: 'Calm and tidy: blurred-background framing, soft dissolves, small white titles that fade, boxed captions, quiet music.',
+    canvas: { aspect: '9:16', fps: 30 },
+    clips: { fit: 'blur', transition: { type: 'dissolve', duration: 0.4 }, imageMotion: { preset: 'zoom_in', intensity: 0.08 } },
+    title: { style: 'plain', size: 64, y: 0.12, color: '#ffffff', shadow: 2, shadowColor: '#000000', bold: false, animation: 'fade', animationOut: 'fade' },
+    captions: { preset: 'boxed', size: 52 },
+    music: { volume: 0.4, fadeIn: 0.5, fadeOut: 1.5, duck: 0.5 },
+  },
+  {
+    id: 'builtin_warm_vlog', name: 'Warm vlog', description: 'Friendly travel/vlog look: warm film color with a light vignette, fades, sticker titles that slide up, karaoke captions, slow zoom on photos.',
+    canvas: { aspect: '9:16', fps: 30 },
+    clips: { fit: 'cover', transition: { type: 'fade', duration: 0.5 }, color: { filter: 'warm', filterIntensity: 0.6, vignette: 0.25 }, imageMotion: { preset: 'zoom_in', intensity: 0.12 } },
+    title: { style: 'sticker', size: 72, y: 0.18, animation: 'slideup', animationOut: 'fade' },
+    captions: { preset: 'karaoke' },
+    music: { volume: 0.5, fadeIn: 1, fadeOut: 2, duck: 0.5 },
+  },
+].map((s) => ({ ...normalizeStyle(s), id: s.id, builtin: true }));
+
+export function describeStyle(st) {
+  const parts = [];
+  if (st.canvas) parts.push(`canvas ${[st.canvas.aspect, st.canvas.fps && `${st.canvas.fps}fps`, st.canvas.background].filter(Boolean).join(' ')}`);
+  if (st.clips) {
+    const c = st.clips, x = [];
+    if (c.fit) x.push(`fit ${c.fit}`);
+    if (c.transition) x.push(c.transition.type === 'none' ? 'hard cuts' : `${c.transition.type} ${c.transition.duration}s`);
+    if (c.animIn) x.push(`in ${c.animIn.type}`);
+    if (c.animOut) x.push(`out ${c.animOut.type}`);
+    if (c.color) x.push(describeColor(c.color).replace(/^, color: /, ''));
+    if (c.imageMotion) x.push(`photos ${c.imageMotion.preset}`);
+    parts.push(`clips: ${x.join(', ')}`);
+  }
+  if (st.title) parts.push(`titles: ${Object.entries(st.title).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  if (st.captions) parts.push(`captions: ${st.captions.preset || st.captions.mode || 'custom'}${st.captions.font ? ` "${st.captions.font}"` : ''}`);
+  if (st.music) parts.push(`music: ${Object.entries(st.music).map(([k, v]) => `${k} ${v}`).join(', ')}`);
+  for (const k of ['intro', 'outro']) if (st[k]) parts.push(`${k} "${st[k].asset.name}" ${fmtT(clipDuration(st[k].clip))}s`);
+  if (st.logo) parts.push(`logo "${st.logo.asset.name}"`);
+  return parts.join('; ');
+}
+
+// Add an asset record to the project unless the same media file is already there. Returns its id.
+function ensureAsset(p, rec) {
+  const have = Object.values(p.assets).find((a) => a.file === rec.file);
+  if (have) return have.id;
+  const id = p.assets[rec.id] ? uid(rec.type === 'image' ? 'img' : rec.type === 'audio' ? 'aud' : 'vid') : rec.id;
+  p.assets[id] = { ...structuredClone(rec), id };
+  return id;
+}
+
+// Clip defaults of a style applied to clip c at track index i.
+function styleClip(p, c, i, cs) {
+  if (!cs) return;
+  if (cs.fit) c.fit = cs.fit;
+  if (cs.color) c.color = structuredClone(cs.color);
+  for (const k of ['animIn', 'animOut']) if (cs[k]) { if (cs[k].type === 'none') delete c[k]; else c[k] = { ...cs[k] }; }
+  if (cs.transition && i > 0) c.transition = { ...cs.transition };
+  if (cs.imageMotion && cs.imageMotion.preset !== 'none' && !c.motion && p.assets[c.assetId]?.type === 'image') c.motion = { ...cs.imageMotion };
+}
+
+// ---------- Templates ----------
+// A template is a project skeleton whose main-track clips are numbered slots (length, speed,
+// transform, color, effects, keyframes, transition kept; media removed). Titles, overlays, music
+// and markers stay as they are. fillTemplate puts new media into the slots.
+export function makeTemplate(p, { name, description, slotClipIds, keepMusic = true, keepTexts = true } = {}) {
+  const nm = String(name ?? '').trim().slice(0, 80);
+  if (!nm) fail('name is required');
+  const slotIds = Array.isArray(slotClipIds) && slotClipIds.length
+    ? new Set(slotClipIds.map((id) => p.clips[findClip(p, id)].id))
+    : new Set(p.clips.filter((c) => !c.styleRole).map((c) => c.id));
+  if (!slotIds.size) fail('The video track has no clips to turn into template slots. Build the edit first.');
+  const L = layout(p);
+  const slots = [];
+  const clips = p.clips.map((c, i) => {
+    const x = structuredClone(c);
+    if (!slotIds.has(c.id)) return x;
+    const a = p.assets[c.assetId];
+    x.slot = slots.length + 1;
+    x.slotDuration = L.clips[i].duration;
+    x.assetId = null; x.in = 0; x.out = r3(x.slotDuration * (x.speed || 1));
+    delete x.regions; // they belong to the old footage
+    slots.push({ slot: x.slot, start: L.clips[i].start, duration: x.slotDuration, type: a?.type, was: a?.name });
+    return x;
+  });
+  const music = bool(keepMusic) === false ? [] : structuredClone(p.music);
+  const markers = (p.markers || []).filter((m) => music.length || m.kind !== 'beat');
+  const texts = bool(keepTexts) === false ? [] : structuredClone(p.texts);
+  const overlays = structuredClone(p.overlays);
+  const used = new Set([...clips.map((c) => c.assetId), ...overlays.map((o) => o.assetId), ...music.map((m) => m.assetId)]);
+  const assets = Object.fromEntries([...used].filter((id) => id && p.assets[id]).map((id) => [id, structuredClone(p.assets[id])]));
+  let style = p.style ? structuredClone(p.style) : null;
+  if (p.captions && !style?.captions) style = { ...(style || { name: nm }), captions: structuredClone(p.captions.style) };
+  const tpl = { name: nm, settings: structuredClone(p.settings), clips, overlays, texts, music, markers, assets, slots, duration: L.duration };
+  if (description) tpl.description = String(description).slice(0, 300);
+  if (style) tpl.style = style;
+  return tpl;
+}
+
+export function describeTemplate(tpl) {
+  const slots = tpl.slots.map((s) => `  slot ${s.slot}: ${fmtT(s.duration)}s at ${fmtT(s.start)}s${s.was ? ` (was ${s.type} "${s.was}")` : ''}`).join('\n');
+  const texts = tpl.texts.map((t, i) => `  text ${i + 1}: "${t.text}" ${fmtT(t.start)}-${fmtT(t.end)}s`).join('\n');
+  const extra = [
+    tpl.music.length && `${tpl.music.length} audio item(s): ${tpl.music.map((m) => `"${tpl.assets[m.assetId]?.name}"`).join(', ')}`,
+    tpl.overlays.length && `${tpl.overlays.length} overlay(s)`,
+    tpl.markers?.some((m) => m.kind === 'beat') && 'beat markers',
+    tpl.style && `style "${tpl.style.name}"`,
+  ].filter(Boolean).join(', ');
+  return `${tpl.slots.length} slots, ${fmtT(tpl.duration)}s, ${tpl.settings.aspect}${extra ? `; ${extra}` : ''}\n${slots}${texts ? `\n${texts}` : ''}`;
+}
+
+// Fill a template into project p (normally a fresh project that has the media library).
+// input: { assetIds: [...] | slots: [{assetId, in}], texts: [string|null], name }.
+// Without media it uses the project's videos/photos in library order, reusing them if there are fewer than slots.
+export function fillTemplate(p, tpl, input = {}) {
+  const fixedFiles = new Set(Object.values(tpl.assets).map((a) => a.file));
+  let fills;
+  if (Array.isArray(input.slots) && input.slots.length) fills = input.slots.map((s) => (typeof s === 'string' ? { assetId: s } : s || {}));
+  else if (Array.isArray(input.assetIds) && input.assetIds.length) fills = input.assetIds.map((assetId) => ({ assetId }));
+  else {
+    const lib = Object.values(p.assets).filter((a) => (a.type === 'video' || a.type === 'image') && !fixedFiles.has(a.file));
+    if (!lib.length) fail('No videos or photos to fill the template with. Import media first, or pass assetIds.');
+    fills = tpl.slots.map((_, i) => ({ assetId: lib[i % lib.length].id }));
+  }
+  const n = tpl.slots.length;
+  if (fills.length < n) fail(`Template "${tpl.name}" has ${n} slots but got ${fills.length} clip(s). Pass one assetId per slot, in order (repeat an id to reuse a clip).`);
+  fills.slice(0, n).forEach((f, i) => {
+    const a = p.assets[f.assetId];
+    if (!a || !['video', 'image'].includes(a.type)) fail(`Slot ${i + 1}: ${f.assetId} is not a video or image in the media library. Assets: ${Object.values(p.assets).filter((x) => x.type !== 'audio').map((x) => x.id).join(', ') || 'none'}`);
+  });
+  const remap = Object.fromEntries(Object.entries(tpl.assets).map(([id, rec]) => [id, ensureAsset(p, rec)]));
+  const re = (x) => ({ ...structuredClone(x), assetId: remap[x.assetId] ?? x.assetId });
+  p.settings = structuredClone(tpl.settings);
+  p.overlays = tpl.overlays.map(re);
+  p.music = tpl.music.map(re);
+  p.texts = structuredClone(tpl.texts);
+  p.markers = structuredClone(tpl.markers || []);
+  p.captions = null;
+  if (tpl.style) p.style = structuredClone(tpl.style); else delete p.style;
+  const notes = [];
+  p.clips = tpl.clips.map((c0) => {
+    if (!c0.slot) return re(c0);
+    const c = structuredClone(c0);
+    const f = fills[c.slot - 1], a = p.assets[f.assetId];
+    const sp = c.speed || 1, need = c.slotDuration * sp;
+    c.assetId = a.id;
+    if (a.type === 'image') { c.in = 0; c.out = r3(need); } else {
+      let i0 = num(f.in, `slot ${c.slot} in`, 0, a.duration) ?? 0;
+      if (i0 + need > a.duration) i0 = Math.max(0, a.duration - need);
+      c.in = r3(i0); c.out = r3(Math.min(a.duration, i0 + need));
+      if (c.out - c.in < need - 0.01) notes.push(`slot ${c.slot} is ${fmtT((c.out - c.in) / sp)}s instead of ${fmtT(c.slotDuration)}s ("${a.name}" is too short)`);
+    }
+    const dur = (c.out - c.in) / sp;
+    if (c.effects) {
+      c.effects = c.effects.filter((e) => e.from < dur - 0.05).map((e) => ({ ...e, to: r3(Math.min(e.to, dur)) }));
+      if (!c.effects.length) delete c.effects;
+    }
+    delete c.slot; delete c.slotDuration;
+    return c;
+  });
+  if (Array.isArray(input.texts)) {
+    input.texts.forEach((s, i) => {
+      if (s === null || s === undefined || s === '') return;
+      if (!p.texts[i]) fail(`texts[${i}]: the template has only ${p.texts.length} text(s)`);
+      p.texts[i].text = String(s);
+    });
+  }
+  clampAll(p);
+  p.name = String(input.name || tpl.name).trim().slice(0, 120);
+  if (fills.length > n) notes.push(`${fills.length - n} extra clip(s) not used`);
+  return `Filled template "${tpl.name}": ${n} slots, ${fmtT(layout(p).duration)}s.${notes.length ? ` Note: ${notes.join('; ')}.` : ''}`;
+}
+
 // Each op: (project, input) => message. Ops mutate the project.
 export const ops = {
   add_clip(p, { assetId, in: tin, out, position, duration }) {
@@ -463,7 +770,9 @@ export const ops = {
     if (o === undefined) o = a.type === 'image' ? i0 + (num(duration, 'duration', 0.1, 600) ?? 3) : srcDur;
     if (o <= i0) fail('out must be greater than in');
     const clip = { id: uid('clip'), assetId, in: r3(i0), out: r3(o), speed: 1, volume: 1, fit: 'contain', transition: { type: 'none', duration: 0.5 } };
-    const pos = position === undefined ? p.clips.length : Math.max(0, Math.min(p.clips.length, Math.round(num(position, 'position')) - 1));
+    const outro = p.clips.findIndex((c) => c.styleRole === 'outro');
+    const pos = position === undefined ? (outro >= 0 ? outro : p.clips.length) : Math.max(0, Math.min(p.clips.length, Math.round(num(position, 'position')) - 1));
+    styleClip(p, clip, pos, p.style?.clips);
     p.clips.splice(pos, 0, clip);
     clampAll(p);
     return `Added ${clip.id} at position ${pos + 1} (${clip.in}-${clip.out}s of "${a.name}")`;
@@ -608,18 +917,8 @@ export const ops = {
   // Color adjust + filter look on a clip or overlay.
   set_color(p, input) {
     const { item } = timedTarget(p, input);
-    const c = bool(input.reset) ? {} : { ...(item.color || {}) };
-    for (const [k, min, max, def] of COLOR_KEYS) {
-      const v = num(input[k], k, min, max);
-      if (v !== undefined) c[k] = r3(v);
-      if (c[k] === def) delete c[k];
-    }
-    const f = oneOf(input.filter, FILTERS, 'filter');
-    if (f === 'none') { delete c.filter; delete c.filterIntensity; } else if (f) c.filter = f;
-    const fi = num(input.filterIntensity, 'filterIntensity', 0, 1);
-    if (fi !== undefined) { if (!c.filter) fail('Set filter (e.g. vintage) before filterIntensity'); c.filterIntensity = r3(fi); }
-    if (c.filterIntensity === 1) delete c.filterIntensity;
-    if (Object.keys(c).length) item.color = c; else delete item.color;
+    const c = colorFrom(bool(input.reset) ? {} : item.color, input);
+    if (c) item.color = c; else delete item.color;
     return `Color of ${item.id}: ${describeColor(item.color).replace(/^, color: /, '') || 'original'}`;
   },
 
@@ -760,7 +1059,9 @@ export const ops = {
     const e = num(input.end, 'end', 0) ?? Math.max(s + 3, Math.min(L.duration, s + 3));
     if (e <= s) fail('end must be after start');
     const t = { id: uid('text'), start: r3(s), end: r3(e) };
-    applyText(t, input, true);
+    // The project style's title look is the default; an explicit style preset or field wins.
+    const base = !input.style && p.style?.title;
+    applyText(t, base ? { ...base, ...defined(input) } : input, true);
     p.texts.push(t);
     return `Added text ${t.id} "${t.text}" ${t.start}-${t.end}s`;
   },
@@ -786,7 +1087,8 @@ export const ops = {
       if (typeof w.w !== 'string' || !Number.isFinite(+w.start) || !Number.isFinite(+w.end)) fail('words must be [{w, start, end}] with timeline seconds');
     }
     // First captions start from the classic preset; re-captioning keeps the current style unless overridden.
-    const st = captionStyle(p.captions?.style || DEFAULT_CAPTION, { ...input, preset: input.preset ?? (p.captions ? undefined : 'classic') });
+    const base = p.captions?.style || { ...DEFAULT_CAPTION, ...(p.style?.captions || {}) };
+    const st = captionStyle(base, { ...input, preset: input.preset ?? (p.captions || p.style?.captions ? undefined : 'classic') });
     const lines = groupWords(words.map((w) => ({ w: w.w, start: +w.start, end: +w.end })), { maxWords: st.maxWords });
     p.captions = { style: st, lines };
     return `Captions: ${lines.length} lines (${words.length} words), style ${st.preset}, mode ${st.mode}`;
@@ -813,8 +1115,7 @@ export const ops = {
       }
       l.start = r3(s); l.end = r3(e);
     }
-    const keys = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'uppercase', 'box', 'bold', 'font'];
-    if (keys.some((k) => input[k] !== undefined)) {
+    if (CAPTION_KEYS.some((k) => input[k] !== undefined)) {
       const before = p.captions.style.maxWords;
       p.captions.style = captionStyle(p.captions.style, input);
       if (p.captions.style.maxWords !== before) {
@@ -839,6 +1140,7 @@ export const ops = {
     const a = asset(p, assetId, ['audio', 'video']);
     if (a.type === 'video' && !a.hasAudio) fail('That video has no audio track');
     const rl = oneOf(role, AUDIO_ROLES, 'role') ?? 'music';
+    const sm = rl === 'music' ? p.style?.music || {} : {};
     const i0 = num(tin, 'in', 0, a.duration) ?? 0;
     const o = num(out, 'out', 0, a.duration) ?? a.duration;
     if (o <= i0) fail('out must be greater than in');
@@ -846,10 +1148,10 @@ export const ops = {
       id: uid(rl === 'music' ? 'music' : rl), assetId, role: rl,
       track: Math.round(num(track, 'track', 1, 20) ?? (rl === 'music' ? 1 : rl === 'voice' ? 2 : 3)),
       start: num(start, 'start', 0) ?? 0, in: r3(i0), out: r3(o),
-      volume: num(volume, 'volume', 0, 2) ?? (rl === 'music' ? 0.6 : 1),
-      fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? (rl === 'music' ? 1 : 0),
+      volume: num(volume, 'volume', 0, 2) ?? sm.volume ?? (rl === 'music' ? 0.6 : 1),
+      fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? sm.fadeIn ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? sm.fadeOut ?? (rl === 'music' ? 1 : 0),
     };
-    const dk = num(duck, 'duck', 0, 1); if (dk) m.duck = r3(dk);
+    const dk = num(duck, 'duck', 0, 1) ?? sm.duck; if (dk) m.duck = r3(dk);
     p.music.push(m);
     return `Added ${rl} ${m.id} from "${a.name}" at ${m.start}s on audio track ${m.track}`;
   },
@@ -879,6 +1181,70 @@ export const ops = {
     const bg = color(background, 'background'); if (bg) p.settings.background = bg;
     const f = num(fps, 'fps', 10, 60); if (f) p.settings.fps = Math.round(f);
     return `Canvas: ${p.settings.aspect} ${p.settings.width}x${p.settings.height}, bg ${p.settings.background}, ${p.settings.fps}fps`;
+  },
+
+  // Apply a saved or built-in reel style (env.loadStyle resolves styleId) to the project.
+  apply_style(p, input) {
+    if (!env.loadStyle) fail('Styles are not available here');
+    const st = env.loadStyle(input.styleId ?? fail('styleId is required (see list_styles)'));
+    let parts = STYLE_PARTS.filter((k) => st[STYLE_KEY[k] || k]);
+    const notes = [];
+    if (input.parts !== undefined) {
+      if (!Array.isArray(input.parts) || !input.parts.length) fail(`parts must be a non-empty array of: ${STYLE_PARTS.join(', ')}`);
+      input.parts.forEach((k) => oneOf(k, STYLE_PARTS, 'parts[]'));
+      const missing = input.parts.filter((k) => !parts.includes(k));
+      if (missing.length) notes.push(`the style has no ${missing.join('/')} settings`);
+      parts = parts.filter((k) => input.parts.includes(k));
+    }
+    if (!parts.length) fail(`Style "${st.name}" has nothing to apply${notes.length ? ` (${notes[0]})` : ''}`);
+    const has = (k) => parts.includes(k);
+    const done = [];
+    if (has('canvas')) { ops.set_canvas(p, st.canvas); done.push('canvas'); }
+    for (const role of ['intro', 'outro']) {
+      if (!has(role)) continue;
+      p.clips = p.clips.filter((c) => c.styleRole !== role);
+      const c = { ...structuredClone(st[role].clip), id: uid('clip'), assetId: ensureAsset(p, st[role].asset), styleRole: role };
+      if (role === 'intro') p.clips.unshift(c); else p.clips.push(c);
+      done.push(role);
+    }
+    if (p.clips[0]) p.clips[0].transition = { type: 'none', duration: 0.5 };
+    if (has('clips')) {
+      const body = p.clips.filter((c) => !c.styleRole);
+      p.clips.forEach((c, i) => { if (!c.styleRole) styleClip(p, c, i, st.clips); });
+      done.push(`${body.length} clip(s)`);
+    }
+    clampAll(p);
+    if (has('texts')) {
+      const { x, y, ...look } = st.title; // keep each text where it is
+      for (const t of p.texts) { if (!look.style) delete t.style; applyText(t, look, false); }
+      done.push(`${p.texts.length} text(s)`);
+    }
+    if (has('captions') && p.captions) {
+      const before = p.captions.style.maxWords;
+      p.captions.style = captionStyle(p.captions.style, st.captions);
+      if (p.captions.style.maxWords !== before) p.captions.lines = groupWords(p.captions.lines.flatMap((l) => l.words), { maxWords: p.captions.style.maxWords });
+      done.push('captions');
+    }
+    if (has('music')) {
+      const items = p.music.filter((m) => m.role === 'music');
+      for (const m of items) {
+        Object.assign(m, pick(st.music, ['volume', 'fadeIn', 'fadeOut', 'duck']));
+        if (!m.duck) delete m.duck;
+      }
+      done.push(`${items.length} music item(s)`);
+    }
+    if (has('logo')) {
+      p.overlays = p.overlays.filter((o) => o.styleRole !== 'logo');
+      const o = { ...structuredClone(st.logo.overlay), id: uid('ov'), assetId: ensureAsset(p, st.logo.asset), styleRole: 'logo', start: 0 };
+      // A still logo spans the whole video (re-apply the style after big timeline changes).
+      if (p.assets[o.assetId].type === 'image') o.out = r3(o.in + Math.max(0.5, layout(p).duration) * (o.speed || 1));
+      p.overlays.push(o);
+      done.push('logo');
+    }
+    const defaults = Object.fromEntries([['clips', 'clips'], ['texts', 'title'], ['captions', 'captions'], ['music', 'music']]
+      .filter(([part, key]) => has(part) && st[key]).map(([, key]) => [key, structuredClone(st[key])]));
+    p.style = { id: st.id, name: st.name, ...defaults };
+    return `Applied style "${st.name}" to ${done.join(', ')}. New clips, texts, captions and music will follow it.${notes.length ? ` Note: ${notes.join('; ')}.` : ''}${has('logo') || has('intro') || has('outro') ? ' Check framing with look_at_timeline.' : ''}`;
   },
 
   rename_project(p, { name }) {

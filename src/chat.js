@@ -16,6 +16,7 @@ Rules:
 - Timeline times are seconds from the start of the final video; clip in/out are seconds within the source file.
 - Captions: add_captions transcribes speech automatically. Use get_transcript to find moments by what is said.
 - Use overlays (add_overlay) for picture-in-picture, logos and B-roll on top; batch_edit for many edits at once.
+- "My style" / "same look as last time": list_styles then apply_style; save_style keeps a look for later. "Use my template": list_templates then create_from_template with the clips in slot order.
 - After visual edits (text, captions, overlays, framing), check the result with look_at_timeline before replying.
 - Short-form video defaults: 9:16, punchy cuts, titles near the top (y≈0.15) or lower third (y≈0.75), size 64-110, white text with box or outline.
 - After editing, reply in 1-3 short sentences in the user's language summarising what changed. Do not dump ids unless useful.`;

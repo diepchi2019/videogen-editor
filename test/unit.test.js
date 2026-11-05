@@ -479,3 +479,186 @@ test('render graph: removed regions (fill = delogo, patch = clean-frame overlay)
   const e = buildCommand(p, 'out.mp4', { quality: 'draft' });
   try { assert.match(e.graph, /delogo=x=1:y=972:w=1918:h=107:/); } finally { fs.rmSync(e.tmpDir, { recursive: true, force: true }); }
 });
+
+test('styles: normalize, capture from a project, apply, later edits follow, re-apply replaces intro/logo', () => {
+  assert.throws(() => M.normalizeStyle({}), /name is required/);
+  assert.throws(() => M.normalizeStyle({ name: 'x', clips: { transition: 'spin' } }), /clips.transition must be one of/);
+  assert.throws(() => M.normalizeStyle({ name: 'x', title: { color: 'red' } }), /hex color/);
+  assert.throws(() => M.normalizeStyle({ name: 'x', intro: { asset: { file: '../etc/passwd', type: 'video' }, clip: {} } }), /media library/);
+  assert.equal(M.BUILTIN_STYLES.length, 3);
+
+  // Build a source project with a look, then capture it.
+  const src = project();
+  run(src, 'add_clip', { assetId: 'img_c', duration: 2 }); // intro card
+  run(src, 'add_clip', { assetId: 'vid_a', out: 4 });
+  run(src, 'add_clip', { assetId: 'vid_b', out: 3 });
+  const [intro, c1, c2] = src.clips.map((c) => c.id);
+  run(src, 'set_clip', { clipId: c1, fit: 'blur', animIn: 'fade' });
+  run(src, 'set_color', { clipId: c1, filter: 'vintage', filterIntensity: 0.5 });
+  run(src, 'set_transition', { clipId: c2, type: 'wipeleft', duration: 0.4 });
+  run(src, 'add_text', { text: 'Title', start: 0, end: 2, style: 'neon', size: 90, y: 0.2 });
+  run(src, 'add_overlay', { assetId: 'img_c', x: 0.9, y: 0.06, scale: 0.12, opacity: 0.8 });
+  run(src, 'add_music', { assetId: 'aud_m', volume: 0.3, duck: 0.7 });
+  const raw = M.styleFromProject(src, { introClipId: intro, logoOverlayId: src.overlays[0].id });
+  const st = { ...M.normalizeStyle({ ...raw, name: 'Mine', clips: { ...raw.clips, transitionDuration: 0.3 } }), id: 'style_t' };
+  assert.equal(st.clips.fit, 'contain'); // first untagged clip is the intro card (not tagged yet)
+  assert.deepEqual(st.clips.transition, { type: 'wipeleft', duration: 0.3 }); // explicit duration wins
+  assert.equal(st.title.style, 'neon');
+  assert.equal(st.title.size, 90);
+  assert.deepEqual(st.music, { volume: 0.3, fadeIn: 0, fadeOut: 1, duck: 0.7 });
+  assert.equal(st.intro.asset.file, 'c.png');
+  assert.equal(st.logo.overlay.scale, 0.12);
+  assert.match(M.describeStyle(st), /intro "c.png" 2.00s; logo "c.png"/);
+
+  M.env.loadStyle = (id) => { if (id !== 'Mine' && id !== 'style_t') throw new Error('nope'); return st; };
+  try {
+    const p = project();
+    delete p.assets.img_c; // the intro/logo asset is brought in by the style
+    run(p, 'set_canvas', { aspect: '16:9' });
+    run(p, 'add_clip', { assetId: 'vid_a', out: 3 });
+    run(p, 'add_clip', { assetId: 'vid_b', out: 3 });
+    run(p, 'add_text', { text: 'Old', start: 0, end: 1, x: 0.3, y: 0.7, box: true });
+    run(p, 'add_music', { assetId: 'aud_m' });
+    const msg = run(p, 'apply_style', { styleId: 'Mine' });
+    assert.match(msg, /Applied style "Mine" to canvas, intro, 2 clip\(s\), 1 text\(s\), 1 music item\(s\), logo/);
+    assert.equal(p.settings.aspect, '9:16');
+    assert.equal(p.clips[0].styleRole, 'intro');
+    assert.equal(p.assets[p.clips[0].assetId].file, 'c.png');
+    assert.equal(p.clips[0].transition.type, 'none');
+    assert.deepEqual(p.clips[2].transition, { type: 'wipeleft', duration: 0.3 });
+    const t = p.texts[0];
+    assert.equal(t.style, 'neon'); assert.equal(t.size, 90); assert.equal(t.box, false);
+    assert.equal(t.x, 0.3); assert.equal(t.y, 0.7); // position kept
+    assert.equal(p.music[0].volume, 0.3); assert.equal(p.music[0].duck, 0.7);
+    const logo = p.overlays.find((o) => o.styleRole === 'logo');
+    assert.equal(logo.out, M.layout(p).duration);
+    // Later edits follow the style.
+    run(p, 'add_text', { text: 'New', start: 1, end: 2 });
+    assert.equal(p.texts[1].y, 0.2); assert.equal(p.texts[1].style, 'neon');
+    run(p, 'add_text', { text: 'Own', start: 1, end: 2, style: 'boxed' });
+    assert.equal(p.texts[2].size, 72); // explicit preset: the style's title is not used
+    run(p, 'add_clip', { assetId: 'vid_a', in: 5, out: 7 });
+    assert.deepEqual(p.clips.at(-1).transition, { type: 'wipeleft', duration: 0.3 });
+    run(p, 'add_music', { assetId: 'aud_m', start: 2 });
+    assert.equal(p.music[1].volume, 0.3);
+    assert.match(M.summarize(p), /Style: "Mine" \(style_t\)/);
+    assert.match(M.summarize(p), /\(style intro\)/);
+    // Re-applying replaces intro and logo instead of adding more.
+    run(p, 'apply_style', { styleId: 'Mine' });
+    assert.equal(p.clips.filter((c) => c.styleRole === 'intro').length, 1);
+    assert.equal(p.overlays.filter((o) => o.styleRole === 'logo').length, 1);
+    // parts limits what is applied.
+    run(p, 'set_canvas', { aspect: '1:1' });
+    const m2 = run(p, 'apply_style', { styleId: 'Mine', parts: ['texts', 'outro'] });
+    assert.equal(p.settings.aspect, '1:1');
+    assert.match(m2, /style has no outro/);
+    assert.throws(() => run(p, 'apply_style', { styleId: 'Mine', parts: ['bogus'] }), /parts\[\] must be one of/);
+    // A style's caption look is used by the first captions.
+    const q = project();
+    const capStyle = { ...M.normalizeStyle({ name: 'Cap', captions: { preset: 'karaoke', size: 50 } }), id: 's2' };
+    M.env.loadStyle = () => capStyle;
+    run(q, 'apply_style', { styleId: 's2' });
+    run(q, 'set_captions', { words: [{ w: 'yo', start: 0, end: 0.3 }] });
+    assert.equal(q.captions.style.preset, 'karaoke'); assert.equal(q.captions.style.size, 50);
+  } finally { M.env.loadStyle = null; }
+});
+
+test('templates: slots keep their edit, fill puts new media in, short media and validation', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', in: 1, out: 4 });
+  run(p, 'add_clip', { assetId: 'img_c', duration: 2 });
+  run(p, 'add_clip', { assetId: 'vid_b', out: 5 });
+  const [a, b, c] = p.clips.map((x) => x.id);
+  run(p, 'set_clip', { clipId: a, speed: 2 });
+  run(p, 'set_transition', { clipId: b, type: 'fade', duration: 0.5 });
+  run(p, 'add_effect', { clipId: c, type: 'flash' });
+  run(p, 'remove_region', { clipId: c, x: 0, y: 0, w: 0.2, h: 0.2 });
+  run(p, 'add_text', { text: 'Day one', start: 0, end: 2 });
+  run(p, 'add_music', { assetId: 'aud_m' });
+  run(p, 'add_markers', { times: [1, 2], kind: 'beat' });
+  run(p, 'set_captions', { words: [{ w: 'hi', start: 0, end: 0.5 }] });
+  assert.throws(() => M.makeTemplate(p, {}), /name is required/);
+  assert.throws(() => M.makeTemplate(M.emptyProject(), { name: 'x' }), /no clips/);
+  const tpl = M.makeTemplate(p, { name: 'Three shots' });
+  assert.equal(tpl.slots.length, 3);
+  assert.deepEqual(tpl.slots.map((s) => s.duration), [1.5, 2, 5]);
+  assert.equal(tpl.clips[2].regions, undefined);
+  assert.ok(tpl.clips.every((x) => x.assetId === null));
+  assert.deepEqual(Object.keys(tpl.assets), ['aud_m']);
+  assert.equal(tpl.style.captions.preset, 'classic'); // caption look carried over
+  assert.match(M.describeTemplate(tpl), /3 slots, 8\.00s.*beat markers[\s\S]*slot 2: 2\.00s at 1\.00s \(was image "c.png"\)[\s\S]*text 1: "Day one"/);
+  const noMusic = M.makeTemplate(p, { name: 'x', keepMusic: false, slotClipIds: [b] });
+  assert.equal(noMusic.slots.length, 1); assert.equal(noMusic.music.length, 0); assert.ok(!noMusic.markers.some((m) => m.kind === 'beat'));
+
+  // Fill into a fresh project with the same library.
+  const q = M.emptyProject();
+  q.assets = structuredClone(project().assets);
+  delete q.assets.aud_m; // the template brings its own music asset
+  const msg = M.fillTemplate(q, tpl, { slots: [{ assetId: 'vid_b', in: 1 }, { assetId: 'vid_a' }, { assetId: 'vid_b' }], texts: ['Day two'], name: 'Reel 2' });
+  assert.match(msg, /Filled template "Three shots": 3 slots/);
+  assert.equal(q.name, 'Reel 2');
+  assert.deepEqual([q.clips[0].assetId, q.clips[0].in, q.clips[0].out, q.clips[0].speed], ['vid_b', 1, 4, 2]); // 1.5s at 2x
+  assert.deepEqual([q.clips[1].assetId, q.clips[1].in, q.clips[1].out], ['vid_a', 0, 2]);
+  assert.deepEqual([q.clips[2].in, q.clips[2].out], [0, 5]);
+  const shifted = M.emptyProject(); shifted.assets = structuredClone(project().assets);
+  M.fillTemplate(shifted, tpl, { slots: [{ assetId: 'vid_a' }, { assetId: 'vid_a' }, { assetId: 'vid_b', in: 4 }] });
+  assert.deepEqual([shifted.clips[2].in, shifted.clips[2].out], [1, 6]); // in 4 + 5s would pass the 6s end: shifted earlier
+  assert.equal(q.clips[1].transition.type, 'fade');
+  assert.equal(q.clips[2].effects[0].type, 'flash');
+  assert.ok(q.clips.every((x) => x.slot === undefined && x.slotDuration === undefined));
+  assert.equal(q.texts[0].text, 'Day two');
+  assert.equal(q.assets[q.music[0].assetId].file, 'm.mp3');
+  assert.equal(q.captions, null);
+  assert.equal(q.style.captions.preset, 'classic');
+  // A source shorter than the slot gives a shorter clip and a note.
+  const short = M.makeTemplate(p, { name: 'long', slotClipIds: [a] });
+  short.clips[0].slotDuration = 9; short.clips[0].speed = 1;
+  const s2 = M.emptyProject(); s2.assets = structuredClone(project().assets);
+  assert.match(M.fillTemplate(s2, short, { assetIds: ['vid_b'] }), /slot 1 is 6\.00s instead of 9\.00s \("b.mp4" is too short\)/);
+  // Auto-fill from the library, reusing media; validation.
+  const r = M.emptyProject(); r.assets = { vid_b: project().assets.vid_b };
+  M.fillTemplate(r, tpl);
+  assert.ok(r.clips.every((x) => x.assetId === 'vid_b'));
+  assert.throws(() => M.fillTemplate(M.emptyProject(), tpl), /No videos or photos/);
+  assert.throws(() => M.fillTemplate(structuredClone(q), tpl, { assetIds: ['vid_a'] }), /has 3 slots but got 1/);
+  assert.throws(() => M.fillTemplate(structuredClone(q), tpl, { assetIds: ['vid_a', 'nope', 'vid_a'] }), /Slot 2: nope is not a video or image/);
+  assert.throws(() => M.fillTemplate(structuredClone(q), tpl, { assetIds: ['vid_a', 'vid_a', 'vid_a'], texts: ['a', 'b'] }), /only 1 text/);
+});
+
+test('presets storage: styles and templates on disk, built-ins protected, create_from_template is atomic', async () => {
+  const P = await import('../src/presets.js');
+  const { executeTool } = await import('../src/tools.js');
+  assert.throws(() => P.saveStyle({ name: 'bold reel' }), /built-in/);
+  const { style } = P.saveStyle({ name: 'Test look', clips: { fit: 'cover' } });
+  assert.ok(fs.existsSync(path.join(P.STYLES_DIR, `${style.id}.json`)));
+  const again = P.saveStyle({ name: 'TEST LOOK', clips: { fit: 'blur' } });
+  assert.equal(again.updated, true); assert.equal(again.style.id, style.id);
+  assert.equal(P.loadStyle('test look').clips.fit, 'blur');
+  assert.equal(P.loadStyle('builtin_warm_vlog').name, 'Warm vlog');
+  assert.throws(() => P.deleteStyle('Bold reel'), /built in/);
+  assert.throws(() => P.loadStyle('nope'), /No style "nope"/);
+
+  // Through the tools: apply a style, save a template, create from it.
+  store.createProject({ name: 'Tpl source' });
+  Object.assign(store.getProject().assets, project().assets);
+  store.applyBatch([{ name: 'add_clip', input: { assetId: 'vid_a', out: 2 } }, { name: 'add_clip', input: { assetId: 'vid_b', out: 2 } }]);
+  const ap = await executeTool('apply_style', { styleId: 'Warm vlog' });
+  assert.match(ap.content, /Applied style "Warm vlog"/);
+  assert.equal(store.getProject().clips[1].transition.type, 'fade');
+  const sv = await executeTool('save_template', { name: 'Two cuts' });
+  assert.match(sv.content, /Saved template tpl_\w+ "Two cuts": 2 slots/);
+  const before = store.listProjects().length;
+  const bad = await executeTool('create_from_template', { templateId: 'Two cuts', assetIds: ['vid_a'] });
+  assert.ok(bad.isError); assert.equal(store.listProjects().length, before); // nothing created
+  const ok = await executeTool('create_from_template', { templateId: 'two cuts', assetIds: ['vid_b', 'vid_a'], name: 'From tpl' });
+  assert.match(ok.content, /Filled template "Two cuts".*Created and opened project proj_\w+ "From tpl"/);
+  assert.equal(store.getProject().name, 'From tpl');
+  assert.deepEqual(store.getProject().clips.map((c) => c.assetId), ['vid_b', 'vid_a']);
+  assert.equal(store.getProject().style.name, 'Warm vlog');
+  const ls = await executeTool('list_templates');
+  assert.match(ls.content, /"Two cuts"[\s\S]*slot 1: 2\.00s/);
+  const st = await executeTool('save_style', { name: 'Nothing', fromProject: false });
+  assert.ok(st.isError && /Nothing to save/.test(st.content));
+  P.deleteTemplate('Two cuts'); P.deleteStyle('Test look');
+  assert.equal(P.listTemplates().length, 0);
+});

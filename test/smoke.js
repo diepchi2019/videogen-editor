@@ -160,6 +160,27 @@ try {
   await tool('delete_project', { projectId: 'Reel two' });
   ok(!(await tool('list_projects')).content.includes('Reel two'), 'delete_project');
 
+  // --- reel styles and templates ---
+  const sl = await tool('list_styles');
+  ok(/builtin_bold_reel "Bold reel" \[built-in\]/.test(sl.content), 'list_styles shows built-ins');
+  const logoId = back.project.overlays[0].id;
+  const ss = await tool('save_style', { name: 'Smoke style', logoOverlayId: logoId, title: { size: 84 } });
+  ok(/Saved style style_\w+ "Smoke style".*titles:.*size 84.*logo "c\.png"/.test(ss.content), 'save_style captures the look + logo');
+  ok(ss.styles.some((x) => x.name === 'Smoke style'), 'state lists the saved style');
+  const as = await tool('apply_style', { styleId: 'Bold reel' });
+  ok(/Applied style "Bold reel"/.test(as.content) && as.project.clips.every((c) => c.fit === 'cover') && as.project.style.name === 'Bold reel', 'apply_style restyles clips');
+  await tool('undo');
+  const st2 = await tool('save_template', { name: 'Smoke template' });
+  ok(/Saved template tpl_\w+ "Smoke template": 4 slots/.test(st2.content), 'save_template');
+  const cf = await tool('create_from_template', { templateId: 'Smoke template', assetIds: [img.id, vid.id, vidNoA.id, vid.id], texts: ['From a template'] });
+  ok(/Filled template "Smoke template": 4 slots/.test(cf.content) && cf.project.id !== firstId && cf.project.texts[0].text === 'From a template', 'create_from_template opens a filled project');
+  await tool('apply_style', { styleId: 'Smoke style' });
+  const tl = await tool('look_at_timeline', { times: [1] });
+  const styled = tl.content.find((b) => b.type === 'image');
+  ok(styled, 'styled template project renders');
+  fs.writeFileSync(path.join(framesDir, 'styled-template.jpg'), Buffer.from(styled.source.data, 'base64'));
+  await tool('open_project', { projectId: firstId });
+
   // --- MCP server over stdio ---
   mcp = new Client({ name: 'smoke', version: '1.0.0' });
   await mcp.connect(new StdioClientTransport({ command: 'node', args: [path.join(root, 'mcp.js')], env: { ...process.env, VIDEOGEN_URL: BASE } }));
@@ -174,6 +195,9 @@ try {
   ok(mt.content.some((b) => b.type === 'image' && b.mimeType === 'image/jpeg'), 'MCP look_at_timeline returns an image block');
   const imp = await mcp.callTool({ name: 'import_media', arguments: { paths: [path.join(fx, 'c.png')] } });
   ok(/img_\w+ "c\.png" image/.test(imp.content[0].text), 'MCP import_media');
+  const { prompts } = await mcp.listPrompts();
+  const pr = await mcp.getPrompt({ name: 'reel_from_template', arguments: { template: 'Smoke template' } });
+  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style' && /create_from_template/.test(pr.messages[0].content.text), 'MCP prompts');
 
   console.log(`\nAll good. Output: ${outPath}\nTimeline frames: ${framesDir}`);
 } finally {

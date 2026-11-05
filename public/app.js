@@ -18,6 +18,7 @@ let P = null;      // project
 let L = null;      // layout
 let jobs = [];
 let projects = [];
+let styles = [], templates = [];
 let sel = null;    // { kind: 'clip'|'overlay'|'text'|'music', id }
 let time = 0, playing = false, playStart = 0, playFrom = 0;
 let pps = 80;      // timeline pixels per second
@@ -38,6 +39,8 @@ function setState(s) {
   const switched = P && s.project.id !== P.id;
   P = s.project; L = s.layout;
   if (s.jobs) jobs = s.jobs;
+  if (s.styles) styles = s.styles;
+  if (s.templates) templates = s.templates;
   if (s.projects) projects = s.projects;
   else if (switched) fetch('/api/state').then((r) => r.json()).then((j) => { projects = j.projects || projects; renderProjects(); });
   if (sel && !findSel()) sel = null;
@@ -165,7 +168,7 @@ function waveCanvas(a, srcIn, srcOut, widthPx, heightPx, cls) {
 // ---------- Render ----------
 function renderAll() {
   $('#aspect').value = P.settings.aspect;
-  renderProjects(); renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true);
+  renderProjects(); renderPresets(); renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true);
 }
 
 function renderProjects() {
@@ -180,6 +183,36 @@ $('#project').onchange = async (e) => {
     const name = prompt('Project name', 'New project');
     if (name) await tool('create_project', { name }); else renderProjects();
   } else if (v !== P.id) await tool('open_project', { projectId: v });
+};
+
+// Reel styles and templates: one menu, each option runs a tool.
+function renderPresets() {
+  const cur = P.style?.name;
+  const group = (label, items) => (items.length ? h('optgroup', { label }, ...items) : null);
+  $('#presets').replaceChildren(
+    h('option', { value: '' }, cur ? `Style: ${cur}` : 'Styles & templates'),
+    group('Apply style', styles.map((s) => h('option', { value: `style:${s.id}`, title: s.description }, `${s.name}${s.builtin ? ' (built-in)' : ''}`))),
+    group('New project from template', templates.map((t) => h('option', { value: `tpl:${t.id}` }, `${t.name} · ${t.slots} slots · ${t.duration.toFixed(0)}s`))),
+    h('optgroup', { label: 'Save' },
+      h('option', { value: 'save:style' }, 'Save this look as a style…'),
+      h('option', { value: 'save:tpl' }, 'Save this edit as a template…')),
+  );
+  $('#presets').value = '';
+}
+$('#presets').onchange = async (e) => {
+  const [kind, id] = e.target.value.split(/:(.*)/);
+  renderPresets();
+  if (kind === 'style') await tool('apply_style', { styleId: id });
+  else if (kind === 'tpl') {
+    const t = templates.find((x) => x.id === id);
+    if (confirm(`Make a new project from "${t.name}"? Its ${t.slots} slots are filled with your media library's videos and photos in order.`)) await tool('create_from_template', { templateId: id });
+  } else if (kind === 'save') {
+    const what = id === 'style' ? 'Style' : 'Template';
+    const name = prompt(`${what} name`, P.style?.name && id === 'style' ? P.style.name : P.name);
+    if (!name) return;
+    const r = await tool(id === 'style' ? 'save_style' : 'save_template', { name });
+    if (!r.isError && !r.error) addMsg('assistant', r.content.split('\n')[0]);
+  }
 };
 
 function renderAssets() {

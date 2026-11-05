@@ -166,7 +166,8 @@ export function openProject(idOrName, source = 'ui') {
 }
 
 // copyMedia: start with the open project's media library (files are shared, not copied).
-export function createProject({ name, aspect, copyMedia = true } = {}, source = 'ui') {
+// build(p): optional, fills the new project before it is saved; if it throws, nothing is created.
+export function createProject({ name, aspect, copyMedia = true, build } = {}, source = 'ui') {
   const p = emptyProject();
   if (name) p.name = String(name).trim().slice(0, 120);
   if (aspect) {
@@ -175,6 +176,7 @@ export function createProject({ name, aspect, copyMedia = true } = {}, source = 
     [p.settings.width, p.settings.height] = ASPECTS[aspect];
   }
   if (copyMedia) p.assets = structuredClone(project.assets);
+  if (build) build(p);
   writeProject(p);
   return openProject(p.id, source);
 }

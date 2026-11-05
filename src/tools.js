@@ -1,8 +1,10 @@
 // Tool definitions shared by the in-app Claude chat and the MCP server.
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS,
-  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, summarize, timelineWords, layout, env, ops,
+  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, summarize, timelineWords, layout, env, ops,
+  styleFromProject, describeStyle, normalizeStyle, makeTemplate, describeTemplate, fillTemplate,
 } from './model.js';
+import { listStyles, loadStyle, saveStyle, deleteStyle, listTemplates, loadTemplate, saveTemplate, deleteTemplate } from './presets.js';
 import * as store from './store.js';
 import { extractFrames, probe, needsProxy, hasProxy, startProxy } from './media.js';
 import { startExport, getJob, renderFrames, RESOLUTIONS } from './render.js';
@@ -13,6 +15,7 @@ import { transcribe, readTranscript, hasTranscript, transcriptText } from './tra
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
 
 env.resolveFont = resolveFont;
+env.loadStyle = loadStyle;
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required });
 const n = (d) => ({ type: 'number', description: d });
@@ -45,6 +48,22 @@ const overlayProps = {
   rotate: n('Degrees'), opacity: n('0-1'), volume: n('0-2, audio of a video overlay (0 = mute)'), track: n('Layer 1-20, higher is on top'),
   crop: cropSchema, flipH: b('Mirror horizontally'), flipV: b('Flip vertically'), animation: s('fade = fade in and out', { enum: OVERLAY_ANIMS }),
 };
+const pickProps = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
+const styleSections = {
+  canvas: { type: 'object', description: 'Output format', properties: { aspect: s('Aspect ratio', { enum: Object.keys(ASPECTS) }), fps: n('Frames per second'), background: s('Hex letterbox color') } },
+  clips: {
+    type: 'object', description: 'Defaults for main-track clips',
+    properties: {
+      fit: s('Fill mode', { enum: FITS }), transition: s('Transition between clips (none = hard cuts)', { enum: TRANSITIONS }), transitionDuration: n('Seconds'),
+      animIn: s('Clip entrance animation', { enum: CLIP_ANIMS }), animInDuration: n('Seconds'), animOut: s('Clip exit animation', { enum: CLIP_ANIMS }), animOutDuration: n('Seconds'),
+      filter: s('Look', { enum: FILTERS }), filterIntensity: n('0-1'), brightness: n('-1..1'), contrast: n('0..3'), saturation: n('0..3'), temperature: n('-1..1'), vignette: n('0..1'),
+      imageMotion: s('Ken Burns on photos', { enum: MOTIONS }), imageMotionIntensity: n('0.02-0.6'),
+    },
+  },
+  title: { type: 'object', description: 'Look of titles / text overlays (x, y = default position of new texts)', properties: pickProps(textProps, ['style', 'font', 'size', 'color', 'bold', 'italic', 'outline', 'outlineColor', 'shadow', 'shadowColor', 'blur', 'box', 'boxColor', 'animation', 'animationOut', 'x', 'y']) },
+  captions: { type: 'object', description: 'Caption look', properties: captionStyleProps },
+  music: { type: 'object', description: 'Music mix', properties: { volume: n('0-2'), fadeIn: n('Seconds'), fadeOut: n('Seconds'), duck: n('0-1 lower under speech, 0 = off') } },
+};
 
 export const TOOLS = [
   { name: 'get_timeline', description: 'Get the current project: media library, video clips with timeline positions, overlays, text, captions, audio. Call this before editing if unsure of ids.', input_schema: S({ detail: s('brief (default) or full (all caption lines)', { enum: ['brief', 'full'] }) }) },
@@ -58,6 +77,44 @@ export const TOOLS = [
   { name: 'duplicate_project', description: 'Copy a project (default: the open one) and open the copy. Good for making versions.', input_schema: S({ projectId: s('Project id or name (default: open project)'), name: s('Name of the copy') }) },
   { name: 'rename_project', description: 'Rename the open project.', input_schema: S({ name: s('New name') }, ['name']) },
   { name: 'delete_project', description: 'Delete a project that is not open (moved to data/trash, recoverable). Only when the user asks.', input_schema: S({ projectId: s('Project id or name') }, ['projectId']) },
+
+  { name: 'list_styles', description: 'List reel styles (built-in and saved): what each sets for canvas, clips, titles, captions, music, intro/outro and logo.', input_schema: S({}) },
+  {
+    name: 'save_style',
+    description: 'Save a reusable reel style ("my style"), shared by all projects. By default it captures the open project\'s look: canvas, the first clip\'s fit/color/animations, the transition in use, photo motion, the first text\'s look (or titleTextId), the caption style and the music mix. ' +
+      'Name introClipId / outroClipId / logoOverlayId to include an intro, outro or logo. Sections you pass (canvas, clips, title, captions, music) override what was captured. Saving under an existing name updates that style.',
+    input_schema: S({
+      name: s('Style name'), description: s('What the style is for'), fromProject: b('Capture the open project\'s look (default true); false = only what you pass'),
+      titleTextId: s('Text whose look becomes the title style (default: first text)'), introClipId: s('Clip to save as the intro'), outroClipId: s('Clip to save as the outro'), logoOverlayId: s('Overlay to save as the logo/watermark'),
+      ...styleSections,
+    }, ['name']),
+  },
+  {
+    name: 'apply_style',
+    description: 'Apply a reel style to the open project in one step (one undo): canvas, clip fit/color/transitions/animations, photo motion, the look of every text (positions kept), caption style, music mix, and intro/outro clips and a logo overlay if the style has them (re-applying replaces them). ' +
+      'It also becomes the project\'s default, so clips, texts, captions and music added later follow it. parts limits what is applied.',
+    input_schema: S({ styleId: s('Style id or name (list_styles)'), parts: { type: 'array', items: { type: 'string', enum: STYLE_PARTS }, description: 'Only these parts (default: everything the style has)' } }, ['styleId']),
+  },
+  { name: 'delete_style', description: 'Delete a saved style (moved to data/trash). Only when the user asks.', input_schema: S({ styleId: s('Style id or name') }, ['styleId']) },
+  { name: 'list_templates', description: 'List saved templates: their slots (length of each clip to fill), texts, music and style.', input_schema: S({}) },
+  {
+    name: 'save_template',
+    description: 'Save the open project as a template: every main-track clip (or slotClipIds) becomes a numbered slot that keeps its length, speed, framing, color, effects, keyframes and transition; texts, overlays, music, beat markers and the style stay as they are. ' +
+      'Later create_from_template makes a new reel by putting other clips into the slots. Saving under an existing name updates it.',
+    input_schema: S({ name: s('Template name'), description: s('What it is for'), slotClipIds: { type: 'array', items: { type: 'string' }, description: 'Clips that become slots (default: all except style intro/outro)' }, keepMusic: b('Keep the music and beat markers (default true)'), keepTexts: b('Keep the texts (default true)') }, ['name']),
+  },
+  {
+    name: 'create_from_template',
+    description: 'Create a new project from a template and open it: media goes into the slots in order (each slot keeps its length; a video starts at its "in", or 0, and is shifted earlier if too short). ' +
+      'Without assetIds/slots it fills the slots with the media library\'s videos and photos in order. texts replaces the template\'s texts in order. Check the result with look_at_timeline.',
+    input_schema: S({
+      templateId: s('Template id or name (list_templates)'), name: s('Project name'),
+      assetIds: { type: 'array', items: { type: 'string' }, description: 'One video/photo asset per slot, in slot order (repeat to reuse)' },
+      slots: { type: 'array', items: { type: 'object', properties: { assetId: s('Asset id'), in: n('Source start seconds') }, required: ['assetId'] }, description: 'Like assetIds, with a source start per slot' },
+      texts: { type: 'array', items: { type: 'string' }, description: 'New text for the template\'s texts in order ("" keeps one)' },
+    }, ['templateId']),
+  },
+  { name: 'delete_template', description: 'Delete a saved template (moved to data/trash). Only when the user asks.', input_schema: S({ templateId: s('Template id or name') }, ['templateId']) },
 
   { name: 'add_clip', description: 'Add a video or image asset to the main video track. Images default to 3s.', input_schema: S({ assetId: s('Asset id'), in: n('Source start seconds'), out: n('Source end seconds'), duration: n('For images: seconds to show'), position: n('1-based position in the track (default: end)') }, ['assetId']) },
   { name: 'trim_clip', description: 'Change which part of the source a clip uses.', input_schema: S({ clipId: s('Clip id'), in: n('New source start seconds'), out: n('New source end seconds') }, ['clipId']) },
@@ -181,8 +238,8 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio']);
-const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions']);
+const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates']);
+const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
   destructiveHint: DESTRUCTIVE.has(name),
@@ -245,6 +302,46 @@ export async function executeTool(name, input = {}, source = 'claude') {
       case 'delete_project': {
         const p = store.deleteProject(input.projectId);
         return { content: `Deleted project ${p.id} "${p.name}" (moved to data/trash).` };
+      }
+
+      case 'list_styles': {
+        const cur = store.getProject().style;
+        return { content: listStyles().map((st) => `- ${st.id} "${st.name}"${st.builtin ? ' [built-in]' : ''}${st.description ? `: ${st.description}` : ''}\n  ${describeStyle(st)}`).join('\n') + (cur ? `\nThe open project uses "${cur.name}".` : '') };
+      }
+      case 'save_style': {
+        const p = store.getProject();
+        const all = styleFromProject(p, input);
+        const captured = input.fromProject === false
+          ? Object.fromEntries([['intro', 'introClipId'], ['outro', 'outroClipId'], ['logo', 'logoOverlayId']].filter(([, k]) => input[k]).map(([part]) => [part, all[part]]))
+          : all;
+        const raw = { ...captured, name: input.name, description: input.description };
+        for (const k of ['canvas', 'clips', 'title', 'captions', 'music']) if (input[k] && typeof input[k] === 'object') raw[k] = { ...(captured[k] || {}), ...input[k] };
+        if (!describeStyle(normalizeStyle(raw))) return { content: 'Nothing to save: the project has no clips, texts, captions or music to take a look from, and no sections were given.', isError: true };
+        const { style, updated } = saveStyle(raw);
+        return { content: `${updated ? 'Updated' : 'Saved'} style ${style.id} "${style.name}": ${describeStyle(style)}. Use apply_style to put it on a project.` };
+      }
+      case 'delete_style': {
+        const st = deleteStyle(input.styleId);
+        return { content: `Deleted style ${st.id} "${st.name}" (moved to data/trash).` };
+      }
+      case 'list_templates': {
+        const list = listTemplates();
+        if (!list.length) return { content: 'No templates yet. Build an edit, then save_template.' };
+        return { content: list.map((t) => `- ${t.id} "${t.name}"${t.description ? `: ${t.description}` : ''}\n  ${describeTemplate(t).replace(/\n/g, '\n  ')}`).join('\n') };
+      }
+      case 'save_template': {
+        const { template: t, updated } = saveTemplate(makeTemplate(store.getProject(), input));
+        return { content: `${updated ? 'Updated' : 'Saved'} template ${t.id} "${t.name}": ${describeTemplate(t)}\nUse create_from_template to fill it with new clips.` };
+      }
+      case 'create_from_template': {
+        const tpl = loadTemplate(input.templateId);
+        let msg;
+        const p = store.createProject({ name: input.name || tpl.name, build: (np) => { msg = fillTemplate(np, tpl, input); } }, source);
+        return { content: `${msg} Created and opened project ${p.id} "${p.name}".\n\n${summary(p)}` };
+      }
+      case 'delete_template': {
+        const t = deleteTemplate(input.templateId);
+        return { content: `Deleted template ${t.id} "${t.name}" (moved to data/trash).` };
       }
 
       case 'list_fonts': {

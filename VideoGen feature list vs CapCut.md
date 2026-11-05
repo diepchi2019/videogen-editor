@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 57 CapCut features listed, VideoGen has 34 and 3 more in part (updated after Phase 2, Nov 4, 2026). Every P0 editor feature and most P1 polish features are in place; the remaining gaps are mostly AI, templates and P2 extras.
+Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated Nov 5, 2026, after style presets and templates). Every P0 editor feature and most P1 polish features are in place; the remaining gaps are mostly AI and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -63,7 +63,7 @@ Of the 57 CapCut features listed, VideoGen has 34 and 3 more in part (updated af
 | Media | Import video, image, audio; drag and drop | Yes | Have | P0 |
 | Media | Thumbnails in library and on clips | Yes | Have | P0 |
 | Media | Stock media library | Yes | Missing | P2 |
-| Templates | Templates (fill a ready-made edit with your clips) | Yes | Missing | P1 |
+| Templates | Templates (fill a ready-made edit with your clips) | Yes | Have (save any edit as a template; slots keep length, framing, color, effects, transitions; music, beats, titles kept) | P1 |
 | Project | Multiple projects, save / open | Yes | Have | P0 |
 | Project | Autosave | Yes | Have | P0 |
 | Project | Proxy files for smooth 4K / HEVC editing | Yes | Have (automatic on import, 720p H.264) | P1 |
@@ -75,7 +75,7 @@ Of the 57 CapCut features listed, VideoGen has 34 and 3 more in part (updated af
 
 ## MCP server features
 
-The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 52 tools (53 with import_media) covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
+The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 60 tools (61 with import_media) and 3 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
 
 | Feature | What it lets Claude do | VideoGen | Priority |
 | --- | --- | --- | --- |
@@ -88,9 +88,9 @@ The MCP server is what lets Claude Code edit without an API key, so it needs eve
 | Project as MCP resource | Read the full timeline JSON without a tool call | Have | P1 |
 | Multiple projects | Create, open, duplicate, list projects | Have | P0 |
 | Audio analysis | Detect beats, loudness, silence for cut-to-beat and ducking | Have (analyze_audio, mark_beats) | P1 |
-| Templates and style presets | "Make it in my reel style": saved fonts, colors, caption style, intro, outro | Missing | P1 |
+| Templates and style presets | "Make it in my reel style": saved fonts, colors, caption style, intro, outro | Have (save_style / apply_style with 3 built-ins, save_template / create_from_template) | P1 |
 | Export and wait | Render and return when done, with the file path | Have (export_video wait=true) | P1 |
-| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Missing | P2 |
+| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Have (make_reel, reel_from_template, save_my_style) | P2 |
 | Generate media | Call image / video / voice models and drop results on the timeline | Missing | P1 |
 | Remote access | Use the editor from Claude on phone or web, not only Claude Code on the same PC | Missing | P2 |
 
@@ -111,7 +111,19 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
 
 1. **Phase 1, reel essentials (P0) — done Nov 2, 2026:** auto-captions with Whisper including word-by-word style, fonts and text presets, overlay track for picture-in-picture and logos, crop / position / scale, Ken Burns on photos, multiple projects, sound-effects track. MCP: timeline frame preview, transcribe, batch edits. Also shipped: project as MCP resource, export and wait, tool annotations. Still missing from the browser preview: clip transforms, Ken Burns and the new text styles (export and look_at_timeline show them).
 2. **Phase 2, polish (P1) — done Nov 4, 2026:** keyframes, color adjust and 10 filter looks, 9 starter effects, clip in / out animations, waveforms, beat detection with beat markers and cut-to-beat, ducking, real transitions in preview, proxy files for 4K / HEVC, export resolution / fps / bitrate and GPU encoding. Not in the browser preview: effects, ducking, vignette, crop (export and look_at_timeline show them). Left for later: .cube LUT import, more effects, speed ramps.
-3. **Phase 3, AI and automation (P1):** reel style presets and templates, auto reframe, text to speech, connect the AI video pipeline (generate clips and drop them on the timeline).
+3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe, text to speech, connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: Phase 3 (reel style presets and templates, auto reframe, text to speech, AI pipeline).
+Next: make auto-captions ready to use (below), then the rest of Phase 3 (text to speech, auto reframe, AI pipeline).
+
+### Auto-captions setup (added Nov 5, 2026)
+
+Captions are built, but they don't run on the dev machine yet because no Whisper model is downloaded. The dev machine is an i7-1260P laptop with 40 GB RAM and an NVIDIA T550 with 4 GB, so the plan uses models that run well on a laptop CPU.
+
+1. **Download the default model:** `ggml-small.bin` (466 MB) into `models/`. It's the best balance of speed and Vietnamese accuracy on this machine.
+2. **Auto-detect the more accurate model:** add `ggml-large-v3-turbo-q5_0.bin` (~550 MB, close to large-v3 accuracy) to the model search in `src/transcribe.js` and prefer it over small when both are present. Today only base, small and tiny are found without `VIDEOGEN_WHISPER_MODEL`.
+3. **Check GPU use:** time `test/fixtures/speech.mp3` with `use_gpu` on and off to see whether this ffmpeg build uses the T550. Note the result in CLAUDE.md.
+4. **Skip silence with VAD:** pass ffmpeg's `vad_model` (Silero) when the file is present, so long clips with silences transcribe faster and leave out made-up words in quiet parts.
+5. **Captions button in the browser:** caption preset and language picker that runs `add_captions`, with a clear message when no model is installed (and where to get one).
+6. **Docs:** a model setup section in the README (which model for which machine, download command), and remove the outdated "Known limits" lines (no auto-captions, one project, one video track).
+7. **Test:** with the model in place, `npm test` runs the smoke test's captions step instead of skipping it.

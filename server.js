@@ -11,6 +11,7 @@ import { TOOLS, executeTool, toolAnnotations } from './src/tools.js';
 import { invalidateFonts, readFamily } from './src/fonts.js';
 import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
+import { presetLists } from './src/presets.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -26,7 +27,7 @@ app.get('/preview/:file', (req, res) => {
   res.sendFile(fs.existsSync(proxy) ? proxy : path.join(store.MEDIA_DIR, f), (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
-const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects() });
+const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects(), ...presetLists() });
 const wrap = (fn) => async (req, res) => {
   try { res.json(await fn(req, res)); } catch (e) { res.status(400).json({ error: e.message }); }
 };
