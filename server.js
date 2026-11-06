@@ -5,18 +5,21 @@ import path from 'node:path';
 import fs from 'node:fs';
 import * as store from './src/store.js';
 import { layout, uid } from './src/model.js';
-import { probe, makeThumb, needsProxy, proxyPath, startProxy } from './src/media.js';
+import { probe, makeThumb, needsProxy, proxyPath, startProxy, run } from './src/media.js';
 import { waveform } from './src/audio.js';
 import { TOOLS, executeTool, toolAnnotations } from './src/tools.js';
 import { invalidateFonts, readFamily } from './src/fonts.js';
 import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
 import { presetLists } from './src/presets.js';
+import { importLut, listLuts } from './src/luts.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.resolve('public')));
+// Clip timing math shared with the browser preview.
+app.get('/lib/timing.js', (req, res) => res.type('text/javascript').sendFile(path.resolve('src/timing.js')));
 app.use('/media', express.static(store.MEDIA_DIR));
 app.use('/thumbs', express.static(path.join(store.DATA_DIR, 'thumbs')));
 app.use('/exports', express.static(store.EXPORT_DIR));
@@ -27,7 +30,7 @@ app.get('/preview/:file', (req, res) => {
   res.sendFile(fs.existsSync(proxy) ? proxy : path.join(store.MEDIA_DIR, f), (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
-const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects(), ...presetLists() });
+const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects(), luts: listLuts(), ...presetLists() });
 const wrap = (fn) => async (req, res) => {
   try { res.json(await fn(req, res)); } catch (e) { res.status(400).json({ error: e.message }); }
 };
@@ -54,8 +57,13 @@ const upload = multer({
   limits: { fileSize: 4 * 1024 ** 3 },
 });
 app.post('/api/upload', upload.array('files'), wrap(async (req) => {
-  const added = [], fonts = [];
+  const added = [], fonts = [], luts = [];
   for (const f of req.files || []) {
+    if (/\.cube$/i.test(f.originalname)) {
+      // Color LUTs go to data/luts and become usable with set_color lut.
+      try { luts.push(importLut(f.path, f.originalname)); } catch (e) { fs.rmSync(f.path, { force: true }); throw e; }
+      continue;
+    }
     if (/\.(ttf|otf|ttc)$/i.test(f.originalname)) {
       // Fonts go to data/fonts and become usable in text and captions.
       const fam = readFamily(f.path);
@@ -65,8 +73,16 @@ app.post('/api/upload', upload.array('files'), wrap(async (req) => {
       continue;
     }
     try {
-      const meta = await probe(f.path);
-      const a = { id: uid(meta.type === 'audio' ? 'aud' : meta.type === 'image' ? 'img' : 'vid'), name: Buffer.from(f.originalname, 'latin1').toString('utf8'), file: f.filename, ...meta };
+      let meta = await probe(f.path), file = f.filename;
+      // Browser recordings (WebM/Opus) carry no duration: store them as AAC so every tool can read them.
+      if (meta.type === 'audio' && /\.webm$/i.test(f.filename)) {
+        file = f.filename.replace(/\.webm$/i, '.m4a');
+        const out = path.join(store.MEDIA_DIR, file);
+        await run('ffmpeg', ['-y', '-nostdin', '-i', f.path, '-vn', '-c:a', 'aac', '-b:a', '160k', out]);
+        fs.rmSync(f.path, { force: true });
+        meta = await probe(out);
+      }
+      const a = { id: uid(meta.type === 'audio' ? 'aud' : meta.type === 'image' ? 'img' : 'vid'), name: Buffer.from(f.originalname, 'latin1').toString('utf8'), file, ...meta };
       a.thumb = await makeThumb(a).catch(() => null);
       store.addAsset(a);
       added.push(a);
@@ -77,7 +93,7 @@ app.post('/api/upload', upload.array('files'), wrap(async (req) => {
     }
   }
   if (fonts.length) invalidateFonts();
-  return { added, fonts, ...state() };
+  return { added, fonts, luts, ...state() };
 }));
 
 // Run one editor tool (used by the UI and by the MCP server).

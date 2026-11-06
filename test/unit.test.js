@@ -420,7 +420,7 @@ test('render graph: color, clip placement/animations, effects, overlay keyframes
     assert.ok(args.join(' ').includes('-c:v libx264 -preset medium -b:v 6M -maxrate 9M -bufsize 12M'));
     // Color: adjust, then the look blended 40% over the original.
     assert.match(graph, /\[h0\]eq=brightness=0\.000:contrast=1\.200:saturation=1\.000,colorbalance=rs=0\.075/);
-    assert.match(graph, /\[cc0l\]\[cc0o\]blend=all_mode=normal:all_opacity=0\.400\[cc0b\]/);
+    assert.match(graph, /\[cc0bl\]\[cc0bo\]blend=all_mode=normal:all_opacity=0\.400\[cc0b\]/);
     assert.match(graph, /\[cc0b\]scale=720:1280/);
     // slide_up: Y expression is wrapped so the offset is multiplied by the canvas height.
     assert.match(graph, /overlay=x='720\*\(0\.5\)-w\/2':y='1280\*\(0\.5\+\(1-/);
@@ -661,4 +661,180 @@ test('presets storage: styles and templates on disk, built-ins protected, create
   assert.ok(st.isError && /Nothing to save/.test(st.content));
   P.deleteTemplate('Two cuts'); P.deleteStyle('Test look');
   assert.equal(P.listTemplates().length, 0);
+});
+
+test('timing: speed ramps are exact, split keeps the length, reverse and freeze map source time', async () => {
+  const T = await import('../src/timing.js');
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', in: 0, out: 4 });
+  const id = p.clips[0].id;
+  assert.match(run(p, 'set_speed_ramp', { clipId: id, preset: 'hero' }), /hero .*lasts 3\.03s/);
+  const c = p.clips[0];
+  // Numeric integral of 1/speed over the source matches the closed form.
+  let numeric = 0;
+  for (let k = 0, N = 20000; k < N; k++) {
+    const f = (k + 0.5) / N, pts = c.ramp.points;
+    const i = pts.findIndex((q) => q.at >= f);
+    const a = pts[i - 1], b = pts[i];
+    numeric += 4 / N / (a.speed + ((b.speed - a.speed) * (f - a.at)) / (b.at - a.at));
+  }
+  assert.ok(Math.abs(M.clipDuration(c) - numeric) < 1e-3);
+  for (const lt of [0, 0.7, 1.5, 2.9]) assert.ok(Math.abs(T.localAt(c, T.srcAt(c, lt)) - lt) < 1e-6);
+  assert.equal(+T.speedAt(c, 0.2).toFixed(3), 1.6);
+  const len = M.layout(p).duration;
+  run(p, 'split_clip', { clipId: id, at: 1.2 });
+  assert.ok(Math.abs(M.layout(p).duration - len) < 0.01);
+  assert.equal(p.clips[0].out, p.clips[1].in);
+  assert.equal(p.clips[0].ramp.points[0].at, 0);
+  assert.equal(p.clips[1].ramp.points.at(-1).at, 1);
+  // Custom points: ends are filled in, values validated; set_clip speed replaces the ramp.
+  run(p, 'set_speed_ramp', { clipId: p.clips[1].id, points: [{ at: 0.5, speed: 0.5 }, { at: 0.2, speed: 2 }] });
+  assert.deepEqual(p.clips[1].ramp.points, [{ at: 0, speed: 2 }, { at: 0.2, speed: 2 }, { at: 0.5, speed: 0.5 }, { at: 1, speed: 0.5 }]);
+  assert.throws(() => run(p, 'set_speed_ramp', { clipId: p.clips[1].id, points: [{ at: 0, speed: 20 }, { at: 1, speed: 1 }] }), /speed must be a number between 0.1 and 10/);
+  assert.throws(() => run(p, 'set_speed_ramp', { clipId: p.clips[1].id, preset: 'wobble' }), /preset must be one of/);
+  run(p, 'set_clip', { clipId: p.clips[1].id, speed: 2 });
+  assert.equal(p.clips[1].ramp, undefined);
+  assert.match(M.summarize(p), /speed ramp 0:1\.6x 0\.8718:1\.6x 1:0\.8353x/);
+
+  // Reverse: plays out..in, split halves keep that order; limited length; not on photos.
+  const q = project();
+  run(q, 'add_clip', { assetId: 'vid_a', in: 2, out: 6 });
+  run(q, 'set_clip', { clipId: q.clips[0].id, reverse: true });
+  assert.equal(T.srcAt(q.clips[0], 1), 5);
+  run(q, 'split_clip', { clipId: q.clips[0].id, at: 1 });
+  assert.deepEqual(q.clips.map((x) => [x.in, x.out, x.reverse]), [[5, 6, true], [2, 5, true]]);
+  assert.throws(() => run(q, 'trim_clip', { clipId: q.clips[1].id, in: 0, out: 10.5 }), /out must be a number|at most 10s/);
+  run(q, 'add_clip', { assetId: 'img_c' });
+  assert.throws(() => run(q, 'set_clip', { clipId: q.clips[2].id, reverse: true }), /Only video clips/);
+  const long = project();
+  long.assets.vid_a.duration = 20;
+  run(long, 'add_clip', { assetId: 'vid_a' });
+  assert.throws(() => run(long, 'set_clip', { clipId: long.clips[0].id, reverse: true }), /up to 10s of source/);
+  assert.match(M.summarize(q), /source 5\.00-6\.00s reversed/);
+
+  // Freeze frame: split + still in the middle, the frame comes from the reversed source.
+  assert.match(run(q, 'freeze_frame', { at: 0.5, duration: 1.5 }), /holds source 5\.5s .* for 1\.50s/);
+  const fz = q.clips[1];
+  assert.equal(fz.freeze, true); assert.equal(fz.volume, 0); assert.equal(M.clipDuration(fz), 1.5);
+  assert.equal(T.srcAt(fz, 1), 5.5);
+  assert.throws(() => run(q, 'set_clip', { clipId: fz.id, speed: 2 }), /freeze frame has no speed/);
+  run(q, 'trim_clip', { clipId: fz.id, out: 8.5 }); // hold 3s, past the end of the 10s file is fine
+  assert.equal(M.clipDuration(fz), 3);
+  assert.throws(() => run(q, 'freeze_frame', { at: 0.6 + 0.5 }), /already a still/);
+  assert.match(M.summarize(q), /freeze frame of source 5\.50s held 3\.00s/);
+  // Captions skip reversed clips and freeze frames.
+  const words = M.timelineWords(q, { vid_a: [{ w: 'hi', start: 5.2, end: 5.4 }] });
+  assert.equal(words.length, 0);
+  // avgRate turns a wanted length into an out point, whatever the trim.
+  const r = project();
+  run(r, 'add_clip', { assetId: 'vid_a', in: 0, out: 4 });
+  run(r, 'set_speed_ramp', { clipId: r.clips[0].id, preset: 'flash_in' });
+  const rate = T.avgRate(r.clips[0]);
+  run(r, 'trim_clip', { clipId: r.clips[0].id, out: 2 });
+  assert.ok(Math.abs(T.avgRate(r.clips[0]) - rate) < 1e-9);
+});
+
+test('delete_range ripples every layer; duplicate, delete, move and group items', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', out: 4 });
+  run(p, 'add_clip', { assetId: 'vid_b', out: 4 });
+  run(p, 'add_text', { text: 'before', start: 0, end: 1 });
+  run(p, 'add_text', { text: 'across', start: 2, end: 6 });
+  run(p, 'add_text', { text: 'inside', start: 3.2, end: 4.5 });
+  run(p, 'add_text', { text: 'after', start: 6, end: 7 });
+  run(p, 'add_overlay', { assetId: 'vid_b', start: 4, duration: 2 }); // starts inside
+  run(p, 'add_music', { assetId: 'aud_m', start: 0 });
+  run(p, 'add_music', { assetId: 'aud_m', start: 5.5, out: 1, role: 'sfx' });
+  run(p, 'add_markers', { times: [1, 3.5, 6] });
+  run(p, 'set_captions', { words: [{ w: 'a', start: 2.5, end: 2.8 }, { w: 'b', start: 3.4, end: 3.6 }, { w: 'c', start: 5.1, end: 5.3 }] });
+  const msg = run(p, 'delete_range', { start: 3, end: 5 });
+  assert.match(msg, /Removed 3\.00-5\.00s .*\(2\.00s\).*Video is now 6\.00s/);
+  assert.deepEqual(p.clips.map((c) => [c.assetId, c.in, c.out]), [['vid_a', 0, 3], ['vid_b', 1, 4]]);
+  assert.deepEqual(p.texts.map((x) => [x.text, x.start, x.end]), [['before', 0, 1], ['across', 2, 4], ['after', 4, 5]]);
+  assert.deepEqual([p.overlays[0].start, p.overlays[0].in, p.overlays[0].out], [3, 1, 2]);
+  assert.equal(p.music.find((m) => m.role === 'music').start, 0); // background music keeps playing
+  assert.equal(p.music.find((m) => m.role === 'sfx').start, 3.5);
+  assert.deepEqual(p.markers.map((m) => m.t), [1, 4]);
+  assert.deepEqual(p.captions.lines.flatMap((l) => l.words.map((w) => [w.w, w.start])), [['a', 2.5], ['c', 3.1]]);
+  assert.throws(() => run(p, 'delete_range', { start: 2, end: 2.01 }), /at least 0.05s/);
+
+  // Group, move together, duplicate as a new group, delete several.
+  const [t1, t2] = [p.texts[0].id, p.texts[2].id];
+  const sfx = p.music.find((m) => m.role === 'sfx').id;
+  assert.match(run(p, 'group_items', { ids: [t1, sfx] }), /Grouped 2 items as grp_\w+/);
+  const g = p.texts[0].group;
+  assert.throws(() => run(p, 'group_items', { ids: [p.clips[0].id, t2] }), /cannot be grouped/);
+  run(p, 'move_items', { ids: [t1], by: 0.5 }); // moves the sfx too
+  assert.deepEqual([p.texts[0].start, p.music.find((m) => m.id === sfx).start], [0.5, 4]);
+  run(p, 'move_items', { ids: [g], by: -10 }); // stops at 0
+  assert.equal(p.texts[0].start, 0);
+  assert.throws(() => run(p, 'move_items', { ids: [p.clips[0].id], by: 1 }), /use move_clip/);
+  const dup = run(p, 'duplicate_items', { ids: [t1], at: 8 });
+  assert.match(dup, /Duplicated 2 item\(s\)/);
+  const copies = [...p.texts, ...p.music].filter((x) => x.group && x.group !== g);
+  assert.equal(copies.length, 2);
+  assert.deepEqual(copies.map((x) => x.start).sort((a, b) => a - b), [8, 11.5]);
+  const nClips = p.clips.length;
+  run(p, 'duplicate_items', { ids: [p.clips[0].id] });
+  assert.equal(p.clips.length, nClips + 1);
+  assert.equal(p.clips[1].assetId, p.clips[0].assetId);
+  run(p, 'ungroup_items', { ids: [copies[0].group] });
+  assert.ok(copies.every((x) => !x.group));
+  run(p, 'delete_items', { ids: [p.clips[1].id, t2, copies[0].id] });
+  assert.equal(p.clips.length, nClips);
+  assert.ok(!p.texts.some((x) => x.id === t2));
+  assert.throws(() => run(p, 'delete_items', { ids: ['nope'] }), /No clip, text, overlay/);
+  assert.match(M.summarize(p), /group grp_/);
+});
+
+test('LUTs: import, resolve, set_color, render graph; freeze/reverse/ramp in the ffmpeg graph', async () => {
+  const LU = await import('../src/luts.js');
+  const tmp = path.join(os.tmpdir(), `lut-${Date.now()}.cube`);
+  fs.writeFileSync(tmp, 'TITLE "x"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n');
+  assert.equal(LU.importLut(tmp, 'My Film Look.cube'), 'My_Film_Look.cube');
+  const bad = path.join(os.tmpdir(), `bad-${Date.now()}.cube`);
+  fs.writeFileSync(bad, 'hello');
+  assert.throws(() => LU.importLut(bad, 'bad.cube'), /not a 3D .cube LUT/);
+  fs.rmSync(bad, { force: true });
+  assert.equal(LU.resolveLut('my_film_look'), 'My_Film_Look.cube');
+  assert.equal(LU.resolveLut('nope'), null);
+  M.env.resolveLut = LU.resolveLut;
+  try {
+    const p = project();
+    run(p, 'add_clip', { assetId: 'vid_a', in: 0, out: 3 });
+    run(p, 'add_clip', { assetId: 'vid_b', in: 0, out: 3 });
+    run(p, 'add_clip', { assetId: 'vid_a', in: 5, out: 8 });
+    assert.match(run(p, 'set_color', { clipId: p.clips[0].id, lut: 'My_Film_Look', lutIntensity: 0.5 }), /LUT My_Film_Look\.cube 0\.5/);
+    assert.throws(() => run(p, 'set_color', { clipId: p.clips[1].id, lut: 'missing' }), /Unknown LUT "missing"/);
+    assert.throws(() => run(p, 'set_color', { clipId: p.clips[1].id, lutIntensity: 0.5 }), /Set lut before/);
+    run(p, 'set_clip', { clipId: p.clips[1].id, reverse: true });
+    run(p, 'set_speed_ramp', { clipId: p.clips[2].id, preset: 'montage' });
+    run(p, 'freeze_frame', { at: 1, duration: 1 });
+    const { graph, args, tmpDir } = buildCommand(p, 'out.mp4', { quality: 'draft' });
+    try {
+      assert.match(graph, /lut3d=file='[^']*My_Film_Look\.cube':interp=tetrahedral/);
+      assert.match(graph, /blend=all_mode=normal:all_opacity=0\.500\[cc0u\]/);
+      // Freeze: one input frame held, silent; the input reads only 0.5s.
+      assert.match(graph, /\[1:v\]setpts=PTS-STARTPTS,trim=end_frame=1,setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration=2\.000/);
+      assert.match(graph, /anullsrc=r=48000:cl=stereo,atrim=duration=1\.000,asetpts=PTS-STARTPTS\[a1\]/);
+      assert.equal(args[args.indexOf('-ss', args.indexOf('-ss') + 1) + 3], '0.500');
+      // Reverse: frames limited to the canvas, then reversed; audio reversed.
+      assert.match(graph, /\[3:v\]setpts=PTS-STARTPTS,fps=\d+,scale=w='min\(iw,960\)':h='min\(ih,960\)':force_original_aspect_ratio=decrease,reverse,setpts=PTS\/1/);
+      assert.match(graph, /\[3:a\]aformat=[^;]*areverse/);
+      // Ramp: exact time curve for the video, constant-tempo pieces for the audio.
+      assert.match(graph, /\[4:v\]setpts=PTS-STARTPTS,setpts='\(if\(lt\(min\(T,3\),0\.9\)/);
+      assert.match(graph, /\[4:a\][^;]*asplit=\d+\[ra4_0\]/);
+      assert.match(graph, /concat=n=\d+:v=0:a=1,volume=1,apad/);
+    } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+    // Cover stills: full size, high quality.
+    const st = buildCommand(p, 'c.jpg', { frames: [0.5], still: true });
+    try {
+      assert.match(st.graph, /select='[^']*',format=yuvj420p\[vsel\]/);
+      assert.ok(!/scale=-2:960/.test(st.graph));
+      assert.equal(st.args[st.args.indexOf('-q:v') + 1], '2');
+    } finally { fs.rmSync(st.tmpDir, { recursive: true, force: true }); }
+  } finally {
+    M.env.resolveLut = null;
+    fs.rmSync(path.join(LU.LUTS_DIR, 'My_Film_Look.cube'), { force: true });
+  }
 });

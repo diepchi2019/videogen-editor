@@ -21,6 +21,7 @@
     </div>
     <div class="hgroup">
       <div id="jobs"></div>
+      <button id="exportCover" title="Save the frame at the playhead as a full-size cover image (JPEG)">Cover</button>
       <button id="exportDraft" title="Fast 540p preview render">Draft render</button>
       <button id="exportFinal" class="primary">Export MP4</button>
     </div>
@@ -28,7 +29,7 @@
 
   <main>
     <section id="media" class="panel">
-      <div class="panel-title">Media <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*" hidden /></label></div>
+      <div class="panel-title">Media <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*,.cube,.ttf,.otf" hidden /></label></div>
       <div id="assets" class="assets"><div class="empty">Drop videos, images or music here</div></div>
     </section>
 
@@ -46,7 +47,7 @@
         <button id="toStart" title="Go to start (Home)">⏮</button>
         <button id="play" title="Play / pause (Space)">▶</button>
         <span id="time">0:00.0 / 0:00.0</span>
-        <span class="hint">Space play · S split · Del delete · ←/→ step</span>
+        <span class="hint" title="Ctrl/Shift+click selects several · Ctrl+C / Ctrl+V copy and paste at the playhead · Ctrl+D duplicate · Ctrl+G group (Shift: ungroup) · F freeze frame · I / O mark a range, Shift+Del removes it · Esc clear">Space play · S split · F freeze · I/O range · Del delete · ←/→ step</span>
       </div>
       <div id="inspector" class="panel"></div>
     </section>
@@ -72,6 +73,10 @@
       <div id="tlTools">
         <button id="split" class="small" title="Split at playhead (S)">✂ Split</button>
         <button id="addText" class="small" title="Add text at playhead">T Add text</button>
+        <button id="freeze" class="small" title="Hold the frame at the playhead for 2s (F)">❄ Freeze</button>
+        <button id="record" class="small" title="Record a voiceover from the microphone while the video plays from the playhead">🎙 Record</button>
+        <button id="cutRange" class="small" title="Remove the range marked with I / O and close the gap (Shift+Del)" disabled>⌫ Cut range</button>
+        <button id="snap" class="small toggle" title="Snap to the playhead, clip edges, markers and other items while dragging">🧲 Snap</button>
         <label class="zoom">Zoom <input id="zoom" type="range" min="10" max="300" value="80" /></label>
       </div>
     </div>
@@ -84,6 +89,8 @@
           <div class="track" id="trackOverlay"></div>
           <div class="track" id="trackText"></div>
           <div class="track" id="trackMusic"></div>
+          <div id="rangeBand"></div>
+          <div id="snapLine"></div>
           <div id="playhead"></div>
         </div>
       </div>

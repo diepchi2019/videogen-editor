@@ -17,7 +17,7 @@ const server = new Server({ name: 'videogen-editor', version: '1.1.0' }, { capab
 
 const extra = [{
   name: 'import_media',
-  description: 'Import files from this computer into the editor: video, image or audio go to the media library; .ttf/.otf fonts become usable in text and captions. Give absolute paths.',
+  description: 'Import files from this computer into the editor: video, image or audio go to the media library; .ttf/.otf fonts become usable in text and captions; .cube color LUTs become usable with set_color lut. Give absolute paths.',
   inputSchema: { type: 'object', properties: { paths: { type: 'array', items: { type: 'string' } } }, required: ['paths'] },
   annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
 }];
@@ -39,6 +39,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       if (r.error) return { content: [{ type: 'text', text: `Error: ${r.error}` }], isError: true };
       const lines = r.added.map((a) => `${a.id} "${a.name}" ${a.type} ${a.duration ? a.duration.toFixed(2) + 's' : ''}`);
       if (r.fonts?.length) lines.push(...r.fonts.map((f) => `font "${f}"`));
+      if (r.luts?.length) lines.push(...r.luts.map((f) => `LUT ${f}`));
       return { content: [{ type: 'text', text: `Imported:\n${lines.join('\n')}` }] };
     }
     const res = await fetch(`${BASE}/api/tool/${name}`, {

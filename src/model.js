@@ -1,6 +1,9 @@
 // Project model + edit operations. Single source of truth used by the UI,
 // the in-app Claude chat, and the MCP server.
 import crypto from 'node:crypto';
+import { RAMP_PRESETS, clipLength, srcAt, localAt, playedAt, subRamp, avgRate } from './timing.js';
+
+export { RAMP_PRESETS, srcAt, localAt, avgRate };
 
 export const TRANSITIONS = [
   'none', 'fade', 'dissolve', 'fadeblack', 'fadewhite', 'wipeleft', 'wiperight', 'wipeup', 'wipedown',
@@ -69,7 +72,7 @@ export const uid = (p) => `${p}_${crypto.randomBytes(3).toString('hex')}`;
 const r3 = (n) => Math.round(n * 1000) / 1000;
 
 // Hooks the server installs (fonts live outside the pure model).
-export const env = { resolveFont: null };
+export const env = { resolveFont: null, resolveLut: null, loadStyle: null };
 
 export function emptyProject() {
   return {
@@ -99,7 +102,10 @@ export function migrate(p) {
   return p;
 }
 
-export const clipDuration = (c) => (c.out - c.in) / (c.speed || 1);
+// Length on the timeline, with speed, speed ramp and freeze frames (src/timing.js).
+export const clipDuration = (c) => clipLength(c);
+// Longest reversible source range: ffmpeg's reverse filter keeps every frame in memory.
+export const REVERSE_MAX = 10;
 export const overlayDuration = (o) => (o.out - o.in) / (o.speed || 1);
 
 // Compute timeline positions. A transition on clip i overlaps it with clip i-1.
@@ -121,24 +127,27 @@ export function layout(p) {
 export function timelineWords(p, transcripts, sources = ['clips', 'overlays', 'voice']) {
   const L = layout(p);
   const out = [];
-  const place = (words, srcIn, srcOut, tlStart, speed, tlEnd) => {
+  // toLocal maps source seconds to item-local seconds.
+  const place = (words, srcIn, srcOut, tlStart, toLocal, tlEnd) => {
     for (const w of words || []) {
       const mid = (w.start + w.end) / 2;
       if (mid < srcIn || mid > srcOut) continue;
-      const s = tlStart + (Math.max(w.start, srcIn) - srcIn) / speed;
-      const e = Math.min(tlEnd, tlStart + (Math.min(w.end, srcOut) - srcIn) / speed);
+      const s = tlStart + toLocal(Math.max(w.start, srcIn));
+      const e = Math.min(tlEnd, tlStart + toLocal(Math.min(w.end, srcOut)));
       if (s < L.duration && e > s) out.push({ w: w.w, start: r3(s), end: r3(Math.min(e, L.duration)) });
     }
   };
+  const linear = (srcIn, speed) => (x) => (x - srcIn) / speed;
   if (sources.includes('clips')) {
-    for (const c of L.clips) if ((c.volume ?? 1) > 0) place(transcripts[c.assetId], c.in, c.out, c.start, c.speed || 1, c.end);
+    // Reversed speech is not words, and a freeze frame is silent.
+    for (const c of L.clips) if ((c.volume ?? 1) > 0 && !c.reverse && !c.freeze) place(transcripts[c.assetId], c.in, c.out, c.start, (x) => localAt(c, x), c.end);
   }
   if (sources.includes('overlays')) {
-    for (const o of p.overlays) if ((o.volume ?? 1) > 0) place(transcripts[o.assetId], o.in, o.out, o.start, o.speed || 1, o.start + overlayDuration(o));
+    for (const o of p.overlays) if ((o.volume ?? 1) > 0) place(transcripts[o.assetId], o.in, o.out, o.start, linear(o.in, o.speed || 1), o.start + overlayDuration(o));
   }
   for (const m of p.music) {
     if (!sources.includes(m.role) && !(sources.includes('all'))) continue;
-    place(transcripts[m.assetId], m.in, m.out, m.start, 1, m.start + (m.out - m.in));
+    place(transcripts[m.assetId], m.in, m.out, m.start, linear(m.in, 1), m.start + (m.out - m.in));
   }
   return out.sort((a, b) => a.start - b.start);
 }
@@ -184,6 +193,7 @@ function describeColor(c) {
   if (!c) return '';
   const parts = COLOR_KEYS.filter(([k, , , d]) => c[k] !== undefined && c[k] !== d).map(([k]) => `${k} ${c[k]}`);
   if (c.filter) parts.push(`filter ${c.filter}${(c.filterIntensity ?? 1) !== 1 ? ` ${c.filterIntensity}` : ''}`);
+  if (c.lut) parts.push(`LUT ${c.lut}${(c.lutIntensity ?? 1) !== 1 ? ` ${c.lutIntensity}` : ''}`);
   return parts.length ? `, color: ${parts.join(' ')}` : '';
 }
 // Keyframe times are stored relative to the item; show them in timeline seconds.
@@ -198,6 +208,13 @@ function describeAnims(c) {
   if (c.animOut) a.push(`anim out ${c.animOut.type} ${c.animOut.duration}s`);
   return a.length ? `, ${a.join(', ')}` : '';
 }
+// Source range and speed of a clip: freeze frame, reverse, speed ramp.
+function describeTiming(c) {
+  if (c.freeze) return `freeze frame of source ${fmtT(c.in)}s held ${fmtT(c.out - c.in)}s`;
+  const sp = c.ramp ? `speed ramp ${c.ramp.preset ? `${c.ramp.preset} (` : ''}${c.ramp.points.map((q) => `${q.at}:${q.speed}x`).join(' ')}${c.ramp.preset ? ')' : ''}` : `speed ${c.speed}x`;
+  return `source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s${c.reverse ? ' reversed' : ''}, ${sp}`;
+}
+const describeGroup = (x) => (x.group ? `, group ${x.group}` : '');
 const describeEffects = (c, start) => (c.effects?.length
   ? `, effects: ${c.effects.map((e) => `${e.id} ${e.type} ${fmtT(start + e.from)}-${fmtT(start + e.to)}s intensity ${e.intensity}${e.type === 'zoom_pulse' || e.type === 'shake' ? ` rate ${e.rate}/s` : ''}`).join('; ')}` : '');
 
@@ -208,7 +225,7 @@ export function summarize(p, extras = {}) {
   const assets = Object.values(p.assets).map((a) =>
     `- ${a.id}: "${a.name}" ${a.type}${a.duration ? `, ${a.duration.toFixed(2)}s` : ''}${a.width ? `, ${a.width}x${a.height}` : ''}${a.type === 'video' ? (a.hasAudio ? ', has audio' : ', no audio') : ''}${tx.has(a.id) ? ', transcript ready' : ''}`);
   const clips = L.clips.map((c) =>
-    `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), source ${c.in.toFixed(2)}-${c.out.toFixed(2)}s, speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
+    `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), ${describeTiming(c)}, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
@@ -219,14 +236,14 @@ export function summarize(p, extras = {}) {
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
     `${o.opacity !== 1 ? `, opacity ${o.opacity}` : ''}${o.rotate ? `, rotate ${o.rotate}°` : ''}${o.crop ? `, crop x${o.crop.x} y${o.crop.y} w${o.crop.w} h${o.crop.h}` : ''}` +
     `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}` +
-    describeColor(o.color) + describeKeyframes(o, o.start));
+    describeColor(o.color) + describeKeyframes(o, o.start) + describeGroup(o));
   const texts = p.texts.map((x) =>
     `- ${x.id}: "${x.text}" ${x.start.toFixed(2)}-${x.end.toFixed(2)}s at (${x.x},${x.y}) size ${x.size} color ${x.color}` +
     `${x.font ? ` font "${x.font}"` : ''}${x.style ? ` style ${x.style}` : ''}${x.box ? ' with box' : ''}` +
     `${x.outline ? ` outline ${x.outline}${x.outlineColor ? ' ' + x.outlineColor : ''}` : ''}${x.shadow ? ` shadow ${x.shadow}` : ''}` +
-    `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}`);
+    `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}${describeGroup(x)}`);
   const music = p.music.map((m) =>
-    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}`);
+    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}${describeGroup(m)}`);
   const markers = p.markers || [];
   const byKind = {};
   for (const mk of markers) (byKind[mk.kind] ||= []).push(mk);
@@ -427,6 +444,17 @@ function colorFrom(base, input, prefix = '') {
   const fi = num(input.filterIntensity, prefix + 'filterIntensity', 0, 1);
   if (fi !== undefined) { if (!c.filter) fail(`Set ${prefix}filter (e.g. vintage) before ${prefix}filterIntensity`); c.filterIntensity = r3(fi); }
   if (c.filterIntensity === 1) delete c.filterIntensity;
+  // Imported .cube LUT (env.resolveLut finds it in data/luts).
+  if (input.lut !== undefined && input.lut !== null) {
+    if (input.lut === 'none' || input.lut === '') { delete c.lut; delete c.lutIntensity; } else {
+      const lut = env.resolveLut ? env.resolveLut(String(input.lut)) : String(input.lut);
+      if (!lut) fail(`Unknown LUT "${input.lut}". Call list_luts, or import a .cube file with import_media.`);
+      c.lut = lut;
+    }
+  }
+  const li = num(input.lutIntensity, prefix + 'lutIntensity', 0, 1);
+  if (li !== undefined) { if (!c.lut) fail(`Set ${prefix}lut before ${prefix}lutIntensity`); c.lutIntensity = r3(li); }
+  if (c.lutIntensity === 1) delete c.lutIntensity;
   return Object.keys(c).length ? c : undefined;
 }
 
@@ -479,7 +507,7 @@ export const STYLE_PARTS = ['canvas', 'clips', 'texts', 'captions', 'music', 'in
 const STYLE_KEY = { texts: 'title' };
 const TITLE_KEYS = ['style', 'font', 'size', 'color', 'bold', 'italic', 'outline', 'outlineColor', 'shadow', 'shadowColor', 'blur', 'box', 'boxColor', 'animation', 'animationOut', 'x', 'y'];
 const CAPTION_KEYS = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'uppercase', 'box', 'bold', 'font'];
-const COLOR_INPUT_KEYS = [...COLOR_KEYS.map(([k]) => k), 'filter', 'filterIntensity'];
+const COLOR_INPUT_KEYS = [...COLOR_KEYS.map(([k]) => k), 'filter', 'filterIntensity', 'lut', 'lutIntensity'];
 const MUSIC_KEYS = [['volume', 0, 2], ['fadeIn', 0, 30], ['fadeOut', 0, 30], ['duck', 0, 1]];
 const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o?.[k] !== undefined && o[k] !== null).map((k) => [k, o[k]]));
 const defined = (o) => Object.fromEntries(Object.entries(o || {}).filter(([, v]) => v !== undefined));
@@ -667,7 +695,8 @@ export function makeTemplate(p, { name, description, slotClipIds, keepMusic = tr
     const a = p.assets[c.assetId];
     x.slot = slots.length + 1;
     x.slotDuration = L.clips[i].duration;
-    x.assetId = null; x.in = 0; x.out = r3(x.slotDuration * (x.speed || 1));
+    const rate = avgRate(c);
+    x.assetId = null; x.in = 0; x.out = r3(x.slotDuration * rate);
     delete x.regions; // they belong to the old footage
     slots.push({ slot: x.slot, start: L.clips[i].start, duration: x.slotDuration, type: a?.type, was: a?.name });
     return x;
@@ -731,15 +760,19 @@ export function fillTemplate(p, tpl, input = {}) {
     if (!c0.slot) return re(c0);
     const c = structuredClone(c0);
     const f = fills[c.slot - 1], a = p.assets[f.assetId];
-    const sp = c.speed || 1, need = c.slotDuration * sp;
+    const sp = avgRate(c), need = c.freeze ? c.slotDuration : c.slotDuration * sp;
     c.assetId = a.id;
-    if (a.type === 'image') { c.in = 0; c.out = r3(need); } else {
+    if (a.type === 'image') { c.in = 0; c.out = r3(need); delete c.freeze; delete c.reverse; delete c.ramp; } else if (c.freeze) {
+      const at = Math.min(num(f.in, `slot ${c.slot} in`, 0, a.duration) ?? 0, Math.max(0, a.duration - 0.05));
+      c.in = r3(at); c.out = r3(at + need);
+    } else {
       let i0 = num(f.in, `slot ${c.slot} in`, 0, a.duration) ?? 0;
       if (i0 + need > a.duration) i0 = Math.max(0, a.duration - need);
       c.in = r3(i0); c.out = r3(Math.min(a.duration, i0 + need));
-      if (c.out - c.in < need - 0.01) notes.push(`slot ${c.slot} is ${fmtT((c.out - c.in) / sp)}s instead of ${fmtT(c.slotDuration)}s ("${a.name}" is too short)`);
+      if (c.out - c.in < need - 0.01) notes.push(`slot ${c.slot} is ${fmtT(clipDuration(c))}s instead of ${fmtT(c.slotDuration)}s ("${a.name}" is too short)`);
+      if (c.reverse && c.out - c.in > REVERSE_MAX) { delete c.reverse; notes.push(`slot ${c.slot} plays forward (reverse is limited to ${REVERSE_MAX}s of source)`); }
     }
-    const dur = (c.out - c.in) / sp;
+    const dur = clipDuration(c);
     if (c.effects) {
       c.effects = c.effects.filter((e) => e.from < dur - 0.05).map((e) => ({ ...e, to: r3(Math.min(e.to, dur)) }));
       if (!c.effects.length) delete c.effects;
@@ -759,6 +792,44 @@ export function fillTemplate(p, tpl, input = {}) {
   if (fills.length > n) notes.push(`${fills.length - n} extra clip(s) not used`);
   return `Filled template "${tpl.name}": ${n} slots, ${fmtT(layout(p).duration)}s.${notes.length ? ` Note: ${notes.join('; ')}.` : ''}`;
 }
+
+// Every timed item by id: {kind, key, item}. Main-track clips have kind 'clip'.
+const ITEM_LISTS = [['clip', 'clips'], ['text', 'texts'], ['overlay', 'overlays'], ['audio', 'music'], ['marker', 'markers']];
+function findItem(p, id) {
+  for (const [kind, key] of ITEM_LISTS) {
+    const list = p[key] || [];
+    const item = kind === 'clip' ? list.find((c, i) => c.id === id || `#${i + 1}` === id) : list.find((x) => x.id === id);
+    if (item) return { kind, key, item };
+  }
+  return fail(`No clip, text, overlay, audio item or marker ${id}. Call get_timeline for ids.`);
+}
+// Timeline span of a non-clip item.
+const itemStart = (kind, x) => (kind === 'marker' ? x.t : x.start);
+function itemEnd(kind, x) {
+  if (kind === 'marker') return x.t;
+  if (kind === 'text') return x.end;
+  if (kind === 'overlay') return x.start + overlayDuration(x);
+  return x.start + (x.out - x.in);
+}
+function shiftItem(kind, x, d) {
+  if (kind === 'marker') { x.t = r3(x.t + d); return; }
+  x.start = r3(x.start + d);
+  if (kind === 'text') x.end = r3(x.end + d);
+}
+// Items plus every other member of their groups (a group id selects the whole group).
+function withGroups(p, ids) {
+  const groups = new Set(ids.filter((id) => /^grp_/.test(id)));
+  const found = ids.filter((id) => !/^grp_/.test(id)).map((id) => findItem(p, id));
+  for (const f of found) if (f.item.group) groups.add(f.item.group);
+  const all = new Map(found.map((f) => [f.item.id, f]));
+  for (const [kind, key] of ITEM_LISTS) for (const x of p[key] || []) if (x.group && groups.has(x.group) && !all.has(x.id)) all.set(x.id, { kind, key, item: x });
+  if (!all.size) fail(`No items in group ${[...groups].join(', ')}`);
+  return [...all.values()];
+}
+const idList = (ids, name = 'ids') => {
+  if (!Array.isArray(ids) || !ids.length) fail(`${name} must be a non-empty array of item ids (clips, texts, overlays, audio items, markers)`);
+  return ids.map(String);
+};
 
 // Each op: (project, input) => message. Ops mutate the project.
 export const ops = {
@@ -780,12 +851,14 @@ export const ops = {
 
   trim_clip(p, { clipId, in: tin, out }) {
     const i = findClip(p, clipId), c = p.clips[i], a = p.assets[c.assetId];
-    const max = a.type === 'image' ? 3600 : a.duration;
-    const ni = num(tin, 'in', 0, max) ?? c.in, no = num(out, 'out', 0, max) ?? c.out;
+    // A freeze frame holds source "in" for out - in seconds, so its out may pass the end of the file.
+    const max = a.type === 'image' || c.freeze ? 3600 : a.duration;
+    const ni = num(tin, 'in', 0, c.freeze ? a.duration : max) ?? c.in, no = num(out, 'out', 0, max) ?? c.out;
     if (no - ni < 0.05) fail('Clip would be shorter than 0.05s');
+    if (c.reverse && no - ni > REVERSE_MAX) fail(`A reversed clip can use at most ${REVERSE_MAX}s of source (asked ${fmtT(no - ni)}s). Split it, or turn reverse off first.`);
     c.in = r3(ni); c.out = r3(no);
     clampAll(p);
-    return `Trimmed ${c.id} to source ${c.in}-${c.out}s`;
+    return c.freeze ? `Freeze frame ${c.id} now holds source ${c.in}s for ${fmtT(c.out - c.in)}s` : `Trimmed ${c.id} to source ${c.in}-${c.out}s`;
   },
 
   split_clip(p, { clipId, at }) {
@@ -797,11 +870,20 @@ export const ops = {
     if (i < 0) fail(`No clip at ${t}s`);
     const c = p.clips[i], lc = L.clips[i];
     if (t <= lc.start + 0.05 || t >= lc.end - 0.05) fail(`Split time ${t}s must be inside clip (${lc.start}-${lc.end}s)`);
-    const srcT = r3(c.in + (t - lc.start) * c.speed);
-    const second = { ...structuredClone(c), id: uid('clip'), in: srcT, transition: { type: 'none', duration: 0.5 } };
+    const lt = t - lc.start;
+    const second = { ...structuredClone(c), id: uid('clip'), transition: { type: 'none', duration: 0.5 } };
+    if (c.freeze) { // two shorter holds of the same frame
+      second.out = r3(c.in + (lc.duration - lt));
+      c.out = r3(c.in + lt);
+    } else {
+      const R = c.out - c.in, u = playedAt(c, lt);
+      const srcT = r3(c.reverse ? c.out - u : c.in + u);
+      if (c.ramp) { const r1 = subRamp(c, 0, u), r2 = subRamp(c, u, R); c.ramp = { points: r1 }; second.ramp = { points: r2 }; }
+      // The first half plays first: source in..srcT forward, out..srcT reversed.
+      if (c.reverse) { second.out = srcT; c.in = srcT; } else { second.in = srcT; c.out = srcT; }
+    }
     // A zoom/pan restarts on each half; that is how CapCut behaves too.
-    splitTimed(c, second, t - lc.start);
-    c.out = srcT;
+    splitTimed(c, second, lt);
     p.clips.splice(i + 1, 0, second);
     clampAll(p);
     return `Split ${c.id} at ${t}s; new clip ${second.id}`;
@@ -829,8 +911,15 @@ export const ops = {
     const { clipId, speed, volume, fit, motion, motionIntensity } = input;
     const c = p.clips[findClip(p, clipId)];
     const f = oneOf(fit, FITS, 'fit'); if (f) c.fit = f;
-    const s = num(speed, 'speed', 0.25, 4); if (s !== undefined) c.speed = s;
+    const s = num(speed, 'speed', 0.25, 4);
+    if (s !== undefined) { if (c.freeze) fail('A freeze frame has no speed; change its length with trim_clip (out = in + seconds).'); c.speed = s; delete c.ramp; }
     const v = num(volume, 'volume', 0, 2); if (v !== undefined) c.volume = v;
+    const rv = bool(input.reverse);
+    if (rv === true) {
+      if (p.assets[c.assetId]?.type !== 'video' || c.freeze) fail('Only video clips can be reversed');
+      if (c.out - c.in > REVERSE_MAX) fail(`Reverse works on up to ${REVERSE_MAX}s of source; this clip uses ${fmtT(c.out - c.in)}s. Split or trim it first.`);
+      c.reverse = true;
+    } else if (rv === false) delete c.reverse;
     applyTransform(c, input);
     const mo = oneOf(motion, MOTIONS, 'motion');
     const mi = num(motionIntensity, 'motionIntensity', 0.02, 0.6);
@@ -845,7 +934,7 @@ export const ops = {
       else if (d !== undefined) { if (!c[k]) fail(`Set ${k} (e.g. fade) before ${dk}`); c[k].duration = r3(d); }
     }
     clampAll(p);
-    return `Updated ${c.id}: speed ${c.speed}x, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}${describeAnims(c)}`;
+    return `Updated ${c.id}: ${describeTiming(c)}, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}${describeAnims(c)}`;
   },
 
   set_transition(p, { clipId, type, duration }) {
@@ -857,13 +946,202 @@ export const ops = {
     return `Transition into ${p.clips[i].id}: ${type} ${p.clips[i].transition.duration}s`;
   },
 
+  // Hold one frame: inserts a still of the frame at timeline time `at` (the clip is split there).
+  freeze_frame(p, { at, duration, clipId }) {
+    const t = num(at, 'at', 0) ?? fail('at is required: timeline seconds of the frame to hold');
+    const L = layout(p);
+    let i = clipId ? findClip(p, clipId) : L.clips.findIndex((c) => t >= c.start && t < c.end);
+    if (i < 0 && L.clips.length && t >= L.duration - 0.05) i = L.clips.length - 1;
+    if (i < 0) fail(`No clip at ${t}s (video is ${fmtT(L.duration)}s)`);
+    const c = p.clips[i], lc = L.clips[i], a = p.assets[c.assetId];
+    if (a.type !== 'video' || c.freeze) fail('That clip is already a still (photo or freeze frame); to show it longer, trim it.');
+    const lt = Math.min(Math.max(0, t - lc.start), lc.duration);
+    const d = num(duration, 'duration', 0.1, 60) ?? 2;
+    const src = Math.min(srcAt(c, lt), Math.max(0, a.duration - 0.05));
+    const fz = {
+      id: uid('clip'), assetId: c.assetId, in: r3(src), out: r3(src + d), freeze: true, speed: 1, volume: 0, fit: c.fit || 'contain',
+      transition: { type: 'none', duration: 0.5 }, ...structuredClone(pick(c, ['transform', 'color', 'regions'])),
+    };
+    let pos;
+    if (lt <= 0.05) { pos = i; fz.transition = c.transition || fz.transition; c.transition = { type: 'none', duration: 0.5 }; } else if (lt >= lc.duration - 0.05) pos = i + 1;
+    else { ops.split_clip(p, { clipId: c.id, at: t }); pos = i + 1; }
+    p.clips.splice(pos, 0, fz);
+    if (p.clips[0]) p.clips[0].transition = { type: 'none', duration: 0.5 };
+    clampAll(p);
+    return `Added freeze frame ${fz.id} at position ${pos + 1}: holds source ${fz.in}s of "${a.name}" for ${fmtT(d)}s; video is now ${fmtT(layout(p).duration)}s`;
+  },
+
+  // Speed that changes over the clip (preset or points); audio keeps its pitch.
+  set_speed_ramp(p, { clipId, preset, points }) {
+    const c = p.clips[findClip(p, clipId)];
+    if (c.freeze || p.assets[c.assetId]?.type !== 'video') fail('Speed ramps need a video clip');
+    if (preset === 'none' || (Array.isArray(points) && !points.length && !preset)) {
+      delete c.ramp; clampAll(p);
+      return `Removed the speed ramp from ${c.id}; it plays at ${c.speed}x (${fmtT(clipDuration(c))}s)`;
+    }
+    let pts;
+    if (preset !== undefined && preset !== null) {
+      const pr = RAMP_PRESETS[preset];
+      if (!pr) fail(`preset must be one of: ${Object.keys(RAMP_PRESETS).join(', ')}, none`);
+      pts = pr.map(([at, speed]) => ({ at, speed }));
+    } else {
+      if (!Array.isArray(points) || points.length < 2) fail('Give a preset, or points: at least 2 of {at (0 = start of the clip, 1 = end), speed (0.1-10)}');
+      if (points.length > 16) fail('At most 16 points');
+      const byAt = new Map();
+      points.forEach((q, k) => {
+        const at = num(q?.at, `points[${k}].at`, 0, 1) ?? fail(`points[${k}].at is required (0-1 position in the clip)`);
+        byAt.set(r3(at), r3(num(q.speed, `points[${k}].speed`, 0.1, 10) ?? fail(`points[${k}].speed is required (0.1-10)`)));
+      });
+      pts = [...byAt].map(([at, speed]) => ({ at, speed })).sort((x, y) => x.at - y.at);
+      if (pts[0].at > 0) pts.unshift({ at: 0, speed: pts[0].speed });
+      if (pts[pts.length - 1].at < 1) pts.push({ at: 1, speed: pts[pts.length - 1].speed });
+    }
+    c.ramp = { ...(preset ? { preset } : {}), points: pts };
+    c.speed = 1;
+    clampAll(p);
+    return `Speed ramp on ${c.id}: ${describeTiming(c).replace(/^.*?, speed ramp /, '')}; the clip now lasts ${fmtT(clipDuration(c))}s`;
+  },
+
+  // Ripple delete: remove timeline seconds start..end from every layer and close the gap.
+  delete_range(p, { start, end }) {
+    const s = num(start, 'start', 0) ?? fail('start is required (timeline seconds)');
+    const e = num(end, 'end', 0) ?? fail('end is required (timeline seconds)');
+    if (e - s < 0.05) fail('end must be at least 0.05s after start');
+    const before = layout(p).duration;
+    const cutAt = (t) => {
+      const L = layout(p);
+      const k = L.clips.findIndex((c) => t > c.start + 0.05 && t < c.end - 0.05);
+      if (k >= 0) ops.split_clip(p, { clipId: p.clips[k].id, at: t });
+    };
+    cutAt(s); cutAt(e);
+    const L = layout(p);
+    const gone = new Set(L.clips.filter((c) => c.start >= s - 0.05 && c.end <= e + 0.05).map((c) => c.id));
+    p.clips = p.clips.filter((c) => !gone.has(c.id));
+    if (p.clips[0]) p.clips[0].transition = { type: 'none', duration: 0.5 };
+    clampAll(p);
+    const after = layout(p).duration;
+    const shift = r3(s < before ? before - after + Math.max(0, e - before) : e - s);
+    // Other layers: items after the range move left, items inside go, items across it get shorter.
+    let removed = 0, cut = 0;
+    const span = (kind, list, opts = {}) => list.filter((x) => {
+      const a = itemStart(kind, x), b = itemEnd(kind, x);
+      if (b <= s + 1e-6) return true;
+      if (a >= e - 1e-6) { shiftItem(kind, x, -shift); return true; }
+      if (kind === 'marker' || (a >= s - 1e-6 && b <= e + 1e-6)) { removed++; return false; }
+      if (opts.keep) return true; // background music keeps playing across the cut
+      cut++;
+      const speed = x.speed || 1;
+      if (a < s) { // ends inside the range, or spans it
+        const newEnd = b > e ? b - shift : s;
+        if (kind === 'text') x.end = r3(newEnd); else x.out = r3(x.in + (newEnd - a) * speed);
+      } else { // starts inside the range
+        if (kind === 'text') { x.start = r3(s); x.end = r3(b - shift); } else { x.in = r3(x.in + (e - a) * speed); x.start = r3(s); }
+      }
+      return true;
+    });
+    p.texts = span('text', p.texts);
+    p.overlays = span('overlay', p.overlays);
+    p.music = [...span('audio', p.music.filter((m) => m.role !== 'music')), ...span('audio', p.music.filter((m) => m.role === 'music'), { keep: true })];
+    p.markers = span('marker', p.markers || []);
+    if (p.captions) {
+      p.captions.lines = p.captions.lines.map((l) => {
+        const words = l.words.filter((w) => w.end <= s + 1e-6 || w.start >= e - 1e-6).map((w) => (w.start >= e - 1e-6 ? { ...w, start: r3(w.start - shift), end: r3(w.end - shift) } : w));
+        if (!words.length) return null;
+        const st = l.start >= e - 1e-6 ? l.start - shift : Math.min(l.start, words[0].start);
+        const en = l.end >= e - 1e-6 ? l.end - shift : Math.min(l.end, s);
+        return { ...l, words, start: r3(st), end: r3(Math.max(en, words[words.length - 1].end)) };
+      }).filter(Boolean);
+      if (!p.captions.lines.length) p.captions = null;
+    }
+    return `Removed ${fmtT(s)}-${fmtT(e)}s and closed the gap (${fmtT(shift)}s): ${gone.size} clip piece(s), ${removed} other item(s) deleted, ${cut} shortened. Video is now ${fmtT(after)}s.`;
+  },
+
+  // Copy items. Clips go in as a block after the originals (or at the clip boundary nearest `at`);
+  // texts, overlays, audio and markers keep their spacing, starting at `at` (default: right after the originals).
+  duplicate_items(p, { ids, at }) {
+    const found = withGroups(p, idList(ids));
+    const t = num(at, 'at', 0);
+    const fresh = new Map();
+    const copy = (x, prefix) => {
+      const y = { ...structuredClone(x), id: uid(prefix) };
+      if (y.group) { if (!fresh.has(y.group)) fresh.set(y.group, uid('grp')); y.group = fresh.get(y.group); }
+      delete y.styleRole;
+      return y;
+    };
+    const made = [];
+    const clips = found.filter((f) => f.kind === 'clip').map((f) => f.item).sort((a, b) => p.clips.indexOf(a) - p.clips.indexOf(b));
+    if (clips.length) {
+      const L = layout(p);
+      const pos = t !== undefined ? L.clips.filter((c) => c.start + c.duration / 2 < t).length : p.clips.indexOf(clips[clips.length - 1]) + 1;
+      const copies = clips.map((c) => copy(c, 'clip'));
+      p.clips.splice(pos, 0, ...copies);
+      if (p.clips[0]) p.clips[0].transition = { type: 'none', duration: 0.5 };
+      clampAll(p);
+      made.push(...copies.map((c) => c.id));
+    }
+    const timed = found.filter((f) => f.kind !== 'clip');
+    if (timed.length) {
+      const first = Math.min(...timed.map((f) => itemStart(f.kind, f.item)));
+      const last = Math.max(...timed.map((f) => itemEnd(f.kind, f.item)));
+      const d = (t ?? last) - first;
+      for (const f of timed) {
+        const y = copy(f.item, { text: 'text', overlay: 'ov', marker: 'mk', audio: f.item.role || 'music' }[f.kind]);
+        shiftItem(f.kind, y, d);
+        p[f.key].push(y);
+        made.push(y.id);
+      }
+      p.markers?.sort((a, b) => a.t - b.t);
+    }
+    return `Duplicated ${made.length} item(s): ${made.join(', ')}`;
+  },
+
+  delete_items(p, { ids }) {
+    const found = idList(ids).map((id) => findItem(p, id));
+    const gone = new Set(found.map((f) => f.item.id));
+    for (const [, key] of ITEM_LISTS) if (p[key]) p[key] = p[key].filter((x) => !gone.has(x.id));
+    if (p.clips[0]) p.clips[0].transition = { type: 'none', duration: 0.5 };
+    clampAll(p);
+    return `Deleted ${gone.size} item(s): ${[...gone].join(', ')}`;
+  },
+
+  // Shift texts, overlays, audio items and markers in time (with their groups).
+  move_items(p, { ids, by }) {
+    let d = num(by, 'by', -3600, 3600) ?? fail('by is required: seconds to move (negative = earlier)');
+    const found = withGroups(p, idList(ids));
+    if (found.some((f) => f.kind === 'clip')) fail('Main-track clips have no free position; use move_clip to reorder them.');
+    const first = Math.min(...found.map((f) => itemStart(f.kind, f.item)));
+    if (first + d < 0) d = -first; // stop at 0
+    for (const f of found) shiftItem(f.kind, f.item, d);
+    p.markers?.sort((a, b) => a.t - b.t);
+    return `Moved ${found.length} item(s) by ${fmtT(d)}s`;
+  },
+
+  // Texts, overlays, audio items and markers in a group are selected and moved together.
+  group_items(p, { ids }) {
+    const found = idList(ids).map((id) => findItem(p, id));
+    if (found.some((f) => f.kind === 'clip')) fail('Main-track clips cannot be grouped (they move with the track); group texts, overlays, audio and markers.');
+    if (found.length < 2) fail('Give at least 2 items to group');
+    const g = uid('grp');
+    for (const f of found) f.item.group = g;
+    return `Grouped ${found.length} items as ${g}`;
+  },
+
+  ungroup_items(p, { ids }) {
+    const found = withGroups(p, idList(ids));
+    for (const f of found) delete f.item.group;
+    return `Ungrouped ${found.length} item(s)`;
+  },
+
+
   // Swap the media under a clip, keeping its timing, transform, motion, transition and regions.
   replace_clip_asset(p, { clipId, assetId, in: tin, out, clearRegions }) {
     const c = p.clips[findClip(p, clipId)];
     const a = asset(p, assetId, ['video', 'image']);
-    const max = a.type === 'image' ? 3600 : a.duration;
+    const max = a.type === 'image' || c.freeze ? 3600 : a.duration;
     const ni = num(tin, 'in', 0, max) ?? c.in;
     const no = num(out, 'out', 0, max) ?? c.out;
+    if (a.type === 'image') { delete c.freeze; delete c.reverse; delete c.ramp; }
+    if (c.freeze && ni > a.duration - 0.05) fail(`This freeze frame shows source ${c.in}s but "${a.name}" is only ${a.duration.toFixed(2)}s long. Pass in.`);
     if (no > max + 0.001) fail(`Clip uses source ${c.in}-${c.out}s but "${a.name}" is only ${a.duration.toFixed(2)}s long. Pass in/out that fit inside it.`);
     if (no - ni < 0.05) fail('out must be at least 0.05s after in');
     const old = p.assets[c.assetId];
@@ -1013,11 +1291,13 @@ export const ops = {
         const next = p.clips[i + 1];
         const ov = next?.transition && next.transition.type !== 'none' ? next.transition.duration : 0;
         const a = p.assets[c.assetId];
-        const maxLen = a.type === 'image' ? 3600 : (a.duration - c.in) / (c.speed || 1);
+        const rate = avgRate(c);
+        const maxLen = a.type === 'image' || c.freeze ? 3600 : (a.duration - c.in) / rate;
         const g = grid.find((x) => x > s + 0.2);
         if (g === undefined) { notes.push(`#${i + 1} kept (no beat left after ${fmtT(s)}s)`); s += clipDuration(c) - ov; return; }
         if (g - s + ov > maxLen + 1e-6) { notes.push(`#${i + 1} kept: its source is too short to reach the beat at ${fmtT(g)}s`); s += clipDuration(c) - ov; return; }
-        c.out = r3(c.in + (g - s + ov) * (c.speed || 1));
+        if (c.reverse && (g - s + ov) * rate > REVERSE_MAX) { notes.push(`#${i + 1} kept: a reversed clip can use at most ${REVERSE_MAX}s of source`); s += clipDuration(c) - ov; return; }
+        c.out = r3(c.in + (g - s + ov) * rate);
         s = g; cut++;
       });
     };

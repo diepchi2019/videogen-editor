@@ -179,6 +179,55 @@ try {
   const styled = tl.content.find((b) => b.type === 'image');
   ok(styled, 'styled template project renders');
   fs.writeFileSync(path.join(framesDir, 'styled-template.jpg'), Buffer.from(styled.source.data, 'base64'));
+
+  // --- freeze frame, reverse, speed ramp, LUT, voiceover upload, group + copy, ripple delete, cover ---
+  await tool('create_project', { name: 'Quick wins' });
+  await tool('batch_edit', { ops: [
+    { name: 'add_clip', input: { assetId: vid.id, in: 0, out: 4 } },
+    { name: 'add_clip', input: { assetId: vid.id, in: 1, out: 3 } },
+    { name: 'add_clip', input: { assetId: vidNoA.id } },
+    { name: 'set_speed_ramp', input: { clipId: '$1', preset: 'hero' } },
+    { name: 'set_clip', input: { clipId: '$2', reverse: true } },
+  ] });
+  const fz = await tool('freeze_frame', { at: 1, duration: 1 });
+  ok(/Added freeze frame clip_\w+ at position 2/.test(fz.content), fz.content);
+  const cube = ['LUT_3D_SIZE 2'];
+  for (let b = 0; b < 2; b++) for (let g = 0; g < 2; g++) for (let r = 0; r < 2; r++) cube.push(`${Math.min(1, r + 0.15)} ${g * 0.95} ${b * 0.7}`);
+  const lutForm = new FormData();
+  lutForm.append('files', new Blob([cube.join('\n')]), 'warm look.cube');
+  const lu = await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: lutForm })).json();
+  ok(lu.luts?.[0] === 'warm_look.cube' && lu.luts.length === 1, 'import a .cube LUT');
+  s = await tool('get_timeline');
+  const QW = s.layout.clips;
+  await tool('set_color', { clipId: QW[QW.length - 1].id, lut: 'warm look', lutIntensity: 0.8 });
+  // A browser recording arrives as WebM/Opus and is stored as AAC.
+  const webm = path.join(data, 'take.webm');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1.5', '-c:a', 'libopus', webm]);
+  const vf = new FormData();
+  vf.append('files', new Blob([fs.readFileSync(webm)]), 'voiceover-take.webm');
+  const vo = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: vf })).json()).added[0];
+  ok(vo.type === 'audio' && vo.file.endsWith('.m4a') && Math.abs(vo.duration - 1.5) < 0.1, `voiceover upload stored as ${vo.file} (${vo.duration.toFixed(2)}s)`);
+  const voice = /Added voice (voice_\w+)/.exec((await tool('add_music', { assetId: vo.id, role: 'voice', start: 0.5 })).content)[1];
+  const title = /text_\w+/.exec((await tool('add_text', { text: 'QUICK WINS', start: 0.2, end: 1.8, y: 0.2, size: 90 })).content)[0];
+  const grp = /grp_\w+/.exec((await tool('group_items', { ids: [title, voice] })).content)[0];
+  await tool('duplicate_items', { ids: [grp], at: 4 });
+  s = await tool('get_timeline');
+  ok(s.project.texts.length === 2 && s.project.music.length === 2 && new Set(s.project.texts.map((x) => x.group)).size === 2, 'group + duplicate makes a second group');
+  const beforeCut = s.layout.duration;
+  const rd = await tool('delete_range', { start: 5, end: 5.5 });
+  ok(Math.abs(rd.layout.duration - (beforeCut - 0.5)) < 0.01, rd.content);
+  s = await tool('get_timeline');
+  const missing = ['freeze frame of source', 'reversed', 'speed ramp 0:1.6x', 'LUT warm_look.cube 0.8', 'group grp_'].filter((x) => !s.content.includes(x));
+  ok(!missing.length, `summary shows freeze, reverse, ramp (split by the freeze), LUT, groups${missing.length ? `; missing ${missing}` : ''}`);
+  const qwFrames = await tool('look_at_timeline', { times: [0.5, 1.5, 3.5, s.layout.duration - 0.5] });
+  qwFrames.content.filter((b) => b.type === 'image').forEach((b, i) => fs.writeFileSync(path.join(framesDir, `quickwins-${i}.jpg`), Buffer.from(b.source.data, 'base64')));
+  const qx = await tool('export_video', { quality: 'draft', wait: true });
+  const qPath = /done 100% file: (.+?\.mp4)/.exec(qx.content)?.[1];
+  const qDur = Number(probe(qPath, 'format=duration'));
+  ok(qPath && Math.abs(qDur - s.layout.duration) < 0.25, `freeze/reverse/ramp/LUT export: ${qDur.toFixed(2)}s ~ timeline ${s.layout.duration}s`);
+  const cov = await tool('export_cover', { t: 0.5 });
+  const covPath = /: (.+?\.jpg) \(URL/.exec(cov.content[0].text)?.[1];
+  ok(covPath && probe(covPath, 'stream=width,height') === '1080,1920' && cov.content.some((b) => b.type === 'image'), `export_cover: ${path.basename(covPath)} 1080x1920`);
   await tool('open_project', { projectId: firstId });
 
   // --- MCP server over stdio ---
