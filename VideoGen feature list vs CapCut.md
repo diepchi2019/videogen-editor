@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated Nov 5, 2026, after style presets and templates). Every P0 editor feature and most P1 polish features are in place; the remaining gaps are mostly AI and P2 extras.
+Of the 57 CapCut features listed, VideoGen has 42 and 1 more in part (updated Nov 5, 2026, after the Phase 2.5 quick wins). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI features, text to speech and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -20,12 +20,12 @@ Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated No
 | Timeline | Undo / redo | Yes | Have | P0 |
 | Timeline | Zoom, playhead, keyboard shortcuts | Yes | Have | P0 |
 | Timeline | Multiple video tracks (overlay, picture-in-picture) | Yes | Have (overlay tracks; preview shows position, size, opacity) | P0 |
-| Timeline | Snapping, magnetic timeline, ripple delete | Yes | Partial (main track is magnetic) | P1 |
-| Timeline | Freeze frame, reverse clip | Yes | Missing | P1 |
-| Timeline | Multi-select, copy / paste, group | Yes | Missing | P1 |
+| Timeline | Snapping, magnetic timeline, ripple delete | Yes | Have (snap to playhead, edges, markers; ripple delete of an I/O range across all layers) | P1 |
+| Timeline | Freeze frame, reverse clip | Yes | Have (reverse up to 10s of source; preview seeks without sound) | P1 |
+| Timeline | Multi-select, copy / paste, group | Yes | Have (texts, overlays, audio and markers group; clips copy as a block) | P1 |
 | Timeline | Markers, beat markers | Yes | Have (note and beat markers on the ruler; mark_beats) | P1 |
 | Clip | Speed (constant) | Yes | Have | P0 |
-| Clip | Speed curves (ramp) | Yes | Missing | P1 |
+| Clip | Speed curves (ramp) | Yes | Have (6 presets or custom points, audio pitch kept) | P1 |
 | Clip | Volume per clip, mute | Yes | Have | P0 |
 | Clip | Fit modes: letterbox, crop, blurred background | Yes | Have | P0 |
 | Clip | Crop, rotate, flip, position, scale | Yes | Have (preview shows all but crop) | P0 |
@@ -33,7 +33,7 @@ Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated No
 | Clip | Ken Burns zoom on photos | Yes (via keyframes / effects) | Have (6 zoom/pan presets; export only, not in preview) | P0 |
 | Clip | Opacity and blend modes | Yes | Missing | P2 |
 | Visual | Color adjust: brightness, contrast, saturation, temperature | Yes | Have (plus vignette; clips and overlays) | P1 |
-| Visual | Filters / LUTs | Yes (many presets) | Partial (10 looks with intensity; no .cube LUT import yet) | P1 |
+| Visual | Filters / LUTs | Yes (many presets) | Have (10 looks with intensity, .cube LUT import; LUTs not in the preview) | P1 |
 | Visual | Video effects (shake, glitch, zoom pulse, light leaks) | Yes (hundreds) | Partial (9: shake, zoom pulse, glitch, RGB split, flash, blur, VHS, light leak, invert; export only) | P1 |
 | Visual | Chroma key (green screen) | Yes | Missing | P2 |
 | Visual | Masks (shape, split) | Yes | Missing | P2 |
@@ -51,7 +51,7 @@ Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated No
 | Audio | Multiple audio tracks, sound effects | Yes | Have (music / sfx / voice roles, numbered tracks) | P0 |
 | Audio | Waveform on timeline | Yes | Have (audio items and clips with sound) | P1 |
 | Audio | Beat detection, cut to the beat | Yes | Have (analyze_audio, mark_beats, fit_clips_to_beats) | P1 |
-| Audio | Voiceover recording | Yes | Missing | P1 |
+| Audio | Voiceover recording | Yes | Have (records from the playhead onto a voice track) | P1 |
 | Audio | Ducking music under speech | Yes | Have (sidechain compression keyed by clip audio + voice; export only) | P1 |
 | Audio | Noise reduction, voice effects | Yes | Missing | P2 |
 | Audio | Royalty-free music library | Yes | Missing | P2 |
@@ -69,13 +69,13 @@ Of the 57 CapCut features listed, VideoGen has 35 and 3 more in part (updated No
 | Project | Proxy files for smooth 4K / HEVC editing | Yes | Have (automatic on import, 720p H.264) | P1 |
 | Export | MP4 export, aspect ratios | Yes | Have (9:16, 16:9, 1:1, 4:5) | P0 |
 | Export | Resolution, fps, bitrate choice | Yes | Have (480p-2160p, fps, Mbps, draft) | P1 |
-| Export | Export cover image / thumbnail | Yes | Missing | P1 |
+| Export | Export cover image / thumbnail | Yes | Have (export_cover: full-size JPEG of any frame) | P1 |
 | Export | GPU encoding | Yes | Have (NVENC, Quick Sync, AMF; encoder gpu/auto) | P2 |
 | Export | Publish to TikTok / YouTube / Facebook | Yes (TikTok, YouTube) | Missing | P2 |
 
 ## MCP server features
 
-The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 60 tools (61 with import_media) and 3 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
+The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 69 tools (70 with import_media) and 3 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
 
 | Feature | What it lets Claude do | VideoGen | Priority |
 | --- | --- | --- | --- |
@@ -111,10 +111,15 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
 
 1. **Phase 1, reel essentials (P0) — done Nov 2, 2026:** auto-captions with Whisper including word-by-word style, fonts and text presets, overlay track for picture-in-picture and logos, crop / position / scale, Ken Burns on photos, multiple projects, sound-effects track. MCP: timeline frame preview, transcribe, batch edits. Also shipped: project as MCP resource, export and wait, tool annotations. Still missing from the browser preview: clip transforms, Ken Burns and the new text styles (export and look_at_timeline show them).
 2. **Phase 2, polish (P1) — done Nov 4, 2026:** keyframes, color adjust and 10 filter looks, 9 starter effects, clip in / out animations, waveforms, beat detection with beat markers and cut-to-beat, ducking, real transitions in preview, proxy files for 4K / HEVC, export resolution / fps / bitrate and GPU encoding. Not in the browser preview: effects, ducking, vignette, crop (export and look_at_timeline show them). Left for later: .cube LUT import, more effects, speed ramps.
+   - **Phase 2.5, code-only gaps (added Nov 5, 2026):** features that need only ffmpeg and our own code (no models, downloads or paid services).
+     - **Quick wins (P1) — done Nov 5, 2026:** freeze frame, reverse clip, export cover image, snapping and ripple delete, multi-select with copy / paste / group, speed ramps (speed points per clip), .cube LUT import (`lut3d`), voiceover recording in the browser (saved as a voice track, so ducking and captions work with it).
+     - **Extras (P2):** chroma key (`chromakey`), opacity and blend modes (`blend`), shape and split masks, noise reduction and voice effects (`afftdn`, pitch, echo), GIF and image stickers, smooth slow motion (`minterpolate`), more effects.
+     - **Preview gaps:** show effects, Ken Burns, crop, vignette and the newer text styles in the browser preview with CSS / canvas.
+     - **Claude does the AI part:** a basic auto reframe (Claude looks at frames and writes crop keyframes), and long video to short clips (a tool that lists candidate moments from transcript, loudness and scene changes for Claude to pick from).
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe, text to speech, connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: make auto-captions ready to use (below), then the rest of Phase 3 (text to speech, auto reframe, AI pipeline).
+Next: make auto-captions ready to use (below), then the Phase 2.5 extras (chroma key, blend modes and noise reduction first), then the rest of Phase 3 (text to speech, auto reframe with a detector, AI pipeline).
 
 ### Auto-captions setup (added Nov 5, 2026)
 
@@ -125,5 +130,5 @@ Captions are built, but they don't run on the dev machine yet because no Whisper
 3. **Check GPU use:** time `test/fixtures/speech.mp3` with `use_gpu` on and off to see whether this ffmpeg build uses the T550. Note the result in CLAUDE.md.
 4. **Skip silence with VAD:** pass ffmpeg's `vad_model` (Silero) when the file is present, so long clips with silences transcribe faster and leave out made-up words in quiet parts.
 5. **Captions button in the browser:** caption preset and language picker that runs `add_captions`, with a clear message when no model is installed (and where to get one).
-6. **Docs:** a model setup section in the README (which model for which machine, download command), and remove the outdated "Known limits" lines (no auto-captions, one project, one video track).
+6. **Docs:** a model setup section in the README (which model for which machine, download command). The outdated "Known limits" lines were already replaced on Nov 5, 2026.
 7. **Test:** with the model in place, `npm test` runs the smoke test's captions step instead of skipping it.

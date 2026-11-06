@@ -8,6 +8,8 @@ import { buildAss } from './ass.js';
 import { defaultFont, stageFonts } from './fonts.js';
 import { createJob, finishJob, getJob, listJobs } from './jobs.js';
 import { run } from './media.js';
+import { rampPieces, pieceTime } from './timing.js';
+import { lutPath } from './luts.js';
 
 export { getJob, listJobs };
 
@@ -68,6 +70,33 @@ export function kfExpr(tr, tv = 't') {
 const r6 = (n) => Math.round(n * 1e6) / 1e6;
 const ease = (p) => `(${p}*${p}*(3-2*${p}))`;
 
+// ---------- Clip timing: speed ramps (src/timing.js) ----------
+// setpts expression: output seconds for played-source seconds T (exact integral of 1/speed).
+export function rampExpr(c) {
+  const ps = rampPieces(c);
+  const U = `min(T,${r6(c.out - c.in)})`;
+  const f = (pc) => {
+    const d = pc.u1 - pc.u0, k = pc.v1 - pc.v0;
+    return Math.abs(k) < 1e-9 ? `${r6(pc.t0)}+(${U}-${r6(pc.u0)})/${r6(pc.v0)}` : `${r6(pc.t0)}+(${r6(d / k)})*log(1+(${r6(k / (d * pc.v0))})*(${U}-${r6(pc.u0)}))`;
+  };
+  let e = f(ps[ps.length - 1]);
+  for (let i = ps.length - 2; i >= 0; i--) e = `if(lt(${U},${r6(ps[i].u1)}),${f(ps[i])},${e})`;
+  return e;
+}
+// Audio of a ramp: short pieces at constant tempo, each exactly as long as the video it covers.
+export function rampAudioSegments(c) {
+  const step = Math.max(0.1, (c.out - c.in) / 24);
+  const segs = [];
+  for (const pc of rampPieces(c)) {
+    const m = Math.abs(pc.v1 - pc.v0) < 1e-9 ? 1 : Math.min(24, Math.max(1, Math.ceil((pc.u1 - pc.u0) / step)));
+    for (let j = 0; j < m; j++) {
+      const a = pc.u0 + ((pc.u1 - pc.u0) * j) / m, b = pc.u0 + ((pc.u1 - pc.u0) * (j + 1)) / m;
+      segs.push({ a, b, tempo: (b - a) / (pieceTime(pc, b) - pieceTime(pc, a)) });
+    }
+  }
+  return segs;
+}
+
 // ---------- Color ----------
 // Filter looks (FILTERS in model.js). Keep in sync with the CSS approximations in public/app.js.
 export const LOOKS = {
@@ -92,17 +121,19 @@ function applyColor(filters, inL, c, tag, fmt) {
   if (c.vignette) f.push(`vignette=angle=${f3(0.25 + 0.6 * c.vignette)}`);
   let cur = inL;
   if (f.length) { filters.push(`[${cur}]${f.join(',')},format=${fmt}[${tag}a]`); cur = `${tag}a`; }
-  const look = c.filter && LOOKS[c.filter];
-  if (look) {
-    const I = c.filterIntensity ?? 1;
-    if (I >= 0.999) filters.push(`[${cur}]${look},format=${fmt}[${tag}b]`);
+  // Imported .cube LUT, blended with the original below intensity 1.
+  const mix = (filter, I, k) => {
+    if (I >= 0.999) filters.push(`[${cur}]${filter},format=${fmt}[${tag}${k}]`);
     else {
-      filters.push(`[${cur}]format=${fmt},split[${tag}o][${tag}i]`);
-      filters.push(`[${tag}i]${look},format=${fmt}[${tag}l]`);
-      filters.push(`[${tag}l][${tag}o]blend=all_mode=normal:all_opacity=${f3(I)}[${tag}b]`);
+      filters.push(`[${cur}]format=${fmt},split[${tag}${k}o][${tag}${k}i]`);
+      filters.push(`[${tag}${k}i]${filter},format=${fmt}[${tag}${k}l]`);
+      filters.push(`[${tag}${k}l][${tag}${k}o]blend=all_mode=normal:all_opacity=${f3(I)}[${tag}${k}]`);
     }
-    cur = `${tag}b`;
-  }
+    cur = `${tag}${k}`;
+  };
+  if (c.lut) mix(`lut3d=file=${q(lutPath(c.lut))}:interp=tetrahedral`, c.lutIntensity ?? 1, 'u');
+  const look = c.filter && LOOKS[c.filter];
+  if (look) mix(look, c.filterIntensity ?? 1, 'b');
   return cur;
 }
 
@@ -272,7 +303,8 @@ export function motionFilter(m, W, H, fps, dur) {
 
 // opts.quality: 'draft' | 'final'. opts.frames: [timeline seconds] -> render JPEG stills instead of an MP4.
 // opts.resolution: '720p'... (short side; overrides draft scaling), opts.fps, opts.bitrate (Mbps), opts.encoder: 'cpu' | 'gpu' | an ffmpeg encoder name.
-export function buildCommand(project, outFile, { quality = 'final', frames = null, resolution, fps: fpsOpt, bitrate, encoder = 'cpu' } = {}) {
+// opts.still: frames at full output size and high JPEG quality (cover images).
+export function buildCommand(project, outFile, { quality = 'final', frames = null, still = false, resolution, fps: fpsOpt, bitrate, encoder = 'cpu' } = {}) {
   const L = layout(project);
   if (!L.clips.length) throw new Error('Timeline is empty. Add at least one clip before exporting.');
   const short = Math.min(project.settings.width, project.settings.height);
@@ -294,14 +326,22 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const srcLen = c.out - c.in;
     const dur = c.duration;
     if (a.type === 'image') args.push('-loop', '1', '-framerate', String(fps), '-t', f3(dur + 0.5), '-i', file);
-    else args.push('-ss', f3(c.in), '-t', f3(srcLen), '-i', file);
+    else args.push('-ss', f3(c.in), '-t', f3(c.freeze ? 0.5 : srcLen), '-i', file);
     const n = input++;
     const sp = c.speed || 1;
     const T = c.transform || {};
     const tail = `setsar=1,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=1,trim=duration=${f3(dur)},setpts=PTS-STARTPTS,settb=AVTB`;
     const cleaned = regionFilters(c, a, i, n, file, args, filters, () => input++);
     const geo = geometry(T, bg);
-    filters.push(`${cleaned ? `[${cleaned}]setpts=PTS/${sp}` : `[${n}:v]setpts=(PTS-STARTPTS)/${sp}`}${geo.length ? `,${geo.join(',')}` : ''}[h${i}]`);
+    // Timing: freeze = hold the first frame; reverse (at most REVERSE_MAX s, frames kept in memory, so
+    // limited to the canvas size first); then constant speed or a speed ramp.
+    const timing = [];
+    if (c.freeze) timing.push('trim=end_frame=1', 'setpts=PTS-STARTPTS', `tpad=stop_mode=clone:stop_duration=${f3(dur + 1)}`);
+    else {
+      if (c.reverse) { const M = Math.max(W, H); timing.push(`fps=${fps}`, `scale=w='min(iw,${M})':h='min(ih,${M})':force_original_aspect_ratio=decrease`, 'reverse'); }
+      timing.push(c.ramp ? `setpts='(${rampExpr(c)})/TB'` : `setpts=PTS/${sp}`);
+    }
+    filters.push(`${cleaned ? `[${cleaned}]` : `[${n}:v]setpts=PTS-STARTPTS,`}${timing.join(',')}${geo.length ? `,${geo.join(',')}` : ''}[h${i}]`);
     const src = applyColor(filters, `h${i}`, c.color, `cc${i}`, 'yuv420p');
     const fit = c.fit || 'contain';
     const fitOut = `fit${i}`;
@@ -347,10 +387,18 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
       filters.push(`[${cur}]settb=AVTB[v${i}]`); // effects like zoompan change the timebase; xfade needs them equal
     }
 
-    if (a.type === 'video' && a.hasAudio) {
+    if (a.type === 'video' && a.hasAudio && !c.freeze) {
       const vol = c.keyframes?.volume ? `volume='${kfExpr(c.keyframes.volume)}':eval=frame` : `volume=${c.volume ?? 1}`;
-      filters.push(`[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,${atempoChain(sp)},` +
-        `${vol},apad=whole_dur=${f3(dur)},atrim=duration=${f3(dur)},asetpts=PTS-STARTPTS[a${i}]`);
+      const head = `[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS${c.reverse ? ',areverse' : ''}`;
+      const tail = `${vol},apad=whole_dur=${f3(dur)},atrim=duration=${f3(dur)},asetpts=PTS-STARTPTS[a${i}]`;
+      const segs = c.ramp ? rampAudioSegments(c) : null;
+      if (!segs || segs.length === 1) filters.push(`${head},${atempoChain(segs ? segs[0].tempo : sp)},${tail}`);
+      else {
+        // Each ramp segment at its own tempo (pitch kept), joined back together.
+        filters.push(`${head},asplit=${segs.length}${segs.map((_, j) => `[ra${i}_${j}]`).join('')}`);
+        segs.forEach((g, j) => filters.push(`[ra${i}_${j}]atrim=start=${f3(g.a)}:end=${f3(g.b)},asetpts=PTS-STARTPTS,${atempoChain(g.tempo)}[rb${i}_${j}]`));
+        filters.push(`${segs.map((_, j) => `[rb${i}_${j}]`).join('')}concat=n=${segs.length}:v=0:a=1,${tail}`);
+      }
     } else {
       filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${f3(dur)},asetpts=PTS-STARTPTS[a${i}]`);
     }
@@ -479,11 +527,11 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
   if (frames) {
     // Pick the frame nearest each requested time, write JPEGs.
     const sel = frames.map((t) => `between(t,${f3(t - 0.5 / fps)},${f3(t + 0.5 / fps - 0.0001)})`).join('+');
-    filters.push(`[${vPrev}]select='${sel}',scale=-2:${Math.min(H, 960)}[vsel]`);
+    filters.push(`[${vPrev}]select='${sel}'${still ? ',format=yuvj420p' : `,scale=-2:${Math.min(H, 960)},format=yuvj420p`}[vsel]`);
     filters.push(`[${aFinal}]anullsink`);
     fs.writeFileSync(graphFile, filters.join(';\n'));
     args.push(...filterGraphArgs(graphFile), '-map', '[vsel]', '-fps_mode', 'vfr', '-t', f3(Math.max(...frames) + 2 / fps),
-      '-c:v', 'mjpeg', '-q:v', '4', '-frames:v', String(frames.length), outFile);
+      '-c:v', 'mjpeg', '-q:v', still ? '2' : '4', '-frames:v', String(frames.length), outFile);
   } else {
     fs.writeFileSync(graphFile, filters.join(';\n'));
     let enc = 'libx264';
@@ -532,13 +580,14 @@ export function startExport(project, opts = {}) {
 }
 
 // Composite stills of the finished timeline (with overlays, text, captions, transitions).
-export async function renderFrames(project, times) {
+// opts.still: full size, high quality (cover image) instead of draft previews.
+export async function renderFrames(project, times, { still = false } = {}) {
   const L = layout(project);
   const fps = project.settings.fps || 30;
   const maxT = Math.max(0, L.videoDuration - 1 / fps);
   // One frame per distinct frame slot.
   const ts = [...new Set(times.map((t) => Math.round(Math.min(maxT, Math.max(0, t)) * fps)))].sort((a, b) => a - b).map((f) => f / fps);
-  const cmd = buildCommand(project, '', { quality: 'draft', frames: ts });
+  const cmd = buildCommand(project, '', { quality: still ? 'final' : 'draft', frames: ts, still });
   const pattern = path.join(cmd.tmpDir, `frame-${uid('f')}-%03d.jpg`);
   cmd.args[cmd.args.length - 1] = pattern;
   try {

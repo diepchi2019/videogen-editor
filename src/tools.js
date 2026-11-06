@@ -1,7 +1,7 @@
 // Tool definitions shared by the in-app Claude chat and the MCP server.
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS,
-  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, summarize, timelineWords, layout, env, ops,
+  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, RAMP_PRESETS, REVERSE_MAX, summarize, timelineWords, layout, env, ops,
   styleFromProject, describeStyle, normalizeStyle, makeTemplate, describeTemplate, fillTemplate,
 } from './model.js';
 import { listStyles, loadStyle, saveStyle, deleteStyle, listTemplates, loadTemplate, saveTemplate, deleteTemplate } from './presets.js';
@@ -13,8 +13,11 @@ import path from 'node:path';
 import { waitJob } from './jobs.js';
 import { transcribe, readTranscript, hasTranscript, transcriptText } from './transcribe.js';
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
+import { listLuts, resolveLut } from './luts.js';
+import fs from 'node:fs';
 
 env.resolveFont = resolveFont;
+env.resolveLut = resolveLut;
 env.loadStyle = loadStyle;
 
 const S = (props, required = []) => ({ type: 'object', properties: props, required });
@@ -48,6 +51,7 @@ const overlayProps = {
   rotate: n('Degrees'), opacity: n('0-1'), volume: n('0-2, audio of a video overlay (0 = mute)'), track: n('Layer 1-20, higher is on top'),
   crop: cropSchema, flipH: b('Mirror horizontally'), flipV: b('Flip vertically'), animation: s('fade = fade in and out', { enum: OVERLAY_ANIMS }),
 };
+const idsSchema = (d) => ({ type: 'array', items: { type: 'string' }, description: d });
 const pickProps = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
 const styleSections = {
   canvas: { type: 'object', description: 'Output format', properties: { aspect: s('Aspect ratio', { enum: Object.keys(ASPECTS) }), fps: n('Frames per second'), background: s('Hex letterbox color') } },
@@ -135,7 +139,24 @@ export const TOOLS = [
       animInDuration: n('Seconds (default 0.5)'),
       animOut: s('Exit animation of the clip (none removes). zoom_in grows, zoom_out shrinks, slide_X leaves in that direction', { enum: CLIP_ANIMS }),
       animOutDuration: n('Seconds (default 0.5)'),
+      reverse: b(`Play the clip backwards (video clips, up to ${REVERSE_MAX}s of source; audio is reversed too)`),
     }, ['clipId']),
+  },
+  {
+    name: 'set_speed_ramp',
+    description: 'Make a clip\'s speed change smoothly over its length (speed ramp / curve), audio pitch kept. ' +
+      `Presets: montage (fast-slow-fast), hero (slow motion in the middle), bullet (long slow-mo hold), jump_cut (quick burst), flash_in (fast start), flash_out (fast end). ` +
+      'Or points: [{at, speed}] where at is the position in the clip (0 = first frame, 1 = last; for source second x: (x - in) / (out - in)) and speed 0.1-10, changing linearly between points. ' +
+      'The clip gets longer or shorter accordingly. preset none removes it; set_clip speed also replaces it.',
+    input_schema: S({
+      clipId: s('Clip id'), preset: s('Ramp preset', { enum: [...Object.keys(RAMP_PRESETS), 'none'] }),
+      points: { type: 'array', items: { type: 'object', properties: { at: n('0-1 position in the clip'), speed: n('0.1-10') }, required: ['at', 'speed'] }, description: 'Custom curve (instead of preset)' },
+    }, ['clipId']),
+  },
+  {
+    name: 'freeze_frame',
+    description: 'Freeze frame: hold the frame at a timeline time for some seconds (the clip is split there and a still is inserted; later clips move right). Change its length later with trim_clip (out = in + seconds).',
+    input_schema: S({ at: n('Timeline seconds of the frame to hold'), duration: n('Seconds to hold (default 2)'), clipId: s('Optional clip id (default: the clip at that time)') }, ['at']),
   },
   {
     name: 'set_color',
@@ -146,6 +167,7 @@ export const TOOLS = [
       brightness: n('-1..1, 0 = original (0.1 = a little brighter)'), contrast: n('0..3, 1 = original'), saturation: n('0..3, 1 = original, 0 = grayscale'),
       temperature: n('-1 cool .. 1 warm, 0 = original'), vignette: n('0..1 dark corners'),
       filter: s('Look preset (none removes)', { enum: FILTERS }), filterIntensity: n('0..1 (default 1)'), reset: b('Clear all color settings first'),
+      lut: s('Imported .cube LUT by file name (list_luts), applied before the look; none removes'), lutIntensity: n('0..1 (default 1)'),
     }),
   },
   {
@@ -169,6 +191,16 @@ export const TOOLS = [
       easing: s('ease (default, smooth) or linear', { enum: ['ease', 'linear'] }),
     }, ['property', 'keyframes']),
   },
+  {
+    name: 'delete_range',
+    description: 'Ripple delete: cut timeline seconds start..end out of the whole video and close the gap. Clips are split at both ends; texts, overlays, sfx/voice, captions and markers after the range move left, those inside are deleted, those across it get shorter. Background music (role music) keeps playing and only moves if it starts after the range.',
+    input_schema: S({ start: n('Timeline seconds'), end: n('Timeline seconds') }, ['start', 'end']),
+  },
+  { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
+  { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
+  { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
+  { name: 'group_items', description: 'Group texts, overlays, audio items and markers so they are selected, moved, copied and deleted together (e.g. a title with its sound effect and sticker).', input_schema: S({ ids: idsSchema('At least 2 item ids') }, ['ids']) },
+  { name: 'ungroup_items', description: 'Remove items (or a whole group, by group id) from their group.', input_schema: S({ ids: idsSchema('Item ids or group ids') }, ['ids']) },
   { name: 'set_transition', description: `Set the transition INTO a clip from the previous clip (not allowed on the first clip). Use type "none" to remove. Clips overlap by the duration.`, input_schema: S({ clipId: s('Clip id (clip #2 or later)'), type: s('Transition type', { enum: TRANSITIONS }), duration: n('Seconds, 0.1-5 (default 0.5)') }, ['clipId', 'type']) },
 
   {
@@ -233,13 +265,15 @@ export const TOOLS = [
       bitrate: n('Video bitrate in Mbps (default: constant quality)'), encoder: s('cpu (default), gpu or auto', { enum: ['cpu', 'gpu', 'auto'] }),
     }),
   },
+  { name: 'export_cover', description: 'Save a cover image (thumbnail) of the finished video: a full-size JPEG of the timeline frame at time t, with text and overlays, next to the exports. Returns the path and shows you the image.', input_schema: S({ t: n('Timeline seconds (default 0)'), name: s('File name without extension (default: project name + "-cover")') }) },
+  { name: 'list_luts', description: 'List imported color LUTs (.cube files) usable with set_color lut. Import more with import_media.', input_schema: S({}) },
   { name: 'export_status', description: 'Check an export or other job.', input_schema: S({ jobId: s('Job id') }, ['jobId']) },
   { name: 'create_proxies', description: 'Make small preview copies (720p H.264) of video files the browser cannot play smoothly (4K, HEVC, ProRes...). Imports do this automatically; use it for older imports. Export always uses the original files.', input_schema: S({ assetIds: { type: 'array', items: { type: 'string' }, description: 'Default: every video that needs one' }, force: b('Also make proxies for videos that do not need one') }) },
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates']);
-const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template']);
+const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
   destructiveHint: DESTRUCTIVE.has(name),
@@ -434,6 +468,24 @@ export async function executeTool(name, input = {}, source = 'claude') {
         if (!input.wait) return { content: `Export started, job ${job.id}. Output: ${job.path} (URL /exports/${job.file})` };
         job = await waitJob(job.id, 600000);
         return { content: `Job ${job.id}: ${fmtJob(job)}`, isError: job.status === 'error' };
+      }
+      case 'export_cover': {
+        const p = store.getProject();
+        const L = layout(p);
+        if (!L.clips.length) return { content: 'Timeline is empty.', isError: true };
+        const t = input.t === undefined ? 0 : Number(input.t);
+        if (!Number.isFinite(t) || t < 0) return { content: 't must be timeline seconds >= 0', isError: true };
+        const [frame] = await renderFrames(p, [Math.min(t, L.duration)], { still: true });
+        if (!frame) return { content: 'Could not render that frame', isError: true };
+        const base = String(input.name || `${p.name || 'video'}-cover`).replace(/[^\w-]+/g, '_').slice(0, 80) || 'cover';
+        const file = `${base}-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.jpg`;
+        const out = path.join(store.EXPORT_DIR, file);
+        fs.writeFileSync(out, Buffer.from(frame.data, 'base64'));
+        return { content: [{ type: 'text', text: `Saved cover image (timeline ${frame.t.toFixed(2)}s, ${p.settings.width}x${p.settings.height}): ${out} (URL /exports/${file})` }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: frame.data } }] };
+      }
+      case 'list_luts': {
+        const luts = listLuts();
+        return { content: luts.length ? `Imported LUTs (set_color lut):\n${luts.map((x) => `- ${x}`).join('\n')}` : 'No LUTs imported. Import a .cube file with import_media (or the Import button).' };
       }
       case 'export_status': {
         const j = getJob(input.jobId);

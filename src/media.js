@@ -74,7 +74,7 @@ export async function makeThumb(asset) {
   if (asset.type === 'audio') return null;
   const out = path.join(DATA_DIR, 'thumbs', `${asset.id}.jpg`);
   const t = asset.type === 'video' ? Math.min(1, (asset.duration || 0) / 3) : 0;
-  await run('ffmpeg', ['-y', '-ss', String(t), '-i', path.join(DATA_DIR, 'media', asset.file), '-frames:v', '1', '-vf', 'scale=240:-2', out]);
+  await run('ffmpeg', ['-y', '-ss', String(t), '-i', path.join(DATA_DIR, 'media', asset.file), '-frames:v', '1', '-vf', 'scale=240:-2,format=yuvj420p', out]);
   return `/thumbs/${asset.id}.jpg`;
 }
 
@@ -82,7 +82,7 @@ export async function extractFrames(asset, from, to, count) {
   if (asset.type === 'audio') throw new Error('Audio assets have no frames');
   const file = path.join(DATA_DIR, 'media', asset.file);
   if (asset.type === 'image') {
-    const buf = await run('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=512:-2', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '5', '-']);
+    const buf = await run('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=512:-2,format=yuvj420p', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '5', '-']);
     return [{ t: 0, data: buf.toString('base64') }];
   }
   const d = asset.duration;
@@ -93,7 +93,7 @@ export async function extractFrames(asset, from, to, count) {
   for (let i = 0; i < k; i++) {
     const t = k === 1 ? a : a + ((b - a) * i) / (k - 1);
     const tt = Math.min(t, Math.max(0, d - 0.05));
-    const buf = await run('ffmpeg', ['-v', 'error', '-ss', tt.toFixed(3), '-i', file, '-frames:v', '1', '-vf', 'scale=384:-2', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '6', '-']);
+    const buf = await run('ffmpeg', ['-v', 'error', '-ss', tt.toFixed(3), '-i', file, '-frames:v', '1', '-vf', 'scale=384:-2,format=yuvj420p', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '6', '-']);
     if (buf.length) frames.push({ t: tt, data: buf.toString('base64') });
   }
   return frames;
