@@ -8,7 +8,7 @@ import path from 'node:path';
 process.env.VIDEOGEN_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'videogen-unit-'));
 const M = await import('../src/model.js');
 const { buildAss, assColor, assText, assTime } = await import('../src/ass.js');
-const { mergeTokens, transcriptText } = await import('../src/transcribe.js');
+const { mergeTokens, transcriptText, speechRanges, mapWords } = await import('../src/transcribe.js');
 const store = await import('../src/store.js');
 const { buildCommand, motionFilter } = await import('../src/render.js');
 
@@ -318,6 +318,33 @@ test('whisper token merging and transcript text', () => {
   ]);
   assert.deepEqual(ws.map((w) => w.w), ['Welcome', "it's", 'here.']);
   assert.equal(transcriptText(ws), '[0.10-1.80] Welcome it\'s here.');
+});
+
+test('transcription cuts long silences and maps words back to source time', () => {
+  // 1s tone, 3s silence, 1s tone, 0.5s silence (too short to cut), 1s tone, 2s trailing silence.
+  const rate = 1000, parts = [[1, 1], [3, 0], [1, 1], [0.5, 0], [1, 1], [2, 0]];
+  const x = new Float32Array(parts.reduce((n, [d]) => n + d * rate, 0));
+  let i = 0;
+  for (const [d, on] of parts) for (let k = 0; k < d * rate; k++, i++) x[i] = on ? Math.sin(k / 3) * 0.5 : 0;
+  const r = speechRanges(x, rate);
+  const near = (a, b) => Math.abs(a - b) < 1e-6;
+  assert.equal(r.length, 2);
+  assert.ok(near(r[0].from, 0) && near(r[0].to, 1.2) && near(r[0].at, 0));
+  assert.ok(near(r[1].from, 3.8) && near(r[1].to, 6.7) && near(r[1].at, 1.2));
+  // No silence: one range, words unchanged.
+  assert.equal(speechRanges(new Float32Array(2000).map((_, k) => Math.sin(k)), rate).length, 1);
+
+  const ws = mapWords([
+    { w: 'one', start: 0.1, end: 0.9 },
+    { w: 'two.', start: 0.9, end: 1.1 },
+    { w: 'three', start: 1.1, end: 1.5 }, // straddles the cut at 1.2, after a sentence end -> after the pause
+    { w: 'four', start: 2, end: 2.5 },
+  ], r);
+  assert.deepEqual(ws.map((w) => [w.w, +w.start.toFixed(2), +w.end.toFixed(2)]),
+    [['one', 0.1, 0.9], ['two.', 0.9, 1.1], ['three', 4, 4.1], ['four', 4.6, 5.1]]);
+  // Mid-sentence straddle with most of the word before the cut stays before it.
+  const [w] = mapWords([{ w: 'the', start: 0.9, end: 1.3 }], r);
+  assert.deepEqual([+w.start.toFixed(2), +w.end.toFixed(2)], [0.9, 1]);
 });
 
 test('store: batch_edit is atomic, one undo step, resolves $N ids', () => {

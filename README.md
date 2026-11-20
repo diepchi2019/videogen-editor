@@ -18,6 +18,22 @@ npm start                    # http://localhost:3000
 
 Your project, media and exports are stored in `./data/`.
 
+### Auto-captions: download a speech model
+
+Captions run locally with Whisper, built into ffmpeg (the gyan.dev "full" Windows build and most Linux/Homebrew builds include it). Download one model file into `models/`:
+
+| Model | Size | Use it when |
+| --- | --- | --- |
+| `ggml-large-v3-turbo-q5_0.bin` | 550 MB | Default choice. Close to the best accuracy, good for Vietnamese and other non-English speech. Fast with a GPU (about 6x real time on an NVIDIA T550), slower on CPU only (about real time). |
+| `ggml-small.bin` | 470 MB | Older or CPU-only machines that find turbo too slow. |
+| `ggml-base.bin` | 150 MB | Quick tests and clear English speech. Fastest, least accurate. |
+
+```bash
+curl -L -o models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+```
+
+When several models are present, the most accurate one is used (turbo, then small, then base). To force one, set `VIDEOGEN_WHISPER_MODEL` to its path. Then click **CC Captions** in the timeline toolbar, or ask Claude to "add captions". Transcripts are cached per file, so restyling or redoing captions is instant. Long pauses are cut out before transcribing, so the first word after a pause gets the right time and no words are made up in quiet parts.
+
 ## Two ways to chat with Claude
 
 ### 1. In-app chat panel (Anthropic API key, pay per use)
@@ -69,6 +85,6 @@ test/mock-claude.js  Fake Claude API for testing the chat loop offline
 
 ## Known limits
 
-- Auto-captions need a whisper.cpp model file in `models/` (for example `ggml-small.bin` from huggingface.co/ggerganov/whisper.cpp, or set `VIDEOGEN_WHISPER_MODEL`).
+- Auto-captions need a Whisper model file in `models/` (see *Auto-captions* above). Word times come from Whisper and can be off by a few tenths of a second; fix a line with `update_captions` if needed.
 - The browser preview approximates the export. It does not show effects, LUTs, vignette, crop, Ken Burns or removed regions; reversed clips play there by seeking, without sound. Use a draft export or `look_at_timeline` to see the real result.
 - Reverse works on up to 10s of source per clip (ffmpeg keeps the frames in memory).
