@@ -86,5 +86,5 @@ test/mock-claude.js  Fake Claude API for testing the chat loop offline
 ## Known limits
 
 - Auto-captions need a Whisper model file in `models/` (see *Auto-captions* above). Word times come from Whisper and can be off by a few tenths of a second; fix a line with `update_captions` if needed.
-- The browser preview approximates the export. It does not show effects, LUTs, vignette, crop, Ken Burns or removed regions; reversed clips play there by seeking, without sound. Use a draft export or `look_at_timeline` to see the real result.
+- The browser preview approximates the export. It does not show effects, LUTs, chroma key, noise reduction, vignette, crop, Ken Burns or removed regions; reversed clips play there by seeking, without sound. Use a draft export or `look_at_timeline` to see the real result.
 - Reverse works on up to 10s of source per clip (ffmpeg keeps the frames in memory).

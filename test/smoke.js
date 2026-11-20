@@ -228,6 +228,24 @@ try {
   const cov = await tool('export_cover', { t: 0.5 });
   const covPath = /: (.+?\.jpg) \(URL/.exec(cov.content[0].text)?.[1];
   ok(covPath && probe(covPath, 'stream=width,height') === '1080,1920' && cov.content.some((b) => b.type === 'image'), `export_cover: ${path.basename(covPath)} 1080x1920`);
+  // Phase 2.5 extras: a green-screen overlay (keyed), a blended overlay and noise reduction.
+  const gs = path.join(data, 'greenscreen.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x00d040:s=640x360:d=3,drawbox=x=220:y=90:w=200:h=180:color=red:t=fill',
+    '-f', 'lavfi', '-i', 'anoisesrc=d=3:c=pink:a=0.05', '-shortest', '-pix_fmt', 'yuv420p', '-c:a', 'aac', gs]);
+  const gf = new FormData();
+  gf.append('files', new Blob([fs.readFileSync(gs)]), 'greenscreen.mp4');
+  gf.append('files', new Blob([fs.readFileSync(path.join(fx, 'c.png'))]), 'texture.png');
+  const [gsA, texA] = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: gf })).json()).added;
+  await tool('add_overlay', { assetId: gsA.id, start: 0.2, duration: 2.5, scale: 0.8, y: 0.7, chromaKey: 'green', keySimilarity: 0.2, denoise: 0.6, volume: 1, track: 2 });
+  await tool('add_overlay', { assetId: texA.id, start: 0, duration: 3, fit: 'cover', blend: 'multiply', opacity: 0.6, track: 1 });
+  await tool('update_music', { musicId: voice, denoise: 0.5 });
+  s = await tool('get_timeline');
+  ok(/chroma key #00ff00/.test(s.content) && /blend multiply/.test(s.content) && /denoise 0\.5/.test(s.content), 'summary shows chroma key, blend mode, denoise');
+  const exFrames = await tool('look_at_timeline', { times: [1.2] });
+  exFrames.content.filter((b) => b.type === 'image').forEach((b) => fs.writeFileSync(path.join(framesDir, 'key-blend.jpg'), Buffer.from(b.source.data, 'base64')));
+  const kx = await tool('export_video', { quality: 'draft', wait: true });
+  const kPath = /done 100% file: (.+?\.mp4)/.exec(kx.content)?.[1];
+  ok(kPath && Math.abs(Number(probe(kPath, 'format=duration')) - s.layout.duration) < 0.25, `chroma key + blend + denoise export (${kPath ? path.basename(kPath) : kx.content})`);
   await tool('open_project', { projectId: firstId });
 
   // --- MCP server over stdio ---

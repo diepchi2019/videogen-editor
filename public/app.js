@@ -69,6 +69,9 @@ const ovDur = (o) => (o.out - o.in) / (o.speed || 1);
 function toast(msg) { addMsg('error', String(msg)); }
 
 // ---------- Preview helpers (browser approximations of what ffmpeg renders) ----------
+// Overlay blend modes and their CSS preview (add has no CSS equivalent; plus-lighter is close).
+const BLEND_MODES = ['normal', 'screen', 'multiply', 'overlay', 'softlight', 'lighten', 'darken', 'add', 'difference'];
+const BLEND_CSS = { screen: 'screen', multiply: 'multiply', overlay: 'overlay', softlight: 'soft-light', lighten: 'lighten', darken: 'darken', add: 'plus-lighter', difference: 'difference' };
 const FILTERS = ['none', 'bw', 'sepia', 'vintage', 'warm', 'cool', 'vivid', 'cinematic', 'matte', 'noir', 'dramatic'];
 const CLIP_ANIMS = ['none', 'fade', 'zoom_in', 'zoom_out', 'slide_left', 'slide_right', 'slide_up', 'slide_down'];
 const proxied = new Set(); // media files whose proxy finished during this session
@@ -383,7 +386,7 @@ function renderOverlays(t) {
     const full = o.fit === 'cover' || o.fit === 'contain';
     const fade = o.animation === 'fade' ? clamp01(Math.min(lt, ovDur(o) - lt) / 0.3) : 1;
     Object.assign(el.style, {
-      zIndex: String(z + 1), opacity: String(kfVal(o, 'opacity', lt, o.opacity) * fade), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
+      zIndex: String(z + 10), mixBlendMode: BLEND_CSS[o.blend] || 'normal', opacity: String(kfVal(o, 'opacity', lt, o.opacity) * fade), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
       left: full ? '50%' : `${kfVal(o, 'x', lt, o.x) * 100}%`, top: full ? '50%' : `${kfVal(o, 'y', lt, o.y) * 100}%`,
       width: full ? '100%' : `${kfVal(o, 'scale', lt, o.scale) * 100}%`, height: full ? '100%' : 'auto',
       transform: `translate(-50%, -50%) rotate(${kfVal(o, 'rotate', lt, o.rotate || 0)}deg) scale(${o.flipH ? -1 : 1}, ${o.flipV ? -1 : 1})`,
@@ -734,6 +737,7 @@ function select(kind, id, focusTransition) {
   renderTimeline(); renderInspector(); renderTexts(time);
   if (focusTransition) $('#insp-trans')?.focus();
 }
+const denoiseField = (v, set) => field('Denoise', v || 0, set, { min: 0, max: 1, step: '0.1', title: 'Noise reduction for hiss, fan or wind noise: 0 = off, 0.5 = typical (export only, not in this preview)' });
 function field(label, value, onchange, attrs = {}) {
   return h('label', {}, label, h('input', { type: 'number', step: '0.1', value, ...attrs, onchange: (e) => onchange(+e.target.value) }));
 }
@@ -790,6 +794,7 @@ function renderInspector() {
       a.type === 'video' && !c.freeze ? rampSel : null,
       a.type === 'video' && !c.freeze ? h('label', { title: 'Play backwards (up to 10s of source). The preview shows it by seeking, without sound.' }, 'Reverse', h('input', { type: 'checkbox', checked: !!c.reverse, onchange: (e) => tool('set_clip', { clipId: c.id, reverse: e.target.checked }) })) : null,
       field('Volume', c.volume, (v) => tool('set_clip', { clipId: c.id, volume: v }), { min: 0, max: 2, step: '0.1' }),
+      a.type === 'video' && a.hasAudio && !c.freeze ? denoiseField(c.denoise, (v) => tool('set_clip', { clipId: c.id, denoise: v })) : null,
       h('label', {}, 'Fit', h('select', { onchange: (e) => tool('set_clip', { clipId: c.id, fit: e.target.value }) },
         ...['contain', 'cover', 'blur'].map((f) => h('option', { value: f, selected: (c.fit || 'contain') === f }, f)))),
       c.index > 0 ? h('label', {}, 'Transition in', h('select', { id: 'insp-trans', onchange: (e) => tool('set_transition', { clipId: c.id, type: e.target.value, duration: c.transition?.duration || 0.5 }) },
@@ -829,6 +834,18 @@ function renderInspector() {
       field('Width', o.scale, (v) => tool('set_overlay', { overlayId: o.id, scale: v }), { step: '0.05' }),
       field('Opacity', o.opacity, (v) => tool('set_overlay', { overlayId: o.id, opacity: v }), { min: 0, max: 1, step: '0.1' }),
       P.assets[o.assetId]?.type === 'video' ? field('Volume', o.volume, (v) => tool('set_overlay', { overlayId: o.id, volume: v }), { min: 0, max: 2, step: '0.1' }) : null,
+      h('label', { title: 'How the overlay mixes with the video under it. screen: light leaks, fire, sparkles on black. multiply: paper and textures' }, 'Blend',
+        h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, blend: e.target.value }) },
+          ...BLEND_MODES.map((m) => h('option', { value: m, selected: (o.blend || 'normal') === m }, m)))),
+      h('label', { title: 'Remove a green or blue screen behind the subject (export and look_at_timeline; not in this preview)' }, 'Key',
+        h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, chromaKey: e.target.value }) },
+          ...[['none', 'off'], ['green', 'green screen'], ['blue', 'blue screen']].map(([v, l]) => h('option', { value: v, selected: v === 'none' ? !o.key : o.key?.color === ({ green: '#00ff00', blue: '#0000ff' })[v] }, l)),
+          o.key && !['#00ff00', '#0000ff'].includes(o.key.color) ? h('option', { value: o.key.color, selected: true }, o.key.color) : null)),
+      o.key ? h('input', { type: 'color', value: o.key.color, title: 'Exact backdrop color', onchange: (e) => tool('set_overlay', { overlayId: o.id, chromaKey: e.target.value }) }) : null,
+      o.key ? field('Similarity', o.key.similarity, (v) => tool('set_overlay', { overlayId: o.id, keySimilarity: v }), { min: 0.01, max: 1, step: '0.05', title: 'Raise if backdrop remains, lower if the subject gets holes' }) : null,
+      o.key ? field('Edge', o.key.blend, (v) => tool('set_overlay', { overlayId: o.id, keyBlend: v }), { min: 0, max: 1, step: '0.02', title: 'Edge softness' }) : null,
+      o.key ? h('label', { class: 'key-note' }, 'key shows in export') : null,
+      P.assets[o.assetId]?.type === 'video' && P.assets[o.assetId]?.hasAudio ? denoiseField(o.denoise, (v) => tool('set_overlay', { overlayId: o.id, denoise: v })) : null,
       lookSelect({ overlayId: o.id }, o.color),
       o.keyframes ? h('span', { class: 'note' }, `◆ keyframes: ${Object.keys(o.keyframes).join(', ')}`) : null,
       h('button', { class: 'small danger', onclick: () => tool('delete_overlay', { overlayId: o.id }) }, 'Delete'),
@@ -843,6 +860,7 @@ function renderInspector() {
       field('Volume', m.volume, (v) => tool('update_music', { musicId: m.id, volume: v }), { min: 0, max: 2, step: '0.05' }),
       field('Fade in', m.fadeIn, (v) => tool('update_music', { musicId: m.id, fadeIn: v })),
       field('Fade out', m.fadeOut, (v) => tool('update_music', { musicId: m.id, fadeOut: v })),
+      denoiseField(m.denoise, (v) => tool('update_music', { musicId: m.id, denoise: v })),
       m.role !== 'voice' ? field('Duck', m.duck || 0, (v) => tool('update_music', { musicId: m.id, duck: v }), { min: 0, max: 1, step: '0.1', title: 'Lower under speech (export only)' }) : null,
       h('button', { class: 'small', title: 'Detect beats and add beat markers', onclick: () => tool('mark_beats', { musicId: m.id }) }, '♩ Mark beats'),
       h('button', { class: 'small danger', onclick: () => tool('delete_music', { musicId: m.id }) }, 'Delete'),

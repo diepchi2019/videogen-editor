@@ -393,6 +393,44 @@ test('store: projects create/open/duplicate/delete with separate undo history', 
   assert.throws(() => store.openProject('missing'), /No project "missing"/);
 });
 
+test('chroma key, blend modes and noise reduction: ops, summary, render graph', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_a', out: 4 });
+  run(p, 'add_overlay', { assetId: 'vid_b', start: 0.5, duration: 2, chromaKey: 'green', blend: 'screen', denoise: 0.5 });
+  const o = p.overlays[0];
+  assert.deepEqual(o.key, { color: '#00ff00', similarity: 0.25, blend: 0.08, despill: true });
+  assert.equal(o.blend, 'screen'); assert.equal(o.denoise, 0.5);
+  run(p, 'set_overlay', { overlayId: o.id, chromaKey: '#2b9d48', keySimilarity: 0.3, keyBlend: 0.1 });
+  assert.deepEqual(o.key, { color: '#2b9d48', similarity: 0.3, blend: 0.1, despill: true });
+  assert.throws(() => run(p, 'set_overlay', { overlayId: o.id, chromaKey: 'pink' }), /hex color/);
+  assert.throws(() => run(p, 'set_overlay', { overlayId: o.id, blend: 'burn' }), /blend must be one of/);
+  run(p, 'set_clip', { clipId: p.clips[0].id, denoise: 0.8 });
+  run(p, 'add_music', { assetId: 'aud_m', role: 'voice', denoise: 0.4 });
+  const sum = M.summarize(p);
+  assert.match(sum, /denoise 0\.8/);
+  assert.match(sum, /blend screen, chroma key #2b9d48 \(similarity 0\.3, edge blend 0\.1, despill\)/);
+  assert.match(sum, /voice.*denoise 0\.4/);
+  const { graph, tmpDir } = buildCommand(p, 'out.mp4', { quality: 'draft' });
+  try {
+    assert.match(graph, /chromakey=color=0x2b9d48:similarity=0\.300:blend=0\.100,despill=type=green/);
+    assert.match(graph, /blend=c0_mode=screen:c1_mode=screen:c2_mode=screen/);
+    assert.match(graph, /\[b0l2\]alphaextract\[b0mk\]/);
+    assert.match(graph, /afftdn=nr=25\.200:nf=-40:tn=1/);          // clip 0.8 -> 6 + 24 * 0.8
+    assert.match(graph, /afftdn=nr=18\.000/);                       // overlay 0.5
+    assert.match(graph, /afftdn=nr=15\.600/);                       // voice 0.4
+  } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  // Turning things off removes the fields.
+  run(p, 'set_overlay', { overlayId: o.id, chromaKey: 'none', blend: 'normal', denoise: 0 });
+  assert.ok(!('key' in o) && !('blend' in o) && !('denoise' in o));
+  assert.throws(() => run(p, 'set_overlay', { overlayId: o.id, keySimilarity: 0.2 }), /Set chromaKey/);
+  assert.equal(M.spillOf('#0011ee'), 'blue'); assert.equal(M.spillOf('#ff0000'), null);
+  run(p, 'set_overlay', { overlayId: o.id, chromaKey: 'blue' });
+  assert.equal(o.key.despill, true);
+  run(p, 'set_overlay', { overlayId: o.id, chromaKey: '#ff0000' });
+  assert.equal(o.key.despill, false, 'despill follows the key color');
+  assert.throws(() => run(p, 'set_overlay', { overlayId: o.id, chromaKey: '#ff0000', keyDespill: true }), /Despill only works/);
+});
+
 test('render graph: overlays, transforms, motion, ASS, frames mode', () => {
   const p = project();
   run(p, 'add_clip', { assetId: 'vid_a', out: 4 });

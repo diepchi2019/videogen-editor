@@ -19,6 +19,9 @@ export const TEXT_ANIM_OUT = ['none', 'fade', 'pop', 'slideup', 'slidedown', 'zo
 export const AUDIO_ROLES = ['music', 'sfx', 'voice'];
 export const OVERLAY_FITS = ['free', 'contain', 'cover'];
 export const OVERLAY_ANIMS = ['none', 'fade'];
+// How an overlay mixes with what is under it (normal = plain alpha compositing).
+export const BLEND_MODES = ['normal', 'screen', 'multiply', 'overlay', 'softlight', 'lighten', 'darken', 'add', 'difference'];
+const KEY_COLORS = { green: '#00ff00', blue: '#0000ff' };
 export const CAPTION_MODES = ['line', 'karaoke', 'word', 'single'];
 export const REGION_MODES = ['fill', 'patch'];
 export const CLIP_ANIMS = ['none', 'fade', 'zoom_in', 'zoom_out', 'slide_left', 'slide_right', 'slide_up', 'slide_down'];
@@ -225,7 +228,7 @@ export function summarize(p, extras = {}) {
   const assets = Object.values(p.assets).map((a) =>
     `- ${a.id}: "${a.name}" ${a.type}${a.duration ? `, ${a.duration.toFixed(2)}s` : ''}${a.width ? `, ${a.width}x${a.height}` : ''}${a.type === 'video' ? (a.hasAudio ? ', has audio' : ', no audio') : ''}${tx.has(a.id) ? ', transcript ready' : ''}`);
   const clips = L.clips.map((c) =>
-    `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), ${describeTiming(c)}, volume ${c.volume}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
+    `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), ${describeTiming(c)}, volume ${c.volume}${c.denoise ? `, denoise ${c.denoise}` : ''}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
@@ -235,7 +238,8 @@ export function summarize(p, extras = {}) {
     `- ${o.id} (track ${o.track}${o.styleRole ? `, style ${o.styleRole}` : ''}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
     `${o.opacity !== 1 ? `, opacity ${o.opacity}` : ''}${o.rotate ? `, rotate ${o.rotate}°` : ''}${o.crop ? `, crop x${o.crop.x} y${o.crop.y} w${o.crop.w} h${o.crop.h}` : ''}` +
-    `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}` +
+    `${o.flipH ? ', flipH' : ''}${o.flipV ? ', flipV' : ''}${p.assets[o.assetId]?.type === 'video' ? `, volume ${o.volume}, speed ${o.speed}x` : ''}${o.denoise ? `, denoise ${o.denoise}` : ''}` +
+    `${o.blend ? `, blend ${o.blend}` : ''}${o.key ? `, chroma key ${o.key.color} (similarity ${o.key.similarity}, edge blend ${o.key.blend}${o.key.despill ? ', despill' : ''})` : ''}${o.animation !== 'none' ? `, ${o.animation} in/out` : ''}` +
     describeColor(o.color) + describeKeyframes(o, o.start) + describeGroup(o));
   const texts = p.texts.map((x) =>
     `- ${x.id}: "${x.text}" ${x.start.toFixed(2)}-${x.end.toFixed(2)}s at (${x.x},${x.y}) size ${x.size} color ${x.color}` +
@@ -243,7 +247,7 @@ export function summarize(p, extras = {}) {
     `${x.outline ? ` outline ${x.outline}${x.outlineColor ? ' ' + x.outlineColor : ''}` : ''}${x.shadow ? ` shadow ${x.shadow}` : ''}` +
     `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}${describeGroup(x)}`);
   const music = p.music.map((m) =>
-    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}${describeGroup(m)}`);
+    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}${m.denoise ? `, denoise ${m.denoise}` : ''}${describeGroup(m)}`);
   const markers = p.markers || [];
   const byKind = {};
   for (const mk of markers) (byKind[mk.kind] ||= []).push(mk);
@@ -478,6 +482,40 @@ function applyOverlay(o, input, a) {
   const an = oneOf(input.animation, OVERLAY_ANIMS, 'animation'); if (an) o.animation = an;
   const cr = crop(input.crop); if (cr !== undefined) { if (cr) o.crop = cr; else delete o.crop; }
   for (const k of ['flipH', 'flipV']) { const v = bool(input[k]); if (v !== undefined) o[k] = v; }
+  const bm = oneOf(input.blend, BLEND_MODES, 'blend'); if (bm) { if (bm === 'normal') delete o.blend; else o.blend = bm; }
+  applyKey(o, input);
+  applyDenoise(o, input);
+}
+
+// Chroma key (green / blue screen) on an overlay: chromaKey = green | blue | hex | none.
+function applyKey(o, input) {
+  const ck = input.chromaKey;
+  if (ck === 'none' || ck === false || ck === null) { delete o.key; return; }
+  if (ck !== undefined) {
+    const col = KEY_COLORS[String(ck).toLowerCase()] || color(ck, 'chromaKey');
+    if (!col) fail('chromaKey must be green, blue, a hex color like #00d040, or none');
+    o.key = { color: col, similarity: o.key?.similarity ?? 0.25, blend: o.key?.blend ?? 0.08, despill: spillOf(col) !== null };
+  }
+  const sim = num(input.keySimilarity, 'keySimilarity', 0.01, 1);
+  const bl = num(input.keyBlend, 'keyBlend', 0, 1);
+  const ds = bool(input.keyDespill);
+  if ((sim !== undefined || bl !== undefined || ds !== undefined) && !o.key) fail('Set chromaKey (green, blue or a hex color) first');
+  if (sim !== undefined) o.key.similarity = r3(sim);
+  if (bl !== undefined) o.key.blend = r3(bl);
+  if (ds !== undefined) { if (ds && spillOf(o.key.color) === null) fail('Despill only works for green or blue keys'); o.key.despill = ds; }
+}
+// Which despill type fits a key color: green, blue, or null for other colors.
+export function spillOf(hex) {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  if (g > r && g > b) return 'green';
+  if (b > r && b > g) return 'blue';
+  return null;
+}
+// Noise reduction 0-1 on anything with sound (clips, overlays, audio items). 0 removes it.
+function applyDenoise(x, input) {
+  const d = num(input.denoise, 'denoise', 0, 1);
+  if (d === undefined) return;
+  if (d === 0) delete x.denoise; else x.denoise = r3(d);
 }
 
 function captionStyle(base, input) {
@@ -914,6 +952,7 @@ export const ops = {
     const s = num(speed, 'speed', 0.25, 4);
     if (s !== undefined) { if (c.freeze) fail('A freeze frame has no speed; change its length with trim_clip (out = in + seconds).'); c.speed = s; delete c.ramp; }
     const v = num(volume, 'volume', 0, 2); if (v !== undefined) c.volume = v;
+    applyDenoise(c, input);
     const rv = bool(input.reverse);
     if (rv === true) {
       if (p.assets[c.assetId]?.type !== 'video' || c.freeze) fail('Only video clips can be reversed');
@@ -934,7 +973,7 @@ export const ops = {
       else if (d !== undefined) { if (!c[k]) fail(`Set ${k} (e.g. fade) before ${dk}`); c[k].duration = r3(d); }
     }
     clampAll(p);
-    return `Updated ${c.id}: ${describeTiming(c)}, volume ${c.volume}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}${describeAnims(c)}`;
+    return `Updated ${c.id}: ${describeTiming(c)}, volume ${c.volume}${c.denoise ? `, denoise ${c.denoise}` : ''}, fit ${c.fit || 'contain'}${describeTransform(c.transform)}${c.motion ? `, motion ${c.motion.preset} ${c.motion.intensity}` : ''}${describeAnims(c)}`;
   },
 
   set_transition(p, { clipId, type, duration }) {
@@ -1324,7 +1363,8 @@ export const ops = {
   set_overlay(p, input) {
     const o = p.overlays[findIn(p.overlays, input.overlayId, 'overlay')];
     applyOverlay(o, input, p.assets[o.assetId]);
-    return `Updated overlay ${o.id}: ${o.start}-${r3(o.start + overlayDuration(o))}s, ${o.fit === 'free' ? `center (${o.x},${o.y}) width ${o.scale}` : `fit ${o.fit}`}, opacity ${o.opacity}`;
+    return `Updated overlay ${o.id}: ${o.start}-${r3(o.start + overlayDuration(o))}s, ${o.fit === 'free' ? `center (${o.x},${o.y}) width ${o.scale}` : `fit ${o.fit}`}, opacity ${o.opacity}` +
+      `${o.blend ? `, blend ${o.blend}` : ''}${o.key ? `, chroma key ${o.key.color} similarity ${o.key.similarity}` : ''}${o.denoise ? `, denoise ${o.denoise}` : ''}`;
   },
 
   delete_overlay(p, { overlayId }) {
@@ -1416,7 +1456,7 @@ export const ops = {
     return 'Deleted all captions';
   },
 
-  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut, role, track, duck }) {
+  add_music(p, { assetId, start, in: tin, out, volume, fadeIn, fadeOut, role, track, duck, denoise }) {
     const a = asset(p, assetId, ['audio', 'video']);
     if (a.type === 'video' && !a.hasAudio) fail('That video has no audio track');
     const rl = oneOf(role, AUDIO_ROLES, 'role') ?? 'music';
@@ -1432,6 +1472,7 @@ export const ops = {
       fadeIn: num(fadeIn, 'fadeIn', 0, 30) ?? sm.fadeIn ?? 0, fadeOut: num(fadeOut, 'fadeOut', 0, 30) ?? sm.fadeOut ?? (rl === 'music' ? 1 : 0),
     };
     const dk = num(duck, 'duck', 0, 1) ?? sm.duck; if (dk) m.duck = r3(dk);
+    applyDenoise(m, { denoise });
     p.music.push(m);
     return `Added ${rl} ${m.id} from "${a.name}" at ${m.start}s on audio track ${m.track}`;
   },
@@ -1441,6 +1482,7 @@ export const ops = {
     const lim = { start: [0, 1e6], in: [0, 1e6], out: [0, 1e6], volume: [0, 2], fadeIn: [0, 30], fadeOut: [0, 30], duck: [0, 1] };
     for (const k of Object.keys(lim)) { const v = num(rest[k], k, ...lim[k]); if (v !== undefined) m[k] = r3(v); }
     if (m.duck === 0) delete m.duck;
+    applyDenoise(m, rest);
     const rl = oneOf(rest.role, AUDIO_ROLES, 'role'); if (rl) m.role = rl;
     const tr = num(rest.track, 'track', 1, 20); if (tr !== undefined) m.track = Math.round(tr);
     if (m.out <= m.in) fail('out must be greater than in');

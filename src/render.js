@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
-import { layout, overlayDuration, uid } from './model.js';
+import { layout, overlayDuration, uid, spillOf } from './model.js';
 import { DATA_DIR, EXPORT_DIR, MEDIA_DIR } from './store.js';
 import { buildAss } from './ass.js';
 import { defaultFont, stageFonts } from './fonts.js';
@@ -304,6 +304,11 @@ export function motionFilter(m, W, H, fps, dur) {
 // opts.quality: 'draft' | 'final'. opts.frames: [timeline seconds] -> render JPEG stills instead of an MP4.
 // opts.resolution: '720p'... (short side; overrides draft scaling), opts.fps, opts.bitrate (Mbps), opts.encoder: 'cpu' | 'gpu' | an ffmpeg encoder name.
 // opts.still: frames at full output size and high JPEG quality (cover images).
+// Noise reduction 0-1 -> FFT denoiser strength (6-30 dB) with adaptive noise tracking.
+const denoiseFilter = (d) => (d > 0 ? `afftdn=nr=${f3(6 + 24 * d)}:nf=-40:tn=1` : null);
+// Blend mode -> ffmpeg blend filter mode.
+const BLEND_FF = { screen: 'screen', multiply: 'multiply', overlay: 'overlay', softlight: 'softlight', lighten: 'lighten', darken: 'darken', add: 'addition', difference: 'difference' };
+
 export function buildCommand(project, outFile, { quality = 'final', frames = null, still = false, resolution, fps: fpsOpt, bitrate, encoder = 'cpu' } = {}) {
   const L = layout(project);
   if (!L.clips.length) throw new Error('Timeline is empty. Add at least one clip before exporting.');
@@ -389,7 +394,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
 
     if (a.type === 'video' && a.hasAudio && !c.freeze) {
       const vol = c.keyframes?.volume ? `volume='${kfExpr(c.keyframes.volume)}':eval=frame` : `volume=${c.volume ?? 1}`;
-      const head = `[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS${c.reverse ? ',areverse' : ''}`;
+      const head = `[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS${c.reverse ? ',areverse' : ''}${c.denoise ? `,${denoiseFilter(c.denoise)}` : ''}`;
       const tail = `${vol},apad=whole_dur=${f3(dur)},atrim=duration=${f3(dur)},asetpts=PTS-STARTPTS[a${i}]`;
       const segs = c.ramp ? rampAudioSegments(c) : null;
       if (!segs || segs.length === 1) filters.push(`${head},${atempoChain(segs ? segs[0].tempo : sp)},${tail}`);
@@ -438,6 +443,12 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     filters.push(`[${n}:v]setpts=(PTS-STARTPTS)/${sp},fps=${fps},${[...geometry({ crop: o.crop, flipH: o.flipH, flipV: o.flipV }, 'black'), 'format=yuva420p'].join(',')}[oh${i}]`);
     const osrc = applyColor(filters, `oh${i}`, o.color, `oc${i}`, 'yuva420p');
     const ch = [];
+    // Chroma key first, on the source pixels (before scaling softens the edges).
+    if (o.key) {
+      ch.push(`chromakey=color=0x${o.key.color.slice(1)}:similarity=${f3(o.key.similarity)}:blend=${f3(o.key.blend)}`);
+      const spill = o.key.despill && spillOf(o.key.color);
+      if (spill) ch.push(`despill=type=${spill}`, 'format=yuva420p');
+    }
     // Alpha first, on fixed-size frames: geq crashes when a keyframed scale changes the frame size mid-stream.
     if (K.opacity) ch.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${kfExpr(K.opacity, 'T')})'`);
     else if (o.opacity < 1) ch.push(`colorchannelmixer=aa=${o.opacity}`);
@@ -466,12 +477,26 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const cy = !free ? f3(H / 2) : K.y ? `${H}*(${kfExpr(K.y, lt)})` : f3(H * o.y);
     const pos = K.x || K.y ? `x='${cx}-overlay_w/2':y='${cy}-overlay_h/2'` : `x=${cx}-overlay_w/2:y=${cy}-overlay_h/2`;
     const vOut = `vo${i}`;
-    filters.push(`[${vPrev}][ov${i}]overlay=${pos}:eof_action=pass:enable='between(t,${f3(o.start)},${f3(o.start + vis)})'[${vOut}]`);
+    const when = `enable='between(t,${f3(o.start)},${f3(o.start + vis)})'`;
+    if (!o.blend || !BLEND_FF[o.blend]) filters.push(`[${vPrev}][ov${i}]overlay=${pos}:eof_action=pass:${when}[${vOut}]`);
+    else {
+      // Blend modes: place the overlay on a transparent full-size layer, blend its colors with the
+      // frame below in RGB (blend needs equal sizes and ignores alpha), then let the layer's alpha
+      // decide where the blended colors show.
+      const mode = BLEND_FF[o.blend], t = `b${i}`;
+      filters.push(`color=c=black@0:s=${W}x${H}:r=${fps}:d=${f3(total)},format=yuva420p[${t}cv]`);
+      filters.push(`[${t}cv][ov${i}]overlay=${pos}:eof_action=pass:${when}:format=auto,format=yuva420p,split[${t}l1][${t}l2]`);
+      filters.push(`[${vPrev}]split[${t}m1][${t}m2]`);
+      filters.push(`[${t}l1]format=gbrap[${t}lc]`, `[${t}m1]format=gbrap[${t}mc]`);
+      filters.push(`[${t}mc][${t}lc]blend=c0_mode=${mode}:c1_mode=${mode}:c2_mode=${mode}:c3_mode=normal:c3_opacity=0,format=yuv420p[${t}bl]`);
+      filters.push(`[${t}l2]alphaextract[${t}mk]`, `[${t}bl][${t}mk]alphamerge[${t}ba]`);
+      filters.push(`[${t}m2][${t}ba]overlay=format=auto,format=yuv420p[${vOut}]`);
+    }
     vPrev = vOut;
     if (a.type === 'video' && a.hasAudio && ((o.volume ?? 0) > 0 || K.volume)) {
       const ms = Math.round(o.start * 1000);
       const vol = K.volume ? `volume='${kfExpr(K.volume)}':eval=frame` : `volume=${o.volume}`;
-      filters.push(`[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,${atempoChain(sp)},atrim=duration=${f3(vis)},${vol}${ms > 0 ? `,adelay=${ms}|${ms}` : ''}[oa${i}]`);
+      filters.push(`[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,${o.denoise ? `${denoiseFilter(o.denoise)},` : ''}${atempoChain(sp)},atrim=duration=${f3(vis)},${vol}${ms > 0 ? `,adelay=${ms}|${ms}` : ''}[oa${i}]`);
       mixIn.push(`[oa${i}]`);
     }
   });
@@ -495,7 +520,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     args.push('-ss', f3(m.in), '-t', f3(m.out - m.in), '-i', path.join(MEDIA_DIR, a.file));
     const n = input++;
     const len = Math.min(m.out - m.in, total - m.start);
-    const ch = [`aformat=sample_rates=48000:channel_layouts=stereo`, `asetpts=PTS-STARTPTS`, `atrim=duration=${f3(len)}`, `volume=${m.volume}`];
+    const ch = [`aformat=sample_rates=48000:channel_layouts=stereo`, `asetpts=PTS-STARTPTS`, denoiseFilter(m.denoise), `atrim=duration=${f3(len)}`, `volume=${m.volume}`].filter(Boolean);
     if (m.fadeIn > 0) ch.push(`afade=t=in:st=0:d=${f3(m.fadeIn)}`);
     if (m.fadeOut > 0) ch.push(`afade=t=out:st=${f3(Math.max(0, len - m.fadeOut))}:d=${f3(m.fadeOut)}`);
     const ms = Math.round(m.start * 1000);
