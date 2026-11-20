@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
-import { layout, overlayDuration, uid, spillOf } from './model.js';
+import { layout, overlayDuration, uid, spillOf, reframeTrack } from './model.js';
 import { DATA_DIR, EXPORT_DIR, MEDIA_DIR } from './store.js';
 import { buildAss } from './ass.js';
 import { defaultFont, stageFonts } from './fonts.js';
@@ -350,7 +350,12 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const src = applyColor(filters, `h${i}`, c.color, `cc${i}`, 'yuv420p');
     const fit = c.fit || 'contain';
     const fitOut = `fit${i}`;
-    if (fit === 'cover') {
+    if (fit === 'cover' && c.reframe?.points?.length) {
+      // Reframe: the crop window follows the subject (per-frame x/y), clamped so the frame stays filled.
+      const z = c.reframe.zoom || 1, fx = reframeTrack(c, 'x'), fy = reframeTrack(c, 'y');
+      filters.push(`[${src}]scale=${even(W * z)}:${even(H * z)}:force_original_aspect_ratio=increase,` +
+        `crop=${W}:${H}:x='clip((${kfExpr(fx)})*iw-ow/2,0,iw-ow)':y='clip((${kfExpr(fy)})*ih-oh/2,0,ih-oh)',setsar=1[${fitOut}]`);
+    } else if (fit === 'cover') {
       filters.push(`[${src}]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1[${fitOut}]`);
     } else if (fit === 'blur') {
       const bw = even(W / 4), bh = even(H / 4);

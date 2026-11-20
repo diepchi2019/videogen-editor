@@ -117,3 +117,38 @@ export function subRamp(c, ua, ub) {
   const r4 = (n) => Math.round(n * 1e4) / 1e4;
   return [{ at: 0, speed: at(ua) }, ...inner, { at: 1, speed: at(ub) }].map((q) => ({ at: r4(q.at), speed: r4(q.speed) }));
 }
+
+// Reframe (follow the subject): c.reframe.points are {at: SOURCE seconds, x, y} with x/y the subject
+// center as fractions of the source frame. Returns the track of one axis in clip-local time,
+// {easing, points:[{t, v}]}, the same shape as a keyframe track. Values at the clip's own source
+// ends are interpolated, so trims and splits keep the move where it was in the footage.
+export function reframeTrack(c, axis) {
+  const pts = [...(c.reframe?.points || [])].sort((a, b) => a.at - b.at);
+  if (!pts.length) return null;
+  const val = (s) => {
+    if (s <= pts[0].at) return pts[0][axis] ?? 0.5;
+    for (let i = 1; i < pts.length; i++) {
+      if (s <= pts[i].at) {
+        const a = pts[i - 1], b = pts[i], f = (s - a.at) / Math.max(1e-6, b.at - a.at);
+        return (a[axis] ?? 0.5) + ((b[axis] ?? 0.5) - (a[axis] ?? 0.5)) * f;
+      }
+    }
+    return pts[pts.length - 1][axis] ?? 0.5;
+  };
+  const lo = Math.min(c.in, c.out), hi = Math.max(c.in, c.out);
+  const srcs = [lo, ...pts.map((q) => q.at).filter((s) => s > lo && s < hi), hi];
+  const r4 = (n) => Math.round(n * 1e4) / 1e4;
+  const byT = new Map();
+  for (const s of srcs) byT.set(r4(localAt(c, s)), r4(val(s)));
+  const points = [...byT].map(([t, v]) => ({ t, v })).sort((a, b) => a.t - b.t);
+  return { easing: c.reframe.easing || 'linear', points };
+}
+
+// Where a cover-fitted frame sits so the focus point (fraction of the source) is centered,
+// clamped so the frame stays filled: returns the CSS object-position fraction 0-1 for one axis.
+// srcLen/boxLen are the source and canvas sizes on that axis, k the cover scale factor.
+export function coverPosition(focus, srcLen, boxLen, k) {
+  const shown = srcLen * k;
+  if (shown - boxLen < 1e-6) return 0.5;
+  return Math.min(1, Math.max(0, (focus * shown - boxLen / 2) / (shown - boxLen)));
+}

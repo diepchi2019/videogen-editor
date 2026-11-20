@@ -1,5 +1,5 @@
 // VideoGen editor UI (vanilla JS). The server owns the project; every edit is a tool call.
-import { srcAt, speedAt, avgRate, RAMP_PRESETS } from '/lib/timing.js';
+import { srcAt, speedAt, avgRate, RAMP_PRESETS, reframeTrack, coverPosition } from '/lib/timing.js';
 const $ = (s, el = document) => el.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -69,6 +69,22 @@ const ovDur = (o) => (o.out - o.in) / (o.speed || 1);
 function toast(msg) { addMsg('error', String(msg)); }
 
 // ---------- Preview helpers (browser approximations of what ffmpeg renders) ----------
+// Reframe preview: object-position puts the subject in the middle of a cover fit; with zoom > 1 the
+// element is also scaled and shifted so the subject stays centered, clamped so the frame stays filled.
+function reframeCss(c, a, lt, fit) {
+  if (fit !== 'cover' || !c.reframe?.points?.length) return { pos: '50% 50%', zoom: '' };
+  const W = P.settings.width, H = P.settings.height, sw = a.width || W, sh = a.height || H;
+  const k = Math.max(W / sw, H / sh), z = c.reframe.zoom || 1;
+  const axis = (focus, src, box) => {
+    const p = coverPosition(focus, src, box, k), shown = src * k, off = (box - shown) * p;
+    if (z === 1) return { p, t: 0 };
+    const pf = off + focus * shown;                         // focus point inside the unscaled element
+    const lo = box - (box / 2 + z * (off + shown - box / 2)), hi = -(box / 2 + z * (off - box / 2));
+    return { p, t: Math.min(hi, Math.max(lo, -z * (pf - box / 2))) / box * 100 };
+  };
+  const ax = axis(kfAt(reframeTrack(c, 'x'), lt), sw, W), ay = axis(kfAt(reframeTrack(c, 'y'), lt), sh, H);
+  return { pos: `${ax.p * 100}% ${ay.p * 100}%`, zoom: z === 1 ? '' : `translate(${ax.t}%, ${ay.t}%) scale(${z}) ` };
+}
 // Overlay blend modes and their CSS preview (add has no CSS equivalent; plus-lighter is close).
 const BLEND_MODES = ['normal', 'screen', 'multiply', 'overlay', 'softlight', 'lighten', 'darken', 'add', 'difference'];
 const BLEND_CSS = { screen: 'screen', multiply: 'multiply', overlay: 'overlay', softlight: 'soft-light', lighten: 'lighten', darken: 'darken', add: 'plus-lighter', difference: 'difference' };
@@ -303,8 +319,10 @@ function renderFrame(force) {
     // Clip transform, keyframes and in/out animation on the media element; color as a CSS filter.
     const T = c.transform || {}, lt = t - c.start, an = clipAnim(c, lt);
     const s = kfVal(c, 'scale', lt, T.scale ?? 1) * an.s, x = kfVal(c, 'x', lt, T.x ?? 0.5) + an.tx, y = kfVal(c, 'y', lt, T.y ?? 0.5) + an.ty;
+    const rf = reframeCss(c, a, lt, fit);
     const mediaStyle = {
-      transform: `translate(${(x - 0.5) * 100}%, ${(y - 0.5) * 100}%) rotate(${T.rotate || 0}deg) scale(${s * (T.flipH ? -1 : 1)}, ${s * (T.flipV ? -1 : 1)})`,
+      objectPosition: rf.pos,
+      transform: `translate(${(x - 0.5) * 100}%, ${(y - 0.5) * 100}%) ${rf.zoom}rotate(${T.rotate || 0}deg) scale(${s * (T.flipH ? -1 : 1)}, ${s * (T.flipV ? -1 : 1)})`,
       opacity: String(an.op), filter: colorCss(c.color),
     };
     Object.assign(ly.video.style, mediaStyle); Object.assign(ly.img.style, mediaStyle);
@@ -803,6 +821,9 @@ function renderInspector() {
       animSelect(c, 'animIn', 'Anim in'), animSelect(c, 'animOut', 'Anim out'),
       ...colorFields({ clipId: c.id }, c.color),
       c.effects?.length ? h('span', { class: 'note', title: 'Effects show in export and look_at_timeline' }, `✦ ${c.effects.map((e) => e.type).join(', ')}`) : null,
+      c.reframe ? h('span', { class: 'note', title: 'The crop follows the subject (set by reframe_clip: ask Claude to reframe this clip)' },
+        `⌖ reframe: ${c.reframe.points.length} point${c.reframe.points.length > 1 ? 's' : ''}${c.reframe.zoom ? `, ${c.reframe.zoom}x` : ''}`,
+        h('button', { class: 'small ghost', title: 'Remove the reframe', onclick: () => tool('reframe_clip', { clipId: c.id, points: [] }) }, '✕')) : null,
       h('button', { class: 'small', onclick: () => tool('split_clip', { at: time, clipId: c.id }) }, '✂ Split at playhead'),
       a.type === 'video' && !c.freeze ? h('button', { class: 'small', title: 'Hold the frame at the playhead for 2s (F)', onclick: () => tool('freeze_frame', { clipId: c.id, at: +Math.min(Math.max(time, c.start), c.end - 0.01).toFixed(3) }) }, '❄ Freeze frame') : null,
       h('button', { class: 'small danger', onclick: () => tool('delete_clip', { clipId: c.id }) }, 'Delete'),

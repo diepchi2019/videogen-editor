@@ -76,7 +76,7 @@ const styleSections = {
 
 export const TOOLS = [
   { name: 'get_timeline', description: 'Get the current project: media library, video clips with timeline positions, overlays, text, captions, audio. Call this before editing if unsure of ids.', input_schema: S({ detail: s('brief (default) or full (all caption lines)', { enum: ['brief', 'full'] }) }) },
-  { name: 'look_at_asset', description: 'See frames from a source video/image asset so you can understand its content (e.g. find where something happens). Returns images labelled with source timestamps.', input_schema: S({ assetId: s('Asset id'), from: n('Start time in source seconds (default 0)'), to: n('End time in source seconds (default end)'), count: n('Number of frames, 1-12 (default 6)') }, ['assetId']) },
+  { name: 'look_at_asset', description: 'See frames from a source video/image asset so you can understand its content (e.g. find where something happens). Returns images labelled with source timestamps.', input_schema: S({ assetId: s('Asset id'), from: n('Start time in source seconds (default 0)'), to: n('End time in source seconds (default end)'), count: n('Number of frames, 1-12 (default 6)'), grid: b('Draw a grid every 10% (brighter lines at the middle) to read positions as fractions, e.g. for reframe_clip or remove_region') }, ['assetId']) },
   { name: 'look_at_timeline', description: 'See the FINISHED video at given timeline times: rendered frames with overlays, text, captions, transitions and effects applied. Use it after editing to check text placement, framing and overlays.', input_schema: S({ times: { type: 'array', items: { type: 'number' }, description: 'Timeline seconds (max 12)' }, count: n('If no times: this many evenly spaced frames (default 6)') }) },
   { name: 'batch_edit', description: 'Apply many editing operations in one call, atomically and as ONE undo step. Each op is {name, input} where name is an editing tool (add_clip, trim_clip, set_clip, add_text, add_overlay, ...). In a later step, the string "$N" stands for the id created by step N (1-based), e.g. [{name:"add_clip",input:{assetId:"vid_1"}},{name:"set_transition",input:{clipId:"$1",type:"fade"}}]. If any step fails nothing is applied.', input_schema: S({ ops: { type: 'array', items: { type: 'object', properties: { name: s('Editing tool name'), input: { type: 'object', description: 'That tool\'s input' } }, required: ['name'] } } }, ['ops']) },
 
@@ -233,6 +233,19 @@ export const TOOLS = [
   },
   { name: 'delete_region', description: 'Remove a region added with remove_region (the original pixels come back). Region ids are listed with each clip in get_timeline.', input_schema: S({ regionId: s('Region id'), clipId: s('Optional: only this clip (a split clip shares region ids)') }, ['regionId']) },
 
+  {
+    name: 'reframe_clip',
+    description: 'Auto reframe: keep the subject in frame when a wider source is cropped to the canvas (16:9 footage in a 9:16 reel) or a taller one into 16:9. ' +
+      'First look_at_asset (grid: true) over the clip source range, note where the subject center is in each frame as x/y fractions (0 = left/top, 1 = right/bottom), then pass them as points. ' +
+      'The crop window moves smoothly between points and stops at the frame edges; fit becomes cover. More points (every 0.5-1s while the subject moves) follow it closer; one point gives a fixed off-center crop. ' +
+      'Points are stored in source time, so trims, splits and speed changes keep them on the footage. points: [] removes it.',
+    input_schema: S({
+      clipId: s('Clip id'),
+      points: { type: 'array', items: { type: 'object', properties: { t: n('Timeline seconds'), source: n('Or source seconds (the times look_at_asset shows)'), x: n('Subject center x 0-1 in the source frame'), y: n('Subject center y 0-1') } }, description: 'Subject positions over time' },
+      easing: s('linear (default, steady camera follow) or ease (move, then settle)', { enum: ['linear', 'ease'] }),
+      zoom: n('Crop tighter than a plain cover fit, 1-4 (default 1). Lets the frame follow the subject on both axes, or punch in on a same-shape source'),
+    }, ['clipId', 'points']),
+  },
   { name: 'add_overlay', description: 'Put a video or image ON TOP of the main video track at a timeline time: picture-in-picture, logo/watermark, B-roll cutaway (fit cover), reaction cam. Overlays do not shift other clips.', input_schema: S({ assetId: s('Asset id'), ...overlayProps }, ['assetId']) },
   { name: 'set_overlay', description: 'Change an overlay (timing, position, size, opacity, crop, volume, blend mode, chroma key for green screen, audio noise reduction...).', input_schema: S({ overlayId: s('Overlay id'), ...overlayProps }, ['overlayId']) },
   { name: 'delete_overlay', description: 'Remove an overlay.', input_schema: S({ overlayId: s('Overlay id') }, ['overlayId']) },
@@ -304,7 +317,7 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const p = store.getProject();
         const a = p.assets[input.assetId];
         if (!a) return { content: `No asset ${input.assetId}`, isError: true };
-        const frames = await extractFrames(a, input.from, input.to, input.count);
+        const frames = await extractFrames(a, input.from, input.to, input.count, { grid: input.grid === true || input.grid === 'true' });
         return { content: imageBlocks(`Frames from "${a.name}" (${a.id}):`, frames, (f) => `t=${f.t.toFixed(2)}s`) };
       }
       case 'look_at_timeline': {

@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 57 CapCut features listed, VideoGen has 44 and 2 more in part (updated Nov 20, 2026, after chroma key, blend modes and noise reduction). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI features, text to speech and P2 extras.
+Of the 57 CapCut features listed, VideoGen has 44 and 3 more in part (updated Nov 20, 2026, after chroma key, blend modes, noise reduction and Claude-driven auto reframe). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI features, text to speech and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -56,7 +56,7 @@ Of the 57 CapCut features listed, VideoGen has 44 and 2 more in part (updated No
 | Audio | Noise reduction, voice effects | Yes | Partial (noise reduction on clips, overlays and audio items; no voice effects yet; export only) | P2 |
 | Audio | Royalty-free music library | Yes | Missing | P2 |
 | AI | Background removal (no green screen) | Yes | Missing | P2 |
-| AI | Auto reframe (16:9 to 9:16 following the subject) | Yes | Missing | P1 |
+| AI | Auto reframe (16:9 to 9:16 following the subject) | Yes | Partial (reframe_clip: Claude reads subject positions from gridded frames and the crop follows them, optional zoom; preview and export. No automatic detector yet) | P1 |
 | AI | Long video to short clips | Yes | Missing | P2 |
 | AI | Script to video, AI images / video clips | Yes | Missing (planned via VideoGen pipeline) | P1 |
 | AI | Enhance / upscale, frame interpolation | Yes | Missing | P2 |
@@ -75,7 +75,7 @@ Of the 57 CapCut features listed, VideoGen has 44 and 2 more in part (updated No
 
 ## MCP server features
 
-The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 69 tools (70 with import_media) and 3 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
+The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 70 tools (71 with import_media) and 4 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
 
 | Feature | What it lets Claude do | VideoGen | Priority |
 | --- | --- | --- | --- |
@@ -90,7 +90,7 @@ The MCP server is what lets Claude Code edit without an API key, so it needs eve
 | Audio analysis | Detect beats, loudness, silence for cut-to-beat and ducking | Have (analyze_audio, mark_beats) | P1 |
 | Templates and style presets | "Make it in my reel style": saved fonts, colors, caption style, intro, outro | Have (save_style / apply_style with 3 built-ins, save_template / create_from_template) | P1 |
 | Export and wait | Render and return when done, with the file path | Have (export_video wait=true) | P1 |
-| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Have (make_reel, reel_from_template, save_my_style) | P2 |
+| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Have (make_reel, reel_from_template, save_my_style, reframe_to_vertical) | P2 |
 | Generate media | Call image / video / voice models and drop results on the timeline | Missing | P1 |
 | Remote access | Use the editor from Claude on phone or web, not only Claude Code on the same PC | Missing | P2 |
 
@@ -115,7 +115,7 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
      - **Quick wins (P1) — done Nov 5, 2026:** freeze frame, reverse clip, export cover image, snapping and ripple delete, multi-select with copy / paste / group, speed ramps (speed points per clip), .cube LUT import (`lut3d`), voiceover recording in the browser (saved as a voice track, so ducking and captions work with it).
      - **Extras (P2):** chroma key (`chromakey`), opacity and blend modes (`blend`) and noise reduction (`afftdn`) done Nov 20, 2026. Still to do: shape and split masks, voice effects (pitch, echo), GIF and image stickers, smooth slow motion (`minterpolate`), more effects.
      - **Preview gaps:** show effects, Ken Burns, crop, vignette and the newer text styles in the browser preview with CSS / canvas.
-     - **Claude does the AI part:** a basic auto reframe (Claude looks at frames and writes crop keyframes), and long video to short clips (a tool that lists candidate moments from transcript, loudness and scene changes for Claude to pick from).
+     - **Claude does the AI part:** a basic auto reframe (done Nov 20, 2026: `reframe_clip` + `look_at_asset` grid + `reframe_to_vertical` prompt), and long video to short clips (a tool that lists candidate moments from transcript, loudness and scene changes for Claude to pick from).
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe, text to speech, connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 

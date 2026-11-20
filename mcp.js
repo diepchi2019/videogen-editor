@@ -101,6 +101,15 @@ const PROMPTS = [
     arguments: [{ name: 'name', description: 'Style name', required: true }],
     text: (a) => `Save the look of the open VideoGen project as the style "${a.name}". get_timeline first; if a clip is clearly an intro or outro, or an overlay is a logo, pass introClipId / outroClipId / logoOverlayId. Then call save_style and tell me what it captured.`,
   },
+  {
+    name: 'reframe_to_vertical', description: 'Reframe horizontal clips for a vertical reel so the subject stays in frame',
+    arguments: [{ name: 'aspect', description: 'Target canvas, default 9:16' }, { name: 'subject', description: 'Who or what to follow (default: the main subject of each shot)' }],
+    text: (a) => `Reframe the open VideoGen project for ${a.aspect || '9:16'}${a.subject ? `, following ${a.subject}` : ''}.
+1. get_timeline. If the canvas is not ${a.aspect || '9:16'}, set_canvas aspect ${a.aspect || '9:16'}.
+2. For each main-track clip whose source is wider than the canvas: look_at_asset with grid true over the clip's source in-out range (about one frame per second, up to 12), and read the subject's center as x (and y) fractions of the frame from the grid lines (every 10%, yellow at the middle).
+3. reframe_clip with those points in source seconds (points[].source). Use more points while the subject moves fast, fewer when it is still; if the subject stays put, one point is enough.
+4. look_at_timeline at a few times per clip to check the subject is in frame, adjust points that miss, then tell me what you changed.`,
+  },
 ];
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPTS.map(({ text, ...p }) => p) }));
 server.setRequestHandler(GetPromptRequestSchema, async (req) => {

@@ -78,11 +78,13 @@ export async function makeThumb(asset) {
   return `/thumbs/${asset.id}.jpg`;
 }
 
-export async function extractFrames(asset, from, to, count) {
+// Grid every 10% with brighter center lines, to read positions as fractions of the frame.
+const GRID = 'drawgrid=w=iw/10:h=ih/10:t=1:c=white@0.45,drawgrid=w=iw/2:h=ih/2:t=2:c=yellow@0.8';
+export async function extractFrames(asset, from, to, count, { grid = false } = {}) {
   if (asset.type === 'audio') throw new Error('Audio assets have no frames');
   const file = path.join(DATA_DIR, 'media', asset.file);
   if (asset.type === 'image') {
-    const buf = await run('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', 'scale=512:-2,format=yuvj420p', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '5', '-']);
+    const buf = await run('ffmpeg', ['-v', 'error', '-i', file, '-frames:v', '1', '-vf', `scale=512:-2${grid ? `,${GRID}` : ''},format=yuvj420p`, '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '5', '-']);
     return [{ t: 0, data: buf.toString('base64') }];
   }
   const d = asset.duration;
@@ -93,7 +95,7 @@ export async function extractFrames(asset, from, to, count) {
   for (let i = 0; i < k; i++) {
     const t = k === 1 ? a : a + ((b - a) * i) / (k - 1);
     const tt = Math.min(t, Math.max(0, d - 0.05));
-    const buf = await run('ffmpeg', ['-v', 'error', '-ss', tt.toFixed(3), '-i', file, '-frames:v', '1', '-vf', 'scale=384:-2,format=yuvj420p', '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '6', '-']);
+    const buf = await run('ffmpeg', ['-v', 'error', '-ss', tt.toFixed(3), '-i', file, '-frames:v', '1', '-vf', `scale=384:-2${grid ? `,${GRID}` : ''},format=yuvj420p`, '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '6', '-']);
     if (buf.length) frames.push({ t: tt, data: buf.toString('base64') });
   }
   return frames;

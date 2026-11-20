@@ -246,6 +246,27 @@ try {
   const kx = await tool('export_video', { quality: 'draft', wait: true });
   const kPath = /done 100% file: (.+?\.mp4)/.exec(kx.content)?.[1];
   ok(kPath && Math.abs(Number(probe(kPath, 'format=duration')) - s.layout.duration) < 0.25, `chroma key + blend + denoise export (${kPath ? path.basename(kPath) : kx.content})`);
+  // Auto reframe: a red box moves across a 16:9 shot; reframed into 9:16 it must stay in the middle.
+  const mv = path.join(data, 'moving.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=1280x720:d=4:r=30', '-f', 'lavfi', '-i', 'color=c=red:s=80x80:d=4:r=30',
+    '-filter_complex', "[0][1]overlay=x='100+250*t':y=320", '-pix_fmt', 'yuv420p', mv]);
+  const mf = new FormData();
+  mf.append('files', new Blob([fs.readFileSync(mv)]), 'moving.mp4');
+  const mvA = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: mf })).json()).added[0];
+  await tool('create_project', { name: 'Reframe', aspect: '9:16' });
+  await tool('add_clip', { assetId: mvA.id });
+  s = await tool('get_timeline');
+  const grid = await tool('look_at_asset', { assetId: mvA.id, count: 2, grid: true });
+  ok(grid.content.filter((b) => b.type === 'image').length === 2, 'look_at_asset with grid');
+  const rf = await tool('reframe_clip', { clipId: s.layout.clips[0].id, points: [0, 1, 2, 3, 4].map((t) => ({ source: t, x: +((140 + 250 * t) / 1280).toFixed(3), y: 0.5 })) });
+  ok(/left\/right \(x\)/.test(rf.content), rf.content);
+  const rFrames = await tool('look_at_timeline', { times: [0.5, 3.5] });
+  rFrames.content.filter((b) => b.type === 'image').forEach((b, i) => fs.writeFileSync(path.join(framesDir, `reframe-${i}.jpg`), Buffer.from(b.source.data, 'base64')));
+  const rx = await tool('export_video', { quality: 'draft', wait: true });
+  const rPath = /done 100% file: (.+?\.mp4)/.exec(rx.content)?.[1];
+  const centre = (t) => [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', rPath, '-frames:v', '1', '-vf', 'crop=20:20:(iw-20)/2:(ih-20)/2,scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
+  const hits = [0.3, 1.5, 2.5, 3.7].map(centre);
+  ok(rPath && hits.every(([r, , b]) => r > 150 && b < 100), `reframe keeps the moving subject centered (centre pixels ${hits.map((x) => x.join('/')).join(' ')})`);
   await tool('open_project', { projectId: firstId });
 
   // --- MCP server over stdio ---
@@ -264,7 +285,7 @@ try {
   ok(/img_\w+ "c\.png" image/.test(imp.content[0].text), 'MCP import_media');
   const { prompts } = await mcp.listPrompts();
   const pr = await mcp.getPrompt({ name: 'reel_from_template', arguments: { template: 'Smoke template' } });
-  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style' && /create_from_template/.test(pr.messages[0].content.text), 'MCP prompts');
+  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical' && /create_from_template/.test(pr.messages[0].content.text), 'MCP prompts');
 
   console.log(`\nAll good. Output: ${outPath}\nTimeline frames: ${framesDir}`);
 } finally {

@@ -11,6 +11,7 @@ const { buildAss, assColor, assText, assTime } = await import('../src/ass.js');
 const { mergeTokens, transcriptText, speechRanges, mapWords } = await import('../src/transcribe.js');
 const store = await import('../src/store.js');
 const { buildCommand, motionFilter } = await import('../src/render.js');
+const { coverPosition } = await import('../src/timing.js');
 
 function project() {
   const p = M.emptyProject();
@@ -429,6 +430,53 @@ test('chroma key, blend modes and noise reduction: ops, summary, render graph', 
   run(p, 'set_overlay', { overlayId: o.id, chromaKey: '#ff0000' });
   assert.equal(o.key.despill, false, 'despill follows the key color');
   assert.throws(() => run(p, 'set_overlay', { overlayId: o.id, chromaKey: '#ff0000', keyDespill: true }), /Despill only works/);
+});
+
+test('reframe: subject points in source time, track, cover position, split/swap, graph', () => {
+  const p = project();
+  run(p, 'add_clip', { assetId: 'vid_b', out: 4 });           // 1080x1920, same shape as the 9:16 canvas
+  run(p, 'add_clip', { assetId: 'vid_a', in: 2, out: 8 });    // 1920x1080 into 9:16: room to move left/right
+  const c = p.clips[1];
+  const msg = run(p, 'reframe_clip', { clipId: c.id, points: [{ t: 4, x: 0.2 }, { source: 6, x: 0.8, y: 0.4 }] });
+  assert.match(msg, /fit changed contain -> cover/);
+  assert.match(msg, /left\/right \(x\)/);
+  assert.equal(c.fit, 'cover');
+  // t 4 on the timeline = 0s into the clip (it starts at 4) = source 2.
+  assert.deepEqual(c.reframe, { easing: 'linear', points: [{ at: 2, x: 0.2, y: 0.5 }, { at: 6, x: 0.8, y: 0.4 }] });
+  const tx = M.reframeTrack(c, 'x');
+  assert.deepEqual(tx.points, [{ t: 0, v: 0.2 }, { t: 4, v: 0.8 }, { t: 6, v: 0.8 }]);
+  // Trimming keeps the move on the footage: start at source 4 -> x is halfway (0.5) at the new start.
+  run(p, 'trim_clip', { clipId: c.id, in: 4 });
+  assert.deepEqual(M.reframeTrack(c, 'x').points, [{ t: 0, v: 0.5 }, { t: 2, v: 0.8 }, { t: 4, v: 0.8 }]);
+  // Double speed halves the clip-local times.
+  run(p, 'set_clip', { clipId: c.id, speed: 2 });
+  assert.deepEqual(M.reframeTrack(c, 'x').points, [{ t: 0, v: 0.5 }, { t: 1, v: 0.8 }, { t: 2, v: 0.8 }]);
+  run(p, 'set_clip', { clipId: c.id, speed: 1 });
+  // Same-shape source: no room unless zoomed.
+  assert.match(run(p, 'reframe_clip', { clipId: p.clips[0].id, points: [{ t: 1, x: 0.3 }] }), /same shape.*pass zoom/);
+  assert.match(run(p, 'reframe_clip', { clipId: p.clips[0].id, points: [{ t: 1, x: 0.3 }], zoom: 1.5 }), /both directions .*1\.5x/);
+  // Split: both halves keep the source-time points; summary shows timeline times.
+  run(p, 'split_clip', { clipId: c.id, at: 6 });
+  assert.deepEqual(p.clips[2].reframe, p.clips[1].reframe);
+  assert.match(M.summarize(p), /reframe following the subject: 4\.00s \(0\.2,0\.5\)|reframe following the subject: .*\(0\.8,0\.4\)/);
+  assert.match(M.summarize(p), /zoom 1\.5x/);
+  // cover position: subject at the left edge of a 16:9 frame in 9:16 stays clamped at 0.
+  const k = Math.max(1080 / 1920, 1920 / 1080);
+  assert.equal(coverPosition(0, 1920, 1080, k), 0);
+  assert.equal(coverPosition(1, 1920, 1080, k), 1);
+  assert.ok(Math.abs(coverPosition(0.5, 1920, 1080, k) - 0.5) < 1e-9);
+  assert.equal(coverPosition(0.3, 1080, 1920, k), 0.5); // no room on that axis
+  // Graph: per-frame crop window, zoom scales the cover fit up.
+  const { graph, tmpDir } = buildCommand(p, 'out.mp4', { quality: 'draft' });
+  try {
+    assert.match(graph, /crop=\d+:\d+:x='clip\(\(.*\)\*iw-ow\/2,0,iw-ow\)':y='clip\(/);
+  } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  // Swapping the media drops the reframe; validation.
+  assert.match(run(p, 'replace_clip_asset', { clipId: p.clips[1].id, assetId: 'vid_b', in: 0, out: 2 }), /reframe was removed/);
+  assert.ok(!p.clips[1].reframe);
+  assert.throws(() => run(p, 'reframe_clip', { clipId: p.clips[2].id, points: [{ x: 0.5 }] }), /needs t .* or source/);
+  assert.throws(() => run(p, 'reframe_clip', { clipId: p.clips[2].id, points: [{ t: 7, x: 1.5 }] }), /x/);
+  assert.match(run(p, 'reframe_clip', { clipId: p.clips[2].id, points: [] }), /Removed the reframe/);
 });
 
 test('render graph: overlays, transforms, motion, ASS, frames mode', () => {

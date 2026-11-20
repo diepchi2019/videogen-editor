@@ -2,6 +2,7 @@
 // the in-app Claude chat, and the MCP server.
 import crypto from 'node:crypto';
 import { RAMP_PRESETS, clipLength, srcAt, localAt, playedAt, subRamp, avgRate } from './timing.js';
+export { reframeTrack } from './timing.js';
 
 export { RAMP_PRESETS, srcAt, localAt, avgRate };
 
@@ -233,7 +234,7 @@ export function summarize(p, extras = {}) {
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
-    (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : ''));
+    (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : '') + describeReframe(c, c.start));
   const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
     `- ${o.id} (track ${o.track}${o.styleRole ? `, style ${o.styleRole}` : ''}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
@@ -417,6 +418,13 @@ function timedTarget(p, { clipId, overlayId }) {
   return fail('Give clipId or overlayId');
 }
 
+// Reframe in the summary: subject positions at timeline times (from source times).
+function describeReframe(c, start) {
+  if (!c.reframe?.points?.length) return '';
+  const pts = c.reframe.points.filter((q) => q.at >= Math.min(c.in, c.out) - 0.01 && q.at <= Math.max(c.in, c.out) + 0.01);
+  const shown = pts.slice(0, 6).map((q) => `${fmtT(start + localAt(c, q.at))}s (${q.x},${q.y})`).join(', ');
+  return `, reframe following the subject: ${shown || 'points outside this clip'}${pts.length > 6 ? `, … ${pts.length} points` : ''} (${c.reframe.easing}${c.reframe.zoom ? `, zoom ${c.reframe.zoom}x` : ''})${(c.fit || 'contain') !== 'cover' ? ' [inactive: needs fit cover]' : ''}`;
+}
 const describeRegion = (r) =>
   `${r.id} ${r.mode} x${r.x} y${r.y} w${r.w} h${r.h} source ${fmtT(r.from)}-${fmtT(r.to)}s${r.mode === 'patch' ? ` from frame ${fmtT(r.patchAt)}s` : ''}`;
 
@@ -735,7 +743,7 @@ export function makeTemplate(p, { name, description, slotClipIds, keepMusic = tr
     x.slotDuration = L.clips[i].duration;
     const rate = avgRate(c);
     x.assetId = null; x.in = 0; x.out = r3(x.slotDuration * rate);
-    delete x.regions; // they belong to the old footage
+    delete x.regions; delete x.reframe; // they belong to the old footage
     slots.push({ slot: x.slot, start: L.clips[i].start, duration: x.slotDuration, type: a?.type, was: a?.name });
     return x;
   });
@@ -999,7 +1007,7 @@ export const ops = {
     const src = Math.min(srcAt(c, lt), Math.max(0, a.duration - 0.05));
     const fz = {
       id: uid('clip'), assetId: c.assetId, in: r3(src), out: r3(src + d), freeze: true, speed: 1, volume: 0, fit: c.fit || 'contain',
-      transition: { type: 'none', duration: 0.5 }, ...structuredClone(pick(c, ['transform', 'color', 'regions'])),
+      transition: { type: 'none', duration: 0.5 }, ...structuredClone(pick(c, ['transform', 'color', 'regions', 'reframe'])),
     };
     let pos;
     if (lt <= 0.05) { pos = i; fz.transition = c.transition || fz.transition; c.transition = { type: 'none', duration: 0.5 }; } else if (lt >= lc.duration - 0.05) pos = i + 1;
@@ -1188,15 +1196,51 @@ export const ops = {
     if (bool(clearRegions)) delete c.regions;
     else if (c.regions && a.type === 'image') c.regions = c.regions.filter((r) => r.mode !== 'patch');
     if (c.regions && !c.regions.length) delete c.regions;
+    const hadReframe = !!c.reframe;
+    delete c.reframe; // subject positions belong to the old footage
     clampAll(p);
     const kept = c.regions?.length ? `; kept ${c.regions.length} removed region(s)` : '';
     const dims = old?.width && a.width && (old.width / old.height).toFixed(3) !== (a.width / a.height).toFixed(3)
       ? ` Note: aspect changed (${old.width}x${old.height} -> ${a.width}x${a.height}), check crop/regions with look_at_timeline.` : '';
-    return `${c.id} now uses "${a.name}" (source ${c.in}-${c.out}s)${kept}.${dims}`;
+    return `${c.id} now uses "${a.name}" (source ${c.in}-${c.out}s)${kept}.${dims}${hadReframe ? ' Its reframe was removed (it followed the old footage); run reframe_clip again.' : ''}`;
   },
 
   // Hide something burned into the source video (subtitle, watermark, logo) on one clip.
   // Box and times are in SOURCE terms, so the region follows trims, splits and speed changes.
+  // Follow the subject when a wider (or taller) source is cropped to the canvas, e.g. 16:9 into 9:16.
+  // points: subject center (x, y fractions of the source frame) at timeline (t) or source seconds.
+  reframe_clip(p, input) {
+    const i = findClip(p, input.clipId), c = p.clips[i], lc = layout(p).clips[i], a = p.assets[c.assetId];
+    if (!Array.isArray(input.points)) fail('points must be an array of {t (timeline s) or source (source s), x, y}; [] removes the reframe');
+    if (!input.points.length) { delete c.reframe; return `Removed the reframe from ${c.id}`; }
+    const byAt = new Map();
+    input.points.forEach((q, k) => {
+      let at = num(q?.source, `points[${k}].source`, 0, a.type === 'image' || c.freeze ? 3600 : a.duration);
+      if (at === undefined) {
+        const t = num(q?.t ?? q?.time, `points[${k}].t`, lc.start - 0.01, lc.end + 0.01);
+        if (t === undefined) fail(`points[${k}] needs t (timeline seconds within ${fmtT(lc.start)}-${fmtT(lc.end)}s) or source (source seconds)`);
+        at = srcAt(c, Math.min(lc.duration, Math.max(0, t - lc.start)));
+      }
+      const x = num(q.x, `points[${k}].x`, 0, 1) ?? 0.5, y = num(q.y, `points[${k}].y`, 0, 1) ?? 0.5;
+      byAt.set(r3(at), { at: r3(at), x: r3(x), y: r3(y) });
+    });
+    const easing = oneOf(input.easing, ['linear', 'ease'], 'easing') ?? 'linear';
+    const zoom = num(input.zoom, 'zoom', 1, 4) ?? c.reframe?.zoom ?? 1;
+    c.reframe = { easing, points: [...byAt.values()].sort((u, v) => u.at - v.at) };
+    if (zoom > 1) c.reframe.zoom = r3(zoom);
+    const wasFit = c.fit || 'contain';
+    c.fit = 'cover';
+    // Which way the frame can move: only along the axis where the cover-scaled source is larger.
+    const [W, H] = [p.settings.width, p.settings.height];
+    const sw = (a.width || W) * (c.transform?.crop?.w ?? 1), sh = (a.height || H) * (c.transform?.crop?.h ?? 1);
+    const rot = Math.abs(c.transform?.rotate || 0) % 180 === 90;
+    const [iw, ih] = rot ? [sh, sw] : [sw, sh];
+    const room = zoom > 1 ? 'in both directions (zoomed in)' : iw / ih > W / H + 1e-3 ? 'left/right (x)' : iw / ih < W / H - 1e-3 ? 'up/down (y)' : null;
+    return `Reframed ${c.id} with ${c.reframe.points.length} point(s) (${easing})${wasFit !== 'cover' ? `; fit changed ${wasFit} -> cover` : ''}. ` +
+      (room ? `The frame can move ${room}${zoom > 1 ? ` at ${zoom}x zoom` : '; the other axis is ignored'}.` : 'Source and canvas have the same shape, so there is no room to move: pass zoom (e.g. 1.5) to crop tighter and follow the subject.') +
+      ' Check with look_at_timeline.';
+  },
+
   remove_region(p, input) {
     const c = p.clips[findClip(p, input.clipId)];
     const a = p.assets[c.assetId];
