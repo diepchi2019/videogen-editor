@@ -126,9 +126,9 @@ Next: make auto-captions ready to use (below), then the Phase 2.5 extras (chroma
 Captions are built, but they don't run on the dev machine yet because no Whisper model is downloaded. The dev machine is an i7-1260P laptop with 40 GB RAM and an NVIDIA T550 with 4 GB, so the plan uses models that run well on a laptop CPU.
 
 1. **Download the default model:** `ggml-small.bin` (466 MB) into `models/`. It's the best balance of speed and Vietnamese accuracy on this machine.
-2. **Auto-detect the more accurate model:** add `ggml-large-v3-turbo-q5_0.bin` (~550 MB, close to large-v3 accuracy) to the model search in `src/transcribe.js` and prefer it over small when both are present. Today only base, small and tiny are found without `VIDEOGEN_WHISPER_MODEL`.
+2. **Auto-detect the more accurate model (done Nov 20, 2026; turbo takes 3.4s for the 5.5s speech fixture on CPU, base 0.9s):** add `ggml-large-v3-turbo-q5_0.bin` (~550 MB, close to large-v3 accuracy) to the model search in `src/transcribe.js` and prefer it over small when both are present. Today only base, small and tiny are found without `VIDEOGEN_WHISPER_MODEL`.
 3. **Check GPU use:** time `test/fixtures/speech.mp3` with `use_gpu` on and off to see whether this ffmpeg build uses the T550. Note the result in CLAUDE.md.
 4. **Skip silence with VAD:** pass ffmpeg's `vad_model` (Silero) when the file is present, so long clips with silences transcribe faster and leave out made-up words in quiet parts.
-5. **Captions button in the browser:** caption preset and language picker that runs `add_captions`, with a clear message when no model is installed (and where to get one).
+5. **Captions button in the browser (done Nov 20, 2026: CC Captions in the timeline toolbar, preset and language remembered, changing the preset restyles existing captions):** caption preset and language picker that runs `add_captions`, with a clear message when no model is installed (and where to get one).
 6. **Docs:** a model setup section in the README (which model for which machine, download command). The outdated "Known limits" lines were already replaced on Nov 5, 2026.
-7. **Test:** with the model in place, `npm test` runs the smoke test's captions step instead of skipping it.
+7. **Test (done: the smoke test's captions step runs now that a model is in models/):** with the model in place, `npm test` runs the smoke test's captions step instead of skipping it.

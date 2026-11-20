@@ -61,11 +61,11 @@ export const TEXT_STYLES = {
 
 // Caption style presets (see set_captions).
 export const CAPTION_STYLES = {
-  classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.75 },
-  boxed: { mode: 'line', size: 60, color: '#ffffff', box: true, boxColor: '#000000', outline: 0, maxWords: 6, y: 0.75 },
-  karaoke: { mode: 'karaoke', size: 72, color: '#ffffff', highlightColor: '#ffde00', outline: 5, maxWords: 5, y: 0.72 },
-  highlight: { mode: 'word', size: 80, color: '#ffffff', highlightColor: '#00e5ff', outline: 6, uppercase: true, maxWords: 3, y: 0.7 },
-  single: { mode: 'single', size: 120, color: '#ffffff', highlightColor: '#ffffff', outline: 8, uppercase: true, maxWords: 1, y: 0.62 },
+  classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.82 },
+  boxed: { mode: 'line', size: 60, color: '#ffffff', box: true, boxColor: '#000000', outline: 0, maxWords: 6, y: 0.82 },
+  karaoke: { mode: 'karaoke', size: 72, color: '#ffffff', highlightColor: '#ffde00', outline: 5, maxWords: 5, y: 0.8 },
+  highlight: { mode: 'word', size: 80, color: '#ffffff', highlightColor: '#00e5ff', outline: 6, uppercase: true, maxWords: 3, y: 0.78 },
+  single: { mode: 'single', size: 120, color: '#ffffff', highlightColor: '#ffffff', outline: 8, uppercase: true, maxWords: 1, y: 0.72 },
 };
 
 export const uid = (p) => `${p}_${crypto.randomBytes(3).toString('hex')}`;

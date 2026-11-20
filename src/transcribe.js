@@ -7,10 +7,16 @@ import { ANALYSIS_DIR, MEDIA_DIR, DATA_DIR } from './store.js';
 
 const q = (s) => `'${String(s).replace(/\\/g, '/').replace(/'/g, "'\\''").replace(/:/g, '\\:')}'`;
 
+// Most accurate first: large-v3-turbo (q5_0 is ~550 MB, close to large-v3), then small, base, tiny.
+export const MODEL_FILES = ['ggml-large-v3-turbo-q5_0.bin', 'ggml-large-v3-turbo.bin', 'ggml-small.bin', 'ggml-base.bin', 'ggml-tiny.bin'];
+export const MODEL_HELP = 'No whisper model found. Download one into models/, e.g. ' +
+  'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin (most accurate) or ggml-base.bin (fastest), ' +
+  'or set VIDEOGEN_WHISPER_MODEL to a model file.';
 export function modelPath() {
-  const cands = [process.env.VIDEOGEN_WHISPER_MODEL, path.resolve('models/ggml-base.bin'), path.join(DATA_DIR, 'models/ggml-base.bin'),
-    path.resolve('models/ggml-small.bin'), path.resolve('models/ggml-tiny.bin')].filter(Boolean);
-  return cands.find((f) => fs.existsSync(f)) || null;
+  if (process.env.VIDEOGEN_WHISPER_MODEL) return fs.existsSync(process.env.VIDEOGEN_WHISPER_MODEL) ? process.env.VIDEOGEN_WHISPER_MODEL : null;
+  const dirs = [path.resolve('models'), path.join(DATA_DIR, 'models')];
+  for (const f of MODEL_FILES) for (const d of dirs) if (fs.existsSync(path.join(d, f))) return path.join(d, f);
+  return null;
 }
 
 const cacheFile = (asset) => path.join(ANALYSIS_DIR, `${asset.file}.words.json`);
@@ -41,8 +47,7 @@ export function transcribe(asset, { language = 'auto', force = false } = {}) {
   if (inflight.has(asset.id)) return inflight.get(asset.id);
   const model = modelPath();
   if (!model) {
-    return Promise.reject(new Error('No whisper model found. Download one, e.g. ' +
-      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin into models/ggml-base.bin, or set VIDEOGEN_WHISPER_MODEL.'));
+    return Promise.reject(new Error(MODEL_HELP));
   }
   const out = path.join(ANALYSIS_DIR, `${asset.file}.${process.pid}.${Date.now()}.jsonl`);
   const lang = /^[a-z]{2,3}$|^auto$/i.test(language) ? language.toLowerCase() : 'auto';

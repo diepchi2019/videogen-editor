@@ -11,7 +11,7 @@ import { startExport, getJob, renderFrames, RESOLUTIONS } from './render.js';
 import { analyzeAudio, analysisText } from './audio.js';
 import path from 'node:path';
 import { waitJob } from './jobs.js';
-import { transcribe, readTranscript, hasTranscript, transcriptText } from './transcribe.js';
+import { transcribe, readTranscript, hasTranscript, transcriptText, MODEL_HELP } from './transcribe.js';
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
 import { listLuts, resolveLut } from './luts.js';
 import fs from 'node:fs';
@@ -39,7 +39,7 @@ const textProps = {
 const captionStyleProps = {
   preset: s(`Caption look: ${Object.entries(CAPTION_STYLES).map(([k, v]) => `${k} (${v.mode})`).join(', ')}`, { enum: Object.keys(CAPTION_STYLES) }),
   mode: s('line = whole line; karaoke = words fill with highlightColor as spoken; word = line shown, current word highlighted; single = one big word at a time', { enum: CAPTION_MODES }),
-  size: n('Font size px'), y: n('Vertical center 0-1 (0.75 = lower third)'), font: s('Font family (list_fonts)'),
+  size: n('Font size px'), y: n('Vertical center 0-1 (presets 0.72-0.82; keep below ~0.85 so the Reels/TikTok buttons do not cover it)'), font: s('Font family (list_fonts)'),
   color: s('Hex text color'), highlightColor: s('Hex color of the spoken word'), outline: n('Outline px'), outlineColor: s('Hex'),
   box: b('Background box'), boxColor: s('Hex'), uppercase: b('ALL CAPS'), bold: b('Bold'), maxWords: n('Max words per line (1-12)'),
 };
@@ -408,8 +408,12 @@ export async function executeTool(name, input = {}, source = 'claude') {
         for (const id of used) {
           const a = p.assets[id];
           if (!a || a.type === 'image' || (a.type === 'video' && !a.hasAudio)) continue;
-          try { transcripts[id] = (await transcribe(a, { language: input.language || 'auto' })).words; } catch (e) { skipped.push(`${a.name}: ${e.message}`); }
+          try { transcripts[id] = (await transcribe(a, { language: input.language || 'auto' })).words; } catch (e) {
+            if (e.message === MODEL_HELP) return { content: MODEL_HELP, isError: true };
+            skipped.push(`${a.name}: ${e.message}`);
+          }
         }
+        if (!Object.keys(transcripts).length && !skipped.length) return { content: 'Nothing to caption: no clip, overlay or voice item with speech audio is on the timeline.', isError: true };
         if (!Object.keys(transcripts).length && skipped.length) return { content: `Could not transcribe: ${skipped.join('; ')}`, isError: true };
         const words = timelineWords(store.getProject(), transcripts, sources);
         const { language, sources: _s, ...style } = input;

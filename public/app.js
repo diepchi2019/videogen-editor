@@ -25,6 +25,8 @@ const picked = new Map(); // every selected item: id -> kind (Ctrl/Shift+click a
 let clipboard = null;     // ids copied with Ctrl+C
 let range = null;         // { in, out } timeline seconds marked with I / O, removed with Shift+Delete
 let luts = [];
+let whisperModel;          // file name of the whisper model the server uses, null when none is installed
+let captioning = false;
 let rec = null;           // voiceover recording in progress
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } } };
 let snapOn = store.get('snap') !== 'off';
@@ -51,6 +53,7 @@ function setState(s) {
   if (s.templates) templates = s.templates;
   if (s.projects) projects = s.projects;
   if (s.luts) luts = s.luts;
+  if ('whisperModel' in s) whisperModel = s.whisperModel;
   else if (switched) fetch('/api/state').then((r) => r.json()).then((j) => { projects = j.projects || projects; renderProjects(); });
   if (sel && !findSel()) sel = null;
   const alive = new Set([...P.clips, ...P.texts, ...P.overlays, ...P.music].map((x) => x.id));
@@ -181,7 +184,7 @@ function waveCanvas(a, srcIn, srcOut, widthPx, heightPx, cls) {
 // ---------- Render ----------
 function renderAll() {
   $('#aspect').value = P.settings.aspect;
-  renderProjects(); renderPresets(); renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true);
+  renderProjects(); renderPresets(); renderAssets(); renderTimeline(); renderInspector(); renderJobs(); fitStage(); renderFrame(true); renderCaptionButton();
 }
 
 function renderProjects() {
@@ -986,6 +989,34 @@ $('#addText').onclick = async () => {
 };
 $('#freeze').onclick = () => tool('freeze_frame', { at: +time.toFixed(3) });
 $('#record').onclick = toggleRecord;
+// Auto-captions: preset + language are remembered; the button runs add_captions (which transcribes as needed).
+const CAPTION_PRESETS = ['classic', 'boxed', 'karaoke', 'highlight', 'single'];
+$('#capPreset').replaceChildren(...CAPTION_PRESETS.map((p) => h('option', { value: p }, p[0].toUpperCase() + p.slice(1))));
+$('#capPreset').value = store.get('capPreset') || 'karaoke';
+$('#capLang').value = store.get('capLang') || 'auto';
+$('#capPreset').onchange = (e) => {
+  store.set('capPreset', e.target.value);
+  if (P.captions?.lines?.length) tool('update_captions', { preset: e.target.value });
+};
+$('#capLang').onchange = (e) => store.set('capLang', e.target.value);
+function renderCaptionButton() {
+  const b = $('#captions');
+  b.disabled = captioning;
+  b.textContent = captioning ? 'Transcribing…' : P?.captions?.lines?.length ? 'CC Redo captions' : 'CC Captions';
+  b.classList.toggle('nomodel', whisperModel === null);
+  b.title = whisperModel === null ? 'No Whisper model installed: put ggml-large-v3-turbo-q5_0.bin or ggml-base.bin in models/ (see README)'
+    : `Transcribe speech and add captions${whisperModel ? ` (model ${whisperModel})` : ''}`;
+}
+$('#captions').onclick = async () => {
+  if (whisperModel === null) return toast('No Whisper model installed, so captions cannot be made yet. Download ggml-large-v3-turbo-q5_0.bin (most accurate) or ggml-base.bin (fastest) from https://huggingface.co/ggerganov/whisper.cpp into the models/ folder and restart the editor. See the README.');
+  if (P.captions?.lines?.length && !confirm('Replace the existing captions (and any fixes you made to them)?')) return;
+  captioning = true; renderCaptionButton();
+  const note = addMsg('action', 'Transcribing speech for captions… (the first run of a file can take a while)');
+  try {
+    const r = await tool('add_captions', { preset: $('#capPreset').value, language: $('#capLang').value });
+    note.textContent = r.isError || r.error ? 'Captions failed' : `✓ ${String(r.content).split('\n')[0]}`;
+  } finally { captioning = false; renderCaptionButton(); }
+};
 $('#cutRange').onclick = () => range && tool('delete_range', { start: +range.in.toFixed(3), end: +range.out.toFixed(3) }).then((r) => { if (!r.isError && !r.error) { range = null; renderTimeline(); } });
 $('#snap').onclick = () => { snapOn = !snapOn; store.set('snap', snapOn ? 'on' : 'off'); renderTimeline(); };
 // Mark a range with I (in) and O (out); Shift+Delete removes it and closes the gap.

@@ -75,6 +75,15 @@
         <button id="addText" class="small" title="Add text at playhead">T Add text</button>
         <button id="freeze" class="small" title="Hold the frame at the playhead for 2s (F)">❄ Freeze</button>
         <button id="record" class="small" title="Record a voiceover from the microphone while the video plays from the playhead">🎙 Record</button>
+        <span class="capgroup" title="Auto-captions from speech (local Whisper): transcribes the clips, overlays and voice items, then replaces any existing captions">
+          <button id="captions" class="small">CC Captions</button>
+          <select id="capPreset" title="Caption look"></select>
+          <select id="capLang" title="Speech language">
+            <option value="auto">Auto language</option><option value="en">English</option><option value="vi">Tiếng Việt</option>
+            <option value="es">Español</option><option value="fr">Français</option><option value="de">Deutsch</option><option value="pt">Português</option>
+            <option value="ja">日本語</option><option value="ko">한국어</option><option value="zh">中文</option><option value="th">ไทย</option><option value="id">Indonesia</option>
+          </select>
+        </span>
         <button id="cutRange" class="small" title="Remove the range marked with I / O and close the gap (Shift+Del)" disabled>⌫ Cut range</button>
         <button id="snap" class="small toggle" title="Snap to the playhead, clip edges, markers and other items while dragging">🧲 Snap</button>
         <label class="zoom">Zoom <input id="zoom" type="range" min="10" max="300" value="80" /></label>
