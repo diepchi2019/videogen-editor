@@ -48,9 +48,22 @@
     </div>
   </div>
 
+  <div id="stockDlg" class="dlg" hidden>
+    <div class="dlg-card wide">
+      <div class="dlg-head"><b>Stock videos &amp; photos</b><span class="note">Videos from Pexels (free key in ⚙ Settings). Photos from Pexels, or Openverse without a key. The shape follows the canvas.</span><button id="stockClose" class="small ghost" title="Close (Esc)">✕</button></div>
+      <form id="stockForm" class="row">
+        <select id="stockKind"><option value="video">Videos</option><option value="photo">Photos</option></select>
+        <input id="stockQuery" type="search" placeholder="ocean waves aerial, coffee pouring, city night…" />
+        <button class="primary small">Search</button>
+      </form>
+      <div id="stockNote" class="note"></div>
+      <div id="stockGrid"></div>
+    </div>
+  </div>
+
   <main>
     <section id="media" class="panel">
-      <div class="panel-title">Media <button id="musicOpen" class="small" title="Search free music and sound effects">🎵 Music</button> <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*,.cube,.ttf,.otf" hidden /></label></div>
+      <div class="panel-title">Media <button id="musicOpen" class="small" title="Search free music and sound effects">🎵 Music</button> <button id="stockOpen" class="small" title="Search free stock videos and photos">🎞 Stock</button> <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*,.cube,.ttf,.otf" hidden /></label></div>
       <div id="assets" class="assets"><div class="empty">Drop videos, images or music here</div></div>
     </section>
 

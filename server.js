@@ -15,6 +15,7 @@ import { presetLists } from './src/presets.js';
 import { importLut, listLuts } from './src/luts.js';
 import { modelPath, installedModels } from './src/transcribe.js';
 import { listVoices, ttsSettings, saveTtsSettings, elevenVoices, elevenModels, verifyElevenKey } from './src/tts.js';
+import { verifyPexelsKey } from './src/stock.js';
 import { publicSettings, setSettings, get as getSetting } from './src/settings.js';
 import { listFonts } from './src/fonts.js';
 import Anthropic from '@anthropic-ai/sdk';
@@ -87,6 +88,7 @@ app.post('/api/settings', wrap(async (req) => {
   const patch = req.body || {};
   const notes = [];
   if (patch['tts.elevenlabs.apiKey']) await verifyElevenKey(patch['tts.elevenlabs.apiKey']);
+  if (patch['stock.pexels.apiKey']) await verifyPexelsKey(String(patch['stock.pexels.apiKey']).trim());
   if (patch['claude.apiKey']) {
     // A wrong key is refused; if Anthropic cannot be reached the key is kept and checked on the first message.
     try { await new Anthropic({ apiKey: String(patch['claude.apiKey']).trim() }).models.list({ limit: 1 }); } catch (e) {

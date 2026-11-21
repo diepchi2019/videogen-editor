@@ -118,7 +118,7 @@ const PROMPTS = [
 2. Read the transcript again and cut_transcript anything off-topic, false starts the tool missed, or "as I said" repeats. Then remove_silences.
 3. enhance_voice. If the camera shakes, stabilize_clip. If clips look different, match_color to the best-looking clip.
 4. add_captions${a.style ? ` with preset ${a.style}` : ''}, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
-5. If the media library has fitting videos or photos, add_broll where they illustrate what is said (look_at_asset first).
+5. B-roll where it illustrates what is said: media from the library with add_broll (look_at_asset first), or search_stock + add_stock as broll for what is missing.
 6. A hook title in the first 2 seconds: add_text with style hook.${a.chapters === 'yes' ? ' set_chapters where the topic changes.' : ''}
 7. check_reel and fix what it finds, look_at_timeline at a few times, then export_video with quality draft and wait true. Tell me what you changed.`,
   },

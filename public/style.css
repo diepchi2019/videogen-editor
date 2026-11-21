@@ -110,6 +110,16 @@ button:disabled { opacity: .45; cursor: default; }
 #musicList { max-height: 60vh; overflow: auto; display: flex; flex-direction: column; gap: 4px; }
 #musicList .trk { display: grid; grid-template-columns: auto 1fr auto auto; gap: 8px; align-items: center; padding: 6px; border: 1px solid var(--line); border-radius: 6px; }
 #musicList .trk .meta { font-size: 11px; opacity: .75; }
+#stockForm { display: flex; gap: 6px; margin: 8px 0; }
+#stockQuery { flex: 1; }
+.dlg-card.wide { width: min(900px, 94vw); }
+#stockGrid { max-height: 62vh; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+#stockGrid .stk { border: 1px solid var(--line); border-radius: 6px; padding: 4px; display: flex; flex-direction: column; gap: 4px; }
+#stockGrid .thumb { position: relative; aspect-ratio: 16 / 10; background: #000; border-radius: 4px; overflow: hidden; }
+#stockGrid .thumb img { width: 100%; height: 100%; object-fit: contain; }
+#stockGrid .dur { position: absolute; right: 4px; bottom: 4px; background: rgba(0, 0, 0, .7); font-size: 10px; padding: 0 4px; border-radius: 3px; }
+#stockGrid .meta { font-size: 11px; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#stockGrid .row { display: flex; gap: 3px; flex-wrap: wrap; }
 #safeZones { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
 #safeZones div { position: absolute; background: rgba(255, 60, 60, 0.22); outline: 1px dashed rgba(255, 120, 120, 0.9); color: #fff; font-size: 10px; padding: 2px 4px; text-shadow: 0 0 2px #000; overflow: hidden; }
 .ov-emoji { position: absolute; left: 50%; transform: translate(-50%, -50%); line-height: 1; pointer-events: none; font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; }

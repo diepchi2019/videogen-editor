@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 70 CapCut features listed, VideoGen has 63 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights, auto zoom, the reel checker, caption translation, edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, the progress bar and the free music library). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
+Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights, auto zoom, the reel checker, caption translation, edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, the progress bar, the free music library and stock media). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -73,7 +73,7 @@ Of the 70 CapCut features listed, VideoGen has 63 and 2 more in part (updated No
 | AI | Enhance / upscale, frame interpolation | Yes | Missing | P2 |
 | Media | Import video, image, audio; drag and drop | Yes | Have | P0 |
 | Media | Thumbnails in library and on clips | Yes | Have | P0 |
-| Media | Stock media library | Yes | Missing | P2 |
+| Media | Stock media library | Yes | Have (🎞 Stock / search_stock + add_stock: Pexels videos and photos with a free key, Openverse photos without; shape follows the canvas; as clip, B-roll or import) | P2 |
 | Templates | Templates (fill a ready-made edit with your clips) | Yes | Have (save any edit as a template; slots keep length, framing, color, effects, transitions; music, beats, titles kept) | P1 |
 | Project | Multiple projects, save / open | Yes | Have | P0 |
 | Project | Autosave | Yes | Have | P0 |
@@ -132,7 +132,7 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe (done Nov 21, 2026: local face detector, `auto_reframe`), text to speech (done Nov 21, 2026: local Piper voices, `add_voiceover`), connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Reel checker with safe zones and caption translation done Nov 21, 2026. Edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, progress bar, hook/subscribe styles done Nov 21, 2026. Free music and sound effects library (Openverse) done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
+Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Reel checker with safe zones and caption translation done Nov 21, 2026. Edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, progress bar, hook/subscribe styles done Nov 21, 2026. Free music and sound effects library (Openverse) done Nov 21, 2026. Stock videos and photos (Pexels, Openverse) done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
 
 ### Auto-captions setup (added Nov 5, 2026)
 

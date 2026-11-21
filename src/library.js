@@ -11,7 +11,7 @@ const HEADERS = { 'User-Agent': 'VideoGen/1.0 (local video editor)' };
 const LICENSE_NAMES = { cc0: 'CC0 (public domain)', pdm: 'Public domain', by: 'CC BY', 'by-sa': 'CC BY-SA', 'by-nc': 'CC BY-NC', 'by-nd': 'CC BY-ND', 'by-nc-sa': 'CC BY-NC-SA', 'by-nc-nd': 'CC BY-NC-ND', sampling: 'Sampling+', 'nc-sampling': 'NC Sampling+' };
 export const licenseName = (l, v) => `${LICENSE_NAMES[l] || String(l).toUpperCase()}${v && !['cc0', 'pdm'].includes(l) ? ` ${v}` : ''}`;
 // Whether the license asks for credit (everything but CC0 / public domain).
-export const needsCredit = (l) => !['cc0', 'pdm'].includes(l);
+export const needsCredit = (l) => !['cc0', 'pdm', 'pexels'].includes(l);
 
 // Openverse result -> our track record.
 export function toTrack(r) {

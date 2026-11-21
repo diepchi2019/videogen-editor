@@ -108,7 +108,7 @@ export function checkReel(p, { words = [], loudness = '-14' } = {}) {
   else good.push(`Exports are brought to ${loudness} LUFS`);
 
   // Licensed library audio: the credit goes in the description.
-  const credited = [...new Set(p.music.map((m) => m.assetId))].map((id) => p.assets[id]?.credit).filter((c) => c && !['cc0', 'pdm'].includes(c.license));
+  const credited = [...new Set(p.music.map((m) => m.assetId))].map((id) => p.assets[id]?.credit).filter((c) => c && !['cc0', 'pdm', 'pexels'].includes(c.license));
   if (credited.length) good.push(`${credited.length} library track(s) need credit in the post description (${credited.map((c) => c.licenseName).join(', ')}): exports write it to the .description.txt next to the video`);
 
   // Overlays that end past the video, or start after it.

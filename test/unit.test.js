@@ -1628,3 +1628,22 @@ test('music library: license names, credits only where needed, Openverse results
   assert.deepEqual(Lb.projectCredits(p), ['"Song" by Ann is licensed under CC BY 3.0. https://e/1'], 'once, only what is used and needs credit');
   assert.match(M.summarize(p), /"a\.mp3"?.*CC BY 3\.0|CC BY 3\.0\) at 0s/);
 });
+
+test('stock media: orientation from the canvas, the video file that fits, no credit for Pexels', async () => {
+  const S = await import('../src/stock.js');
+  const Lb = await import('../src/library.js');
+  assert.deepEqual(['9:16', '16:9', '1:1', '4:5', 'x'].map(S.orientationFor), ['portrait', 'landscape', 'square', 'portrait', null]);
+  const files = [
+    { link: 'uhd', file_type: 'video/mp4', width: 2160, height: 3840 },
+    { link: 'hd', file_type: 'video/mp4', width: 1080, height: 1920 },
+    { link: 'sd', file_type: 'video/mp4', width: 540, height: 960 },
+    { link: 'webm', file_type: 'video/webm', width: 1080, height: 1920 },
+  ];
+  assert.equal(S.pickVideoFile(files, 1080).link, 'hd', 'smallest that reaches the canvas');
+  assert.equal(S.pickVideoFile(files, 2160).link, 'uhd');
+  assert.equal(S.pickVideoFile(files.slice(2), 1080).link, 'sd', 'else the biggest MP4');
+  assert.equal(S.pickVideoFile([], 1080), null);
+  assert.ok(!Lb.needsCredit('pexels'));
+  assert.equal(S.stockLine({ id: 'pexels-video-1', kind: 'video', duration: 12, width: 1080, height: 1920, title: 'Waves', creator: 'Ann', credit: { licenseName: 'Pexels License (free, no credit needed)' } }, 0),
+    '1. pexels-video-1 video 12s 1080x1920 "Waves" by Ann (Pexels License (free, no credit needed))');
+});

@@ -26,6 +26,8 @@ import { detectShake } from './stabilize.js';
 import { clipStats, colorMatch } from './colormatch.js';
 import { LAYOUTS, layoutPlan } from './layouts.js';
 import { searchAudio, getTrack, downloadTrack, trackLine } from './library.js';
+import { searchStock, getStockItem, downloadStock, stockLine, orientationFor, PEXELS_HELP } from './stock.js';
+import { makeThumb, run as runCmd } from './media.js';
 import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
@@ -400,6 +402,24 @@ export const TOOLS = [
       in: n('Source start seconds'), out: n('Source end seconds'), volume: n('0-2'), fadeIn: n('Seconds'), fadeOut: n('Seconds'), duck: n('0-1 lower it under speech (music default: 0.6)'), timelineOnly: b('Only add it to the media library'),
     }, ['id']),
   },
+  {
+    name: 'search_stock',
+    description: 'Search free stock videos (kind video, from Pexels: needs the free Pexels key in Settings) or photos (kind photo: Pexels with the key, else Openverse Creative Commons photos). ' +
+      'Results match the canvas shape by default (orientation auto). With look true (default) you also get small previews of the first results, so you can pick by what you see. Then add_stock with the id (as broll, clip or library).',
+    input_schema: S({
+      query: s('What it shows, in English ("ocean waves aerial", "coffee pouring slow motion", "city night")'), kind: s('video (default) or photo', { enum: ['video', 'photo'] }),
+      orientation: s('auto (from the canvas, default), portrait, landscape, square or any', { enum: ['auto', 'portrait', 'landscape', 'square', 'any'] }), page: n('Result page 1-20'), look: b('Include previews (default true)'),
+    }),
+  },
+  {
+    name: 'add_stock',
+    description: 'Download a stock video or photo from search_stock (by id) into the media library and use it: as broll (full-frame overlay at timeline second `at`, muted, with a fade), as clip (appended to the main track, or at position), or library (only import). ' +
+      'duration defaults to 4s for broll and clips (the whole video if shorter); in = source start for videos.',
+    input_schema: S({
+      id: s('Id from search_stock, e.g. pexels-video-123'), as: s('broll, clip or library (default)', { enum: ['broll', 'clip', 'library'] }),
+      at: n('Timeline seconds (broll)'), position: n('Main track position, 1 = first (clip; default: at the end)'), duration: n('Seconds'), in: n('Source start seconds (videos)'),
+    }, ['id']),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -530,7 +550,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['search_music', 'check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['search_stock', 'search_music', 'check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items', 'cut_transcript', 'remove_retakes']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -1019,6 +1039,51 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const { id: _i, timelineOnly: _t, ...rest } = input;
         const msg = store.apply('add_music', { ...rest, assetId: a.id, role, ...(role === 'music' && input.duck === undefined ? { duck: 0.6 } : {}) }, source);
         return { content: `${msg}: "${t.title}" by ${t.creator} (${a.duration.toFixed(1)}s).${credit}`, assetId: a.id };
+      }
+      case 'search_stock': {
+        const p = store.getProject();
+        const kind = input.kind === 'photo' ? 'photo' : 'video';
+        const o = !input.orientation || input.orientation === 'auto' ? orientationFor(p.settings.aspect) : input.orientation === 'any' ? null : input.orientation;
+        const r = await searchStock({ query: input.query, kind, orientation: o, page: Number(input.page) || 1, want: Math.min(p.settings.width, p.settings.height) });
+        if (!r.items.length) return { content: `No stock ${kind}s found for "${input.query || ''}"${o ? ` (${o})` : ''}. Try other words${o ? ' or orientation any' : ''}.`, items: [] };
+        const text = `Stock ${kind}s for "${input.query || ''}" from ${r.source === 'pexels' ? 'Pexels' : 'Openverse'}${o ? `, ${o}` : ''} (${r.total} found):\n${r.items.map(stockLine).join('\n')}\nAdd one with add_stock {id, as: broll | clip | library}.`;
+        if (input.look === false) return { content: text, items: r.items };
+        // Small previews of the first results, numbered like the list.
+        const blocks = [{ type: 'text', text }];
+        for (const [i, x] of r.items.slice(0, 6).entries()) {
+          try {
+            const jpg = await runCmd('ffmpeg', ['-v', 'error', '-user_agent', 'VideoGen/1.0 (local video editor)', '-i', x.thumb, '-frames:v', '1', '-vf', 'scale=320:-2', '-f', 'image2', '-c:v', 'mjpeg', '-q:v', '5', '-']);
+            blocks.push({ type: 'text', text: `${i + 1}. ${x.id}` }, { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: jpg.toString('base64') } });
+          } catch { /* preview not available: the list still has it */ }
+        }
+        return { content: blocks, items: r.items };
+      }
+      case 'add_stock': {
+        const p0 = store.getProject();
+        const x = await getStockItem(input.id, { want: Math.min(p0.settings.width, p0.settings.height) });
+        const dl = await downloadStock(x);
+        let a = Object.values(store.getProject().assets).find((y) => y.file === dl.file);
+        if (!a) {
+          const meta = await probe(dl.path);
+          a = { id: uid(meta.type === 'image' ? 'img' : 'vid'), name: `${x.title}`.slice(0, 100) + (x.kind === 'video' ? '.mp4' : `.${x.download.ext}`), file: dl.file, ...meta, credit: x.credit };
+          a.thumb = await makeThumb(a).catch(() => null);
+          store.addAsset(a);
+          if (needsProxy(a)) startProxy(a);
+        }
+        const credit = !['pexels', 'cc0', 'pdm'].includes(a.credit.license) ? ` Credit for the description: ${a.credit.attribution} (exports write it next to the video).` : '';
+        const as = input.as || 'library';
+        const srcIn = Number(input.in) || 0;
+        const len = Math.max(0.5, Math.min(Number(input.duration) || 4, a.type === 'video' ? a.duration - srcIn : Infinity));
+        let msg = `Imported "${a.name}" (${a.id}, ${a.type}${a.duration ? `, ${a.duration.toFixed(1)}s` : ''}, ${a.width}x${a.height}).`;
+        if (as === 'clip') {
+          msg += ' ' + store.apply('add_clip', { assetId: a.id, ...(a.type === 'video' ? { in: srcIn, out: srcIn + len } : { duration: len }), ...(input.position ? { position: input.position } : {}) }, source);
+        } else if (as === 'broll') {
+          const L = layout(store.getProject());
+          const at = Number(input.at) || 0;
+          if (at >= L.videoDuration) return { content: `${msg} Not placed: at ${at}s is past the end of the video (${L.videoDuration.toFixed(1)}s).`, isError: true };
+          msg += ' ' + store.apply('add_overlay', { assetId: a.id, start: at, duration: Math.min(len, L.videoDuration - at), in: srcIn, fit: 'cover', volume: 0, animation: 'fade' }, source);
+        }
+        return { content: msg + credit, assetId: a.id };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

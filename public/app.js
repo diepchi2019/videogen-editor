@@ -1324,6 +1324,7 @@ const SETTING_GROUPS = [
   ['Text to speech', ['tts.engine', 'tts.elevenlabs.apiKey', 'tts.piperCommand']],
   ['Captions', ['captions.whisperModel']],
   ['Text', ['text.defaultFont']],
+  ['Stock media', ['stock.pexels.apiKey']],
   ['Export', ['export.loudness']],
 ];
 const CHOICE_LABELS = { 'export.loudness': { '-14': '-14 LUFS (TikTok, Reels, Shorts, YouTube)', '-16': '-16 LUFS (podcasts, Apple)', '-23': '-23 LUFS (TV broadcast)', off: 'Off (keep the mix as it is)' } };
@@ -1333,6 +1334,7 @@ const SETTING_HELP = {
   'tts.piperCommand': 'Path to a piper executable. Leave empty to use "python -m piper" (pip install piper-tts).',
   'captions.whisperModel': 'Models in models/. Auto picks the most accurate one found.',
   'text.defaultFont': 'Used by texts and captions that do not set a font.',
+  'stock.pexels.apiKey': 'pexels.com/api → sign up (free) → copy your API key. Needed for stock videos; photos also work without it.',
   'export.loudness': 'Every export is measured and brought to this loudness, so reels are never too quiet or too loud next to others. Claude can override it per export.',
 };
 async function openSettings(focusKey) {
@@ -1498,6 +1500,37 @@ $('#musicForm').onsubmit = async (e) => {
     } }, '+');
     const dur = t.duration ? `${Math.floor(t.duration / 60)}:${String(Math.round(t.duration % 60)).padStart(2, '0')}` : '';
     return h('div', { class: 'trk' }, play, h('div', {}, h('div', {}, t.title), h('div', { class: 'meta' }, `${t.creator} · ${t.licenseName}${t.tags.length ? ` · ${t.tags.slice(0, 4).join(', ')}` : ''}`)), h('span', { class: 'meta' }, dur), add);
+  }));
+};
+// ---------- Stock videos and photos ----------
+function closeStock() { $('#stockDlg').hidden = true; }
+$('#stockOpen').onclick = () => { $('#stockDlg').hidden = false; $('#stockQuery').focus(); };
+$('#stockClose').onclick = closeStock;
+$('#stockDlg').addEventListener('pointerdown', (e) => { if (e.target.id === 'stockDlg') closeStock(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#stockDlg').hidden) closeStock(); });
+$('#stockForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const kind = $('#stockKind').value;
+  $('#stockNote').textContent = 'Searching…';
+  const r = await tool('search_stock', { query: $('#stockQuery').value.trim(), kind, look: false });
+  if (r.error || r.isError) {
+    $('#stockNote').replaceChildren(String(r.error || r.content), ' ', /Pexels/.test(r.error || r.content) ? h('button', { class: 'small', onclick: () => { closeStock(); openSettings('stock.pexels.apiKey'); } }, '⚙ Add key') : '');
+    $('#stockGrid').replaceChildren();
+    return;
+  }
+  const items = r.items || [];
+  $('#stockNote').textContent = items.length ? `${items.length} shown (${items[0].source === 'pexels' ? 'Pexels: free to use, no credit needed' : 'Openverse: Creative Commons, credit as the license asks'}). + Clip adds to the end, + B-roll covers from the playhead.` : String(r.content);
+  $('#stockGrid').replaceChildren(...items.map((x) => {
+    const btn = (label, as, title) => h('button', { class: 'small', title, onclick: async (ev) => {
+      ev.target.disabled = true; const old = ev.target.textContent; ev.target.textContent = '…';
+      const res = await tool('add_stock', { id: x.id, as, at: +time.toFixed(2) });
+      ev.target.disabled = false; ev.target.textContent = old;
+      if (!res.error && !res.isError) { toast(`Added "${x.title.slice(0, 40)}"`); addMsg('action', `✓ ${String(res.content)}`); }
+    } }, label);
+    return h('div', { class: 'stk', title: `${x.title} · ${x.creator}` },
+      h('div', { class: 'thumb' }, h('img', { src: x.thumb, alt: '', loading: 'lazy' }), x.duration ? h('span', { class: 'dur' }, `${x.duration}s`) : null),
+      h('div', { class: 'meta' }, x.creator),
+      h('div', { class: 'row' }, btn('+ Clip', 'clip', 'Add to the end of the main track'), btn('+ B-roll', 'broll', 'Cover the video from the playhead (muted, fades in/out)'), btn('+ Media', 'library', 'Only import into the media library')));
   }));
 };
 $('#studioVoice').onclick = (e) => {

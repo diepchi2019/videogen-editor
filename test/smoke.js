@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { startMockElevenLabs } from './mock-elevenlabs.js';
 import { startMockOpenverse } from './mock-openverse.js';
+import { startMockPexels } from './mock-pexels.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fx = path.join(root, 'test', 'fixtures');
@@ -18,7 +19,9 @@ const PORT = 3999, BASE = `http://localhost:${PORT}`;
 const mockEl = await startMockElevenLabs(3201);
 // And a fake Openverse for the music library (no network).
 const mockOv = await startMockOpenverse(3202);
-const srvEnv = { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data, ELEVENLABS_BASE_URL: `http://localhost:${mockEl.port}`, OPENVERSE_URL: `http://localhost:${mockOv.port}` };
+const mockPx = await startMockPexels(3203);
+const srvEnv = { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data, ELEVENLABS_BASE_URL: `http://localhost:${mockEl.port}`, OPENVERSE_URL: `http://localhost:${mockOv.port}`, PEXELS_BASE_URL: `http://localhost:${mockPx.port}` };
+delete srvEnv.PEXELS_API_KEY;
 delete srvEnv.ELEVENLABS_API_KEY;
 const srv = spawn('node', ['server.js'], { cwd: root, env: srvEnv, stdio: 'inherit' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -498,6 +501,28 @@ try {
       ovq.every((c) => c.query.license_type === 'commercial,modification' && /^VideoGen/.test(c.ua)) && ovq.some((c) => c.query.source === 'freesound') && mockOv.calls.filter((c) => c.path === '/files/song.mp3').length === 1,
       'search_music + add_library_audio: credits kept, commercial+video licenses only, downloaded once');
     ok(/library track\(s\) need credit/.test((await tool('check_reel')).content), 'check_reel reminds about the credits');
+    // Stock media: photos without a key (Openverse), videos need the Pexels key (checked when saved).
+    const noKey = await toolErr('search_stock', { query: 'ocean' });
+    const ph = await tool('search_stock', { query: 'field', kind: 'photo' });
+    const phText = ph.content.find((x) => x.type === 'text').text;
+    ok(/free API key/.test(noKey || '') && /openverse-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee photo 768x1024 "Green Field" by Mock Flickr \(CC BY 2\.0\)/.test(phText) && ph.content.some((x) => x.type === 'image'),
+      'search_stock: photos from Openverse without a key (with previews), videos ask for the Pexels key');
+    const ccPhoto = await tool('add_stock', { id: ph.items[0].id });
+    const setKey = async (v) => (await fetch(`${BASE}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ 'stock.pexels.apiKey': v }) })).json();
+    const badKey = await setKey('wrong-key-000000000000000');
+    const goodKey = await setKey('test-pexels-key-00000000000');
+    ok(/Imported "Green Field\.jpg"/.test(ccPhoto.content) && /Credit for the description: "Green Field" by Mock Flickr/.test(ccPhoto.content) && /refused/.test(badKey.error || '') && goodKey.settings['stock.pexels.apiKey'].set && !JSON.stringify(goodKey).includes('test-pexels-key'),
+      'add_stock (CC photo, credit), Pexels key checked on save and never sent back');
+    const sv = await tool('search_stock', { query: 'ocean waves' });
+    const pxSearch = mockPx.calls.find((c) => c.path === '/videos/search');
+    const br2 = await tool('add_stock', { id: sv.items[0].id, as: 'broll', at: 1, duration: 2 });
+    const nBefore = (await tool('get_timeline')).project.clips.length;
+    const cl2 = await tool('add_stock', { id: 'pexels-photo-777', as: 'clip', duration: 2 });
+    te = (await tool('get_timeline')).project;
+    const stockOv = te.overlays.find((o) => te.assets[o.assetId].credit?.license === 'pexels');
+    ok(sv.items[0].id === 'pexels-video-4242' && pxSearch.query.orientation === 'landscape' && pxSearch.key.startsWith('test-') && mockPx.calls.some((c) => c.path === '/files/wave-hd.mp4') && !mockPx.calls.some((c) => c.path === '/files/wave-sd.mp4') &&
+      stockOv && stockOv.start === 1 && stockOv.volume === 0 && te.assets[stockOv.assetId].height === 1920 && /Added clip/.test(cl2.content) && te.clips.length === nBefore + 1 && !/Credit for/.test(br2.content),
+      `search_stock + add_stock: Pexels video as B-roll (HD file for the canvas), photo as a clip (${br2.content.split('. ').pop()})`);
     const tx = await tool('export_video', { quality: 'draft', wait: true });
     const tOut = /done 100% file: (.+?\.mp4)/.exec(tx.content)?.[1];
     const nCh = execFileSync('ffprobe', ['-v', 'error', '-show_chapters', '-of', 'csv=p=0', tOut]).toString().trim().split('\n').filter(Boolean).length;
@@ -515,7 +540,7 @@ try {
   await mcp.connect(new StdioClientTransport({ command: 'node', args: [path.join(root, 'mcp.js')], env: { ...process.env, VIDEOGEN_URL: BASE } }));
   const { tools } = await mcp.listTools();
   const names = tools.map((t) => t.name);
-  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences', 'search_music', 'add_library_audio'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
+  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences', 'search_music', 'add_library_audio', 'search_stock', 'add_stock'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
   ok(tools.find((t) => t.name === 'get_timeline').annotations?.readOnlyHint === true && tools.find((t) => t.name === 'delete_project').annotations?.destructiveHint === true, 'MCP tool annotations');
   const { resources } = await mcp.listResources();
   const res = await mcp.readResource({ uri: 'videogen://project/json' });
@@ -536,4 +561,5 @@ try {
   srv.kill();
   mockEl.server.close();
   mockOv.close();
+  mockPx.close();
 }
