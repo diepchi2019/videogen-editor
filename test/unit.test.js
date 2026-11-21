@@ -1126,3 +1126,57 @@ test('fonts: face files from Windows-style names, em ratio from hhea', async () 
   assert.equal(fontFile('No Such Font'), null);
   assert.ok(Math.abs(emRatio(fontFile('Test Sans')) - 2048 / 2288) < 1e-9);
 });
+
+test('moments: sentences, scoring (hook, pauses, query, energy), no overlaps, snapping, no-speech mode', async () => {
+  const mo = await import('../src/moments.js');
+  // Words for a sentence of n words starting at t, 0.4s per word.
+  const say = (t, text) => text.split(' ').map((w, i) => ({ w, start: +(t + i * 0.4).toFixed(2), end: +(t + i * 0.4 + 0.35).toFixed(2) }));
+  const words = [
+    ...say(0, 'so um yeah we started the show today.'),            // 0-3.15
+    ...say(6, 'why do most people fail at pricing?'),                // hook + question, after a pause
+    ...say(9, 'they copy competitors instead of asking customers.'),
+    ...say(12, 'here is the one test that fixed it for us.'),        // ends 15.95
+    ...say(22, 'and then the weather was nice and we went home'),     // flat, no full stop
+    ...say(26.5, 'after a while the bus came and it was late'),
+    ...say(31, 'anyway that was the trip.'),
+  ];
+  const ss = mo.sentences(words);
+  assert.equal(ss.length, 5);                                        // the last three lines have no full stop and pauses < 0.8s: one sentence
+  assert.equal(ss[1].text, 'why do most people fail at pricing?');
+  assert.deepEqual(mo.parseScenes('[Parsed_showinfo_3] n:0 pts:12 pts_time:4.8 pos\nfoo pts_time:12.25 x'), [4.8, 12.25]);
+  const e = mo.energyCurve(new Float32Array(8000).fill(0.5), 4000, 0.5);
+  assert.deepEqual(e, [-6, -6, -6, -6]);                              // RMS 0.5 = -6 dBFS, 4 x 0.5s
+  // Loudness: the pricing part (6-16s) is louder, with peaks.
+  const db = Array.from({ length: 70 }, (_, i) => (i >= 12 && i < 32 ? (i % 5 === 0 ? -6 : -14) : -22));
+  const opts = { minLen: 8, maxLen: 14, count: 3 };
+  const list = mo.findMoments({ words, energy: { step: 0.5, db }, scenes: [10, 13], duration: 35 }, opts);
+  assert.equal(list[0].text.startsWith('why do most people fail at pricing?'), true, list[0].text);
+  assert.ok(list[0].in <= 6 && list[0].in >= 5.8, `in snapped just before the first word: ${list[0].in}`);
+  assert.ok(list[0].out >= 15.95 && list[0].out <= 16.3, `out just after the last word: ${list[0].out}`);
+  assert.match(mo.reasons(list[0]), /opens with a question/);
+  for (const a of list) for (const b of list) if (a !== b) assert.ok(a.out <= b.in || b.out <= a.in, 'no overlaps');
+  assert.ok(list.every((m) => m.duration >= 8 && m.duration <= 14.6));
+  // A query pulls the matching part to the top.
+  const q = mo.findMoments({ words, energy: { step: 0.5, db }, duration: 35 }, { ...opts, query: 'bus weather' });
+  assert.match(q[0].text, /weather/);
+  assert.match(mo.reasons(q[0]), /matches the query/);
+  // Too long a minimum: nothing; the text says what to change.
+  const none = mo.findMoments({ words, duration: 35 }, { minLen: 40, maxLen: 60 });
+  assert.equal(none.length, 0);
+  assert.match(mo.momentsText({ name: 'x.mp4', duration: 35 }, none, { hasWords: true }), /shorter minDuration/);
+  assert.throws(() => mo.findMoments({ words }, { minLen: 20, maxLen: 10 }), /maxDuration/);
+  // No speech: windows between shot changes, loudest first.
+  const ns = mo.findMoments({ words: [], energy: { step: 0.5, db }, scenes: [6, 16, 25], duration: 35 }, { minLen: 8, maxLen: 12, count: 2 });
+  assert.deepEqual([ns[0].in, ns[0].out], [6, 16]);
+  assert.match(mo.momentsText({ name: 'x.mp4', duration: 35 }, ns, { hasWords: false }), /no speech transcript/);
+  // Whisper repeats collapsed onto one instant are dropped, single zero-length words kept.
+  const cw = mo.cleanWords([{ w: 'a', start: 1, end: 1 }, { w: 'b', start: 1, end: 1 }, { w: 'c', start: 1, end: 1 }, { w: 'd', start: 2, end: 2 }, { w: 'e', start: 2.1, end: 2.4 }]);
+  assert.deepEqual(cw.map((w) => w.w), ['d', 'e']);
+});
+
+test('createProject open:false saves without switching', () => {
+  const before = store.getProject().id;
+  const p = store.createProject({ name: 'Background short', open: false, build: (np) => { np.settings.fps = 25; } });
+  assert.equal(store.getProject().id, before);
+  assert.ok(store.listProjects().some((x) => x.id === p.id && x.name === 'Background short'));
+});

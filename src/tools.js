@@ -14,6 +14,7 @@ import { waitJob } from './jobs.js';
 import { transcribe, readTranscript, hasTranscript, transcriptText, MODEL_HELP } from './transcribe.js';
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
 import { listLuts, resolveLut } from './luts.js';
+import { loudness, sceneChanges, findMoments, momentsText } from './moments.js';
 import fs from 'node:fs';
 
 env.resolveFont = resolveFont;
@@ -129,6 +130,31 @@ export const TOOLS = [
       slots: { type: 'array', items: { type: 'object', properties: { assetId: s('Asset id'), in: n('Source start seconds') }, required: ['assetId'] }, description: 'Like assetIds, with a source start per slot' },
       texts: { type: 'array', items: { type: 'string' }, description: 'New text for the template\'s texts in order ("" keeps one)' },
     }, ['templateId']),
+  },
+  {
+    name: 'find_moments',
+    description: 'Long video to short clips, step 1: list the best candidate moments of a long video or podcast for shorts/reels, best first. ' +
+      'Each candidate is whole sentences (from the local transcript) between minDuration and maxDuration, scored on continuous lively speech, loudness peaks (laughs, punchlines), a hook or question at the start, clean start/end, shot changes, and words from query. ' +
+      'Returns SOURCE in/out seconds and the text of each. Read them and pick the ones that stand alone, then make_short for each. Transcribes the asset first if needed (cached; long files take a while). Videos without speech are cut on shot changes and loudness.',
+    input_schema: S({
+      assetId: s('Video or audio asset id'), minDuration: n('Shortest moment in seconds (default 15)'), maxDuration: n('Longest moment in seconds (default 60)'),
+      targetDuration: n('Preferred length in seconds (default halfway between min and max)'), count: n('How many candidates, 1-30 (default 8)'),
+      query: s('Optional topic words to favour, e.g. "pricing mistakes"'), language: s('Speech language code or auto (default)'),
+    }, ['assetId']),
+  },
+  {
+    name: 'make_short',
+    description: 'Long video to short clips, step 2: make a NEW project holding one moment of a long video as a ready short: the source in-out range as the only clip, ' +
+      'the vertical canvas, fit cover (centered crop; use reframe_clip after if the subject is off-center), captions from the transcript, an optional title and an optional reel style. ' +
+      'open false saves it without switching (to make several in a row; open them later with open_project). The source project and its media are unchanged.',
+    input_schema: S({
+      assetId: s('Video asset id (from the open project)'), in: n('Source start seconds'), out: n('Source end seconds'),
+      name: s('Project name (default: asset name + time range)'), aspect: s('Canvas (default 9:16)', { enum: Object.keys(ASPECTS) }),
+      fit: s('How the source fills the canvas (default cover, or the fit of the style)', { enum: FITS }),
+      captions: s('Caption preset, or none (default: the captions of the style, else classic)', { enum: [...Object.keys(CAPTION_STYLES), 'none'] }),
+      title: s('Optional title text shown for the first 3 seconds'), styleId: s('Optional reel style to apply (list_styles)'),
+      open: b('Switch to the new project (default true)'), language: s('Speech language code or auto'),
+    }, ['assetId', 'in', 'out']),
   },
   { name: 'delete_template', description: 'Delete a saved template (moved to data/trash). Only when the user asks.', input_schema: S({ templateId: s('Template id or name') }, ['templateId']) },
 
@@ -312,7 +338,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['get_timeline', 'find_moments', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -422,6 +448,66 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const fonts = listFonts(input.search);
         if (!fonts.length) return { content: `No fonts match "${input.search}".` };
         return { content: `Default: ${defaultFont()}. ${fonts.length} families${fonts.some((f) => f.user) ? ' (imported first)' : ''}:\n${fonts.slice(0, 400).map((f) => f.family + (f.user ? ' [imported]' : '')).join(', ')}` };
+      }
+      case 'find_moments': {
+        const a = store.getProject().assets[input.assetId];
+        if (!a) return { content: `No asset ${input.assetId}`, isError: true };
+        if (a.type === 'image') return { content: `${a.id} is an image; find_moments needs a video or audio file`, isError: true };
+        const minLen = Number(input.minDuration ?? 15), maxLen = Number(input.maxDuration ?? 60);
+        if (!(minLen >= 1) || !(maxLen >= minLen)) return { content: 'minDuration must be >= 1 and maxDuration >= minDuration', isError: true };
+        const count = Math.max(1, Math.min(30, Math.round(Number(input.count ?? 8)) || 8));
+        let words = [], energy = null, note = '';
+        if (a.type === 'audio' || a.hasAudio) {
+          try { words = (await transcribe(a, { language: input.language || 'auto' })).words; } catch (e) {
+            if (e.message !== MODEL_HELP) throw e;
+            note = `\n\nNote: no whisper model, so there is no transcript and moments were cut on shot changes and loudness only. ${MODEL_HELP}`;
+          }
+          energy = await loudness(a);
+        }
+        const scenes = a.type === 'video' ? (await sceneChanges(a)).times : [];
+        const list = findMoments({ words, energy, scenes, duration: a.duration },
+          { minLen, maxLen, target: input.targetDuration !== undefined ? Number(input.targetDuration) : undefined, count, query: input.query });
+        return { content: momentsText(a, list, { hasWords: words.length > 0 }) + note, moments: list.map(({ rank, in: i, out, duration, score, text }) => ({ rank, in: i, out, duration, score, text })) };
+      }
+      case 'make_short': {
+        const cur = store.getProject(), a = cur.assets[input.assetId];
+        if (!a) return { content: `No asset ${input.assetId}`, isError: true };
+        if (a.type !== 'video') return { content: 'make_short needs a video asset', isError: true };
+        const tin = Number(input.in), tout = Number(input.out);
+        if (!(tin >= 0) || !(tout <= a.duration + 0.01) || !(tout - tin >= 1)) return { content: `in/out must be source seconds inside 0-${a.duration.toFixed(2)} and at least 1s apart`, isError: true };
+        const capPreset = input.captions;
+        let words = null, note = '';
+        if (capPreset !== 'none' && a.hasAudio) {
+          try { words = (await transcribe(a, { language: input.language || 'auto' })).words; } catch (e) {
+            if (e.message !== MODEL_HELP) throw e;
+            note = ' No captions: no whisper model installed.';
+          }
+        }
+        const fmtS = (x) => `${Math.floor(x / 60)}m${String(Math.round(x % 60)).padStart(2, '0')}`;
+        const msgs = [];
+        const open = input.open !== false && input.open !== 'false';
+        const p = store.createProject({
+          name: input.name || `${a.name.replace(/\.[^.]+$/, '')} ${fmtS(tin)}-${fmtS(tout)}`, aspect: input.aspect || '9:16', open,
+          build: (np) => {
+            ops.add_clip(np, { assetId: a.id, in: tin, out: Math.min(tout, a.duration) });
+            const clipId = np.clips[np.clips.length - 1].id;
+            if (input.styleId) msgs.push(ops.apply_style(np, { styleId: input.styleId }));
+            const fit = input.fit || (input.styleId && np.style?.clips?.fit) || 'cover';
+            ops.set_clip(np, { clipId, fit });
+            if (input.title) ops.add_text(np, { text: String(input.title), start: 0, end: Math.min(3, tout - tin) });
+            if (words) {
+              const tw = timelineWords(np, { [a.id]: words }, ['clips']);
+              if (tw.length) msgs.push(ops.set_captions(np, { words: tw, ...(capPreset ? { preset: capPreset } : {}) }));
+              else note += ' No speech in this range, so no captions.';
+            }
+          },
+        }, source);
+        const L = layout(p);
+        return {
+          content: `${open ? 'Created and opened' : 'Created (not opened)'} project ${p.id} "${p.name}": source ${tin}-${tout}s of "${a.name}" as a ${L.duration.toFixed(1)}s ${p.settings.aspect} short, fit ${p.clips.find((c) => c.assetId === a.id)?.fit}.` +
+            `${msgs.length ? ` ${msgs.join(' ')}` : ''}${note}${open ? ' Check it with look_at_timeline; if the subject is off-center, use reframe_clip.' : ''}`,
+          projectId: p.id,
+        };
       }
       case 'transcribe_asset': {
         const a = store.getProject().assets[input.assetId];

@@ -263,7 +263,31 @@ function renderAssets() {
   h('div', { class: 'thumb', style: a.thumb ? { backgroundImage: `url(${a.thumb})` } : {} }, a.type === 'audio' ? '♪' : ''),
   h('div', { class: 'meta' }, h('div', { class: 'name' }, a.name), h('div', { class: 'sub' }, `${a.type}${a.duration ? ' · ' + a.duration.toFixed(1) + 's' : ''}`)),
   h('button', { class: 'add', title: 'Add to timeline', onclick: () => addAsset(a) }, '+'),
+  a.type === 'video' && a.duration >= 20 ? h('button', { class: 'shorts', title: 'Find the best moments for shorts (transcribes first; long files take a while)', onclick: () => findShorts(a) }, '✂') : null,
   )) : [h('div', { class: 'empty' }, 'Drop videos, images or music here')]));
+}
+// Long video -> shorts: list candidate moments in the chat panel, each with a button that makes it a new project.
+async function findShorts(a) {
+  const note = addMsg('assistant', `Finding moments for shorts in "${a.name}"…`);
+  const r = await tool('find_moments', { assetId: a.id, minDuration: 15, maxDuration: 60, count: 6 });
+  if (r.isError || r.error) { note.remove(); return; }
+  note.textContent = `Moments for shorts in "${a.name}", best first:`;
+  for (const m of r.moments || []) {
+    const fmtT = (x) => `${Math.floor(x / 60)}:${(x % 60).toFixed(1).padStart(4, '0')}`;
+    const el = addMsg('assistant', '');
+    el.classList.add('moment');
+    el.append(
+      h('div', { class: 'moment-head' }, h('b', {}, `${m.rank}. ${fmtT(m.in)}–${fmtT(m.out)}`), ` · ${m.duration.toFixed(0)}s`,
+        h('button', { class: 'small', title: 'New 9:16 project with this moment, cover fit and captions', onclick: async (e) => {
+          e.target.disabled = true;
+          const res = await tool('make_short', { assetId: a.id, in: m.in, out: m.out });
+          e.target.disabled = false;
+          if (!res.isError && !res.error) e.target.textContent = '✓ Made';
+        } }, '✂ Make short')),
+      h('div', { class: 'moment-text' }, m.text ? `“${m.text.length > 220 ? `${m.text.slice(0, 220)}…` : m.text}”` : '(no speech)'),
+    );
+  }
+  if (!r.moments?.length) addMsg('assistant', String(r.content));
 }
 function addAsset(a, position) {
   if (a.type === 'audio') return tool('add_music', { assetId: a.id, start: 0 });

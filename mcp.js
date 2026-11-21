@@ -110,6 +110,21 @@ const PROMPTS = [
 3. reframe_clip with those points in source seconds (points[].source). Use more points while the subject moves fast, fewer when it is still; if the subject stays put, one point is enough.
 4. look_at_timeline at a few times per clip to check the subject is in frame, adjust points that miss, then tell me what you changed.`,
   },
+  {
+    name: 'shorts_from_video', description: 'Cut a long video or podcast into several vertical shorts, one project each',
+    arguments: [{ name: 'count', description: 'How many shorts (default 3)' }, { name: 'length', description: 'Length range in seconds, e.g. 20-45 (default 15-60)' },
+      { name: 'topic', description: 'What the shorts should be about (optional)' }, { name: 'style', description: 'Reel style to apply (optional)' }],
+    text: (a) => {
+      const [mn, mx] = String(a.length || '15-60').split(/[-–]/).map(Number);
+      return `Make ${a.count || 3} vertical shorts from the long video in the open VideoGen project${a.topic ? `, about: ${a.topic}` : ''}.
+1. get_timeline to find the long video asset (ask me if there are several).
+2. find_moments on it with minDuration ${mn || 15}, maxDuration ${mx || 60}, count ${Math.max(8, 2 * (Number(a.count) || 3))}${a.topic ? `, query "${a.topic}"` : ''}.
+3. Read the excerpts and pick the ${a.count || 3} best that stand alone: a hook in the first seconds, one complete thought, a payoff at the end. Use get_transcript to move in/out to a better sentence if needed.
+4. For each pick: make_short with a short punchy title${a.style ? ` and styleId "${a.style}"` : ''}, open false except for the last one.
+5. For the open short: look_at_timeline; if the speaker is off-center, reframe_clip (look_at_asset with grid true to read positions). Do the same for the others with open_project.
+6. Tell me the project names, their source ranges and why you picked each.`;
+    },
+  },
 ];
 server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPTS.map(({ text, ...p }) => p) }));
 server.setRequestHandler(GetPromptRequestSchema, async (req) => {

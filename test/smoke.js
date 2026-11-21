@@ -293,6 +293,25 @@ try {
   const centre = (t) => [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', rPath, '-frames:v', '1', '-vf', 'crop=20:20:(iw-20)/2:(ih-20)/2,scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
   const hits = [0.3, 1.5, 2.5, 3.7].map(centre);
   ok(rPath && hits.every(([r, , b]) => r > 150 && b < 100), `reframe keeps the moving subject centered (centre pixels ${hits.map((x) => x.join('/')).join(' ')})`);
+  // Long video to shorts: speech four times with pauses over three shots, then find_moments + make_short.
+  const longV = path.join(data, 'talk.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:d=10:r=25',
+    '-i', path.join(fx, 'speech.mp3'), '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-filter_complex',
+    '[0][1][2]concat=n=3:v=1:a=0[v];[3:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=4[s0][s1][s2][s3];[4:a]asplit=3[n0][n1][n2];[n0]atrim=duration=1.5[p0];[n1]atrim=duration=2[p1];[n2]atrim=duration=1[p2];[s0][p0][s1][p1][s2][p2][s3]concat=n=7:v=0:a=1[a]',
+    '-map', '[v]', '-map', '[a]', '-shortest', '-pix_fmt', 'yuv420p', '-c:a', 'aac', longV]);
+  const lf = new FormData();
+  lf.append('files', new Blob([fs.readFileSync(longV)]), 'talk.mp4');
+  const talk = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: lf })).json()).added[0];
+  const fm = await tool('find_moments', { assetId: talk.id, minDuration: 5, maxDuration: 14, count: 3 });
+  ok(fm.moments?.length >= 1 && fm.moments.every((m) => m.duration >= 5 && m.duration <= 14.6) && /Candidate moments in "talk\.mp4"/.test(fm.content),
+    `find_moments: ${fm.moments?.map((m) => `${m.in}-${m.out}`).join(', ')}${hasWhisper ? '' : ' (no whisper: shots + loudness)'}`);
+  const openId = (await tool('get_timeline')).project.id;
+  const ms = await tool('make_short', { assetId: talk.id, in: fm.moments[0].in, out: fm.moments[0].out, title: 'Best bit', open: false });
+  const shortP = (await tool('list_projects')).content;
+  ok((await tool('get_timeline')).project.id === openId && shortP.includes(ms.projectId) && /9:16 short, fit cover/.test(ms.content), `make_short (not opened): ${ms.content.split('.')[0]}`);
+  await tool('open_project', { projectId: ms.projectId });
+  s = await tool('get_timeline');
+  ok(s.project.clips.length === 1 && s.project.texts[0]?.text === 'Best bit' && (!hasWhisper || s.project.captions?.lines?.length > 0), 'short has the clip, the title and captions');
   await tool('open_project', { projectId: firstId });
 
   // --- MCP server over stdio ---
@@ -311,7 +330,9 @@ try {
   ok(/img_\w+ "c\.png" image/.test(imp.content[0].text), 'MCP import_media');
   const { prompts } = await mcp.listPrompts();
   const pr = await mcp.getPrompt({ name: 'reel_from_template', arguments: { template: 'Smoke template' } });
-  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical' && /create_from_template/.test(pr.messages[0].content.text), 'MCP prompts');
+  const sp = await mcp.getPrompt({ name: 'shorts_from_video', arguments: { count: '2', length: '20-40' } });
+  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical,shorts_from_video' && /create_from_template/.test(pr.messages[0].content.text) &&
+    /minDuration 20, maxDuration 40, count 8/.test(sp.messages[0].content.text), 'MCP prompts');
 
   console.log(`\nAll good. Output: ${outPath}\nTimeline frames: ${framesDir}`);
 } finally {

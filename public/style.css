@@ -127,3 +127,8 @@ body.dragging #dropOverlay { display: flex; }
 .layer .fx-vig, .layer .fx-canvas, .layer .fx-leak, .layer .fx-grain { position: absolute; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; }
 .layer .fx-leak { mix-blend-mode: screen; }
 .layer .fx-grain { mix-blend-mode: overlay; background-size: 160px 160px; }
+.asset .shorts { position: absolute; top: 4px; right: 30px; padding: 0 6px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 50%; height: 22px; }
+.msg.moment { display: flex; flex-direction: column; gap: 4px; }
+.moment-head { display: flex; align-items: center; gap: 6px; }
+.moment-head button { margin-left: auto; }
+.moment-text { color: var(--muted); font-size: 12px; }
