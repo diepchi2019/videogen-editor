@@ -167,6 +167,19 @@ export function timelineWords(p, transcripts, sources = ['clips', 'overlays', 'v
   return out.sort((a, b) => a.start - b.start);
 }
 
+// Words of a translated line spread over start..end in proportion to their length (no gaps).
+export function spreadWords(text, start, end) {
+  const ws = String(text).split(/\s+/).filter(Boolean);
+  const total = ws.reduce((k, w) => k + w.length + 1, 0);
+  let t = start;
+  return ws.map((w, i) => {
+    const e = i === ws.length - 1 ? end : t + ((end - start) * (w.length + 1)) / total;
+    const out = { w, start: r3(t), end: r3(e) };
+    t = e;
+    return out;
+  });
+}
+
 // Group timed words into caption lines.
 export function groupWords(words, { maxWords = 5, maxChars = 32, maxGap = 0.6 } = {}) {
   const lines = [];
@@ -281,7 +294,7 @@ export function summarize(p, extras = {}) {
     const shown = p.captions.lines.slice(0, extras.full ? Infinity : 40);
     const nEm = p.captions.lines.reduce((k, l) => k + l.words.filter((w) => w.em || w.emoji).length, 0);
     captions = `${p.captions.lines.length} lines, style ${st.preset} (mode ${st.mode}, size ${st.size}, y ${st.y}${st.font ? `, font "${st.font}"` : ''}${nEm ? `, ${nEm} emphasized words shown as *word*, emphasis color ${st.emphasisColor || 'auto'}` : ''})\n` +
-      shown.map((l) => `- ${l.id} ${fmtT(l.start)}-${fmtT(l.end)}s: ${l.words.map((w) => `${w.em ? `*${w.w}*` : w.w}${w.emoji ? ` ${w.emoji}` : ''}`).join(' ')}`).join('\n') +
+      shown.map((l) => `- ${l.id} ${fmtT(l.start)}-${fmtT(l.end)}s: ${l.words.map((w) => `${w.em ? `*${w.w}*` : w.w}${w.emoji ? ` ${w.emoji}` : ''}`).join(' ')}${l.alt ? ` / below: "${l.alt}"` : ''}`).join('\n') +
       (shown.length < p.captions.lines.length ? `\n- … ${p.captions.lines.length - shown.length} more (get_timeline detail=full)` : '');
   }
   return [
@@ -1522,6 +1535,32 @@ export const ops = {
     const lines = groupWords(words.map((w) => ({ w: w.w, start: +w.start, end: +w.end })), { maxWords: st.maxWords });
     p.captions = { style: st, lines };
     return `Captions: ${lines.length} lines (${words.length} words), style ${st.preset}, mode ${st.mode}`;
+  },
+
+  // Translated captions (Claude writes the translation; this maps it onto the timing). mode replace: the line's
+  // words become the translation, spread over the line by length; below: shown smaller under the original.
+  translate_captions(p, { lines = [], mode, language, texts = [] }) {
+    const m = oneOf(mode, ['replace', 'below'], 'mode') ?? 'below';
+    if (!Array.isArray(lines) || !Array.isArray(texts)) fail('lines must be [{lineId, text}] and texts [{textId, text}]');
+    if (!lines.length && !texts.length) fail('Give lines [{lineId, text}] with the translated text of each caption line (get_timeline lists the line ids), and/or texts [{textId, text}] for titles.');
+    if (lines.length && !p.captions) fail('No captions yet. Use add_captions first.');
+    for (const [i, x] of lines.entries()) {
+      const l = p.captions.lines[findIn(p.captions.lines, x?.lineId, 'caption line')];
+      const tx = String(x.text ?? '').replace(/\s+/g, ' ').trim();
+      if (m === 'below') { if (tx) l.alt = tx; else delete l.alt; continue; }
+      if (!tx) fail(`lines[${i}].text is empty`);
+      l.words = spreadWords(tx, l.start, l.end);
+      delete l.alt;
+    }
+    for (const [i, x] of texts.entries()) {
+      const t = p.texts[findIn(p.texts, x?.textId, 'text')];
+      const tx = String(x.text ?? '').trim();
+      if (!tx) fail(`texts[${i}].text is empty`);
+      t.text = tx;
+    }
+    if (p.captions && language) p.captions.language = String(language).slice(0, 40);
+    const left = p.captions ? p.captions.lines.filter((l) => (m === 'below' ? !l.alt : !lines.some((x) => x.lineId === l.id))).length : 0;
+    return `${m === 'below' ? 'Translation shown under' : 'Translated'} ${lines.length} caption line(s)${texts.length ? ` and ${texts.length} text(s)` : ''}${language ? ` (${language})` : ''}.${left ? ` ${left} line(s) ${m === 'below' ? 'have no translation yet' : 'are still in the original language'}.` : ''}`;
   },
 
   // Mark caption words for emphasis (no schema: emphasize_captions in tools.js finds the words).

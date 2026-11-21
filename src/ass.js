@@ -108,6 +108,12 @@ export function captionEmoji(captions, total = Infinity) {
   }
   return out.filter((e) => e.end > e.start);
 }
+// The translation line (line.alt) sits under the caption, smaller; above it when there is no room below.
+export const ALT_SCALE = 0.72;
+export function altY(st, H) {
+  const size = st.size || 72, gap = (size * 0.6 + size * ALT_SCALE * 0.6 + 8) / H;
+  return st.y + gap <= 0.96 ? st.y + gap : st.y - gap;
+}
 export function emojiBox(st, W, H) {
   const size = Math.max(16, Math.round((st.size || 72) * 1.4));
   return { size, x: W / 2, y: H * st.y - (st.size || 72) * 0.6 - size * 0.55 };
@@ -156,6 +162,13 @@ export function captionEvents(captions, W, H, font, total = Infinity) {
     } else {
       out.push({ start: l.start, end: le, style, text: `{${base}\\fad(80,80)}${l.words.map((x) => (x.em ? `{\\1c${emc(x)}${big}}${word(x)}{\\1c${col}${normal}}` : word(x))).join(' ')}` });
     }
+  }
+  // Translations under the lines.
+  const altSt = { ...st, size: Math.round((st.size || 72) * ALT_SCALE), outline: st.box ? undefined : Math.max(1, Math.round((st.outline ?? 4) * 0.75)), y: altY(st, H) };
+  const altBase = captionTags(altSt, W, H, font);
+  for (const l of captions.lines) {
+    if (!l.alt || l.start >= total) continue;
+    out.push({ start: l.start, end: Math.min(l.end, total), style, text: `{${altBase}\\fad(80,80)}${assText(st.uppercase ? l.alt.toUpperCase() : l.alt)}` });
   }
   return out;
 }

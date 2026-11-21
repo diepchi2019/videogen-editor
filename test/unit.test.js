@@ -1453,3 +1453,72 @@ test('auto zoom: alternate framing on jump cuts, punch-ins spaced out, op replac
   assert.ok(!p.clips[0].keyframes && !p.clips[1].transform && !p.clips.some((c) => c.autoZoom));
   assert.deepEqual(p.clips[2].keyframes.scale.points.map((q) => q.v), [1, 1.4]);
 });
+
+test('check_reel: safe zones, hook, captions, reading speed, audio, clips, format', async () => {
+  const { checkReel, checkText, zonesHit, textBox } = await import('../src/check.js');
+  const p = M.emptyProject();
+  assert.match(checkReel(p).issues[0].text, /empty/);
+  p.assets.v = { id: 'v', type: 'video', file: 'v.mp4', duration: 30, width: 1080, height: 1920, hasAudio: true };
+  p.assets.i = { id: 'i', type: 'image', file: 'i.png', width: 1080, height: 1920 };
+  p.assets.m = { id: 'm', type: 'audio', file: 'm.mp3', duration: 60 };
+  M.ops.add_clip(p, { assetId: 'v', in: 0, out: 12 });
+  M.ops.add_clip(p, { assetId: 'v', in: 12, out: 12.2 });
+  M.ops.add_clip(p, { assetId: 'i', duration: 6 });
+  M.ops.add_music(p, { assetId: 'm', volume: 0.8 });
+  M.ops.add_text(p, { text: 'Too low', start: 3, end: 3.4, y: 0.9 });
+  const words = Array.from({ length: 10 }, (_, k) => ({ w: 'word', start: 3 + k * 0.3, end: 3.2 + k * 0.3 }));
+  let r = checkReel(p, { words });
+  const areas = r.issues.map((i) => i.area);
+  for (const a of ['safe zone', 'hook', 'captions', 'text', 'clips', 'audio']) assert.ok(areas.includes(a), `${a} in ${areas.join(', ')}`);
+  assert.match(r.issues.find((i) => i.area === 'safe zone').fix, /update_text text_\w+ y 0\.7\d/);
+  assert.match(r.issues.find((i) => i.area === 'audio').fix, /duck 0\.7/);
+  assert.ok(r.issues.some((i) => /Clip #2 lasts under 0\.4s/.test(i.text)));
+  assert.ok(r.issues.some((i) => /1 photo stays on screen over 5s/.test(i.text)));
+  // Fix them and check again.
+  const t = p.texts[0];
+  M.ops.update_text(p, { textId: t.id, y: 0.5, start: 0, end: 2.5 });
+  M.ops.delete_clip(p, { clipId: p.clips[1].id });
+  M.ops.set_clip(p, { clipId: p.clips[1].id, motion: 'zoom_in' });
+  M.ops.update_music(p, { musicId: p.music[0].id, duck: 0.7 });
+  M.ops.set_captions(p, { words });
+  assert.match(checkReel(p, { words }).issues[0]?.text || '', /Captions at y 0\.82 sit under the username/, 'the classic preset sits low for TikTok');
+  M.ops.update_captions(p, { y: 0.72 });
+  r = checkReel(p, { words });
+  assert.deepEqual(r.issues, [], checkText(r));
+  assert.match(checkText(r), /looks good[\s\S]*✓ 9:16/);
+  // Captions too low, too fast; not vertical.
+  M.ops.update_captions(p, { y: 0.9 });
+  p.captions.lines[0].end = p.captions.lines[0].start + 0.3;
+  M.ops.set_canvas(p, { aspect: '16:9' });
+  r = checkReel(p, { words, loudness: 'off' });
+  assert.deepEqual(r.issues.map((i) => i.area).sort(), ['audio', 'captions', 'format']);
+  M.ops.set_canvas(p, { aspect: '9:16' });
+  r = checkReel(p, { words });
+  assert.match(r.issues.find((i) => i.area === 'safe zone').text, /Captions at y 0\.9 sit under the username/);
+  assert.deepEqual(zonesHit(textBox('Hi', { x: 0.95, y: 0.6, size: 60 }, 1080, 1920)).map((z) => z.id), ['buttons']);
+  assert.deepEqual(zonesHit(textBox('Hello there', { x: 0.5, y: 0.5, size: 80 }, 1080, 1920)), []);
+});
+
+test('translate_captions: below (two languages), replace with words spread by length, titles, ASS line under', async () => {
+  const { captionEvents, altY } = await import('../src/ass.js');
+  const p = M.emptyProject();
+  p.captions = { style: { mode: 'word', size: 72, y: 0.8, color: '#ffffff', highlightColor: '#00e5ff' }, lines: [
+    { id: 'c1', start: 0, end: 2, words: [{ w: 'Chào', start: 0, end: 0.6 }, { w: 'bạn', start: 0.6, end: 1.2 }] },
+    { id: 'c2', start: 2, end: 4, words: [{ w: 'Tạm', start: 2, end: 2.5 }, { w: 'biệt', start: 2.5, end: 3 }] }] };
+  M.ops.add_text(p, { text: 'Đi biển', start: 0, end: 2 });
+  assert.match(M.ops.translate_captions(p, { lines: [{ lineId: 'c1', text: 'Hello  friend' }], texts: [{ textId: p.texts[0].id, text: 'Beach day' }], language: 'English' }), /under 1 caption line\(s\) and 1 text\(s\) \(English\)\. 1 line\(s\) have no translation yet/);
+  assert.equal(p.captions.lines[0].alt, 'Hello friend');
+  assert.equal(p.texts[0].text, 'Beach day');
+  assert.match(M.summarize(p), /c1 0\.00-2\.00s: Chào bạn \/ below: "Hello friend"/);
+  const ev = captionEvents(p.captions, 1080, 1920, 'Arial');
+  const alt = ev.find((e) => e.text.endsWith('Hello friend'));
+  assert.ok(alt && alt.start === 0 && alt.end === 2 && alt.text.includes(String.raw`\fs52`) && alt.text.includes(String.raw`\pos(540,${Math.round(1920 * altY(p.captions.style, 1920))})`));
+  assert.ok(altY({ size: 72, y: 0.95 }, 1920) < 0.95, 'no room below: above the line');
+  assert.match(M.ops.translate_captions(p, { mode: 'replace', lines: [{ lineId: 'c2', text: 'Goodbye now' }] }), /Translated 1 caption line\(s\)\. 1 line\(s\) are still/);
+  assert.deepEqual(p.captions.lines[1].words, [{ w: 'Goodbye', start: 2, end: 3.333 }, { w: 'now', start: 3.333, end: 4 }]);
+  assert.throws(() => M.ops.translate_captions(p, { lines: [{ lineId: 'nope', text: 'x' }] }), /nope/);
+  assert.throws(() => M.ops.translate_captions(p, {}), /Give lines/);
+  M.ops.translate_captions(p, { lines: [{ lineId: 'c1', text: '' }] });
+  assert.equal(p.captions.lines[0].alt, undefined, 'empty text removes the translation');
+  assert.deepEqual(M.spreadWords('a bb', 0, 1), [{ w: 'a', start: 0, end: 0.4 }, { w: 'bb', start: 0.4, end: 1 }]);
+});

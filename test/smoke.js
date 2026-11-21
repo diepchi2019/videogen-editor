@@ -427,6 +427,23 @@ try {
     ok(w0.length >= 8 && Math.abs(w0.length - w1.length) <= 3 && lost.length <= 1, `tightened export keeps the words (${w0.length} -> ${w1.length}${lost.length ? `, missing ${lost.join(' ')}` : ''})`);
     const ux = await tool('export_video', { quality: 'draft', wait: true, loudness: 'off' });
     ok(!/loudness:/.test(ux.content), 'export with loudness off skips it');
+    // Reel check (this project is 16:9) and translation: two languages, then an English copy.
+    const ck = await tool('check_reel');
+    ok(/^Reel check/.test(ck.content) && ck.issues.some((i) => i.area === 'format') && !/Speech was not checked/.test(ck.content), `check_reel: ${ck.issues.map((i) => i.area).join(', ')}`);
+    tp = (await tool('get_timeline')).project;
+    const [c0, c1] = tp.captions.lines;
+    const tb = await tool('translate_captions', { language: 'Vietnamese', lines: [{ lineId: c0.id, text: 'Chào mừng đến hòn đảo' }] });
+    ok(/under 1 caption line/.test(tb.content) && (await tool('get_timeline')).content.includes('below: "Chào mừng đến hòn đảo"'), 'translate_captions below');
+    const lookAlt = await tool('look_at_timeline', { times: [c0.start + 0.3] });
+    lookAlt.content.filter((x) => x.type === 'image').forEach((x) => fs.writeFileSync(path.join(framesDir, 'translated.jpg'), Buffer.from(x.source.data, 'base64')));
+    const origId = tp.id;
+    const tc = await tool('translate_captions', { mode: 'copy', language: 'Vietnamese', lines: [{ lineId: c0.id, text: 'Chào mừng' }, { lineId: c1.id, text: 'Xin chào các bạn' }] });
+    const cp = (await tool('get_timeline')).project;
+    const op = JSON.parse(fs.readFileSync(path.join(data, 'projects', origId, 'project.json'), 'utf8'));
+    ok(cp.id !== origId && /\(Vietnamese\)$/.test(cp.name) && cp.captions.lines[1].words.map((w) => w.w).join(' ') === 'Xin chào các bạn' && op.captions.lines[1].words.map((w) => w.w).join(' ') === c1.words.map((w) => w.w).join(' '),
+      `translate_captions copy: ${tc.content.split('.')[0]}`);
+    const bad = await toolErr('translate_captions', { mode: 'copy', lines: [{ lineId: 'cap_nope', text: 'x' }] });
+    ok(/cap_nope/.test(bad || '') && (await tool('list_projects')).content.split('(Vietnamese)').length === 2, 'translate_captions copy with a bad line id makes no copy');
   } else console.log('skip - remove silences (no whisper model)');
   await tool('open_project', { projectId: firstId });
 
@@ -447,7 +464,7 @@ try {
   const { prompts } = await mcp.listPrompts();
   const pr = await mcp.getPrompt({ name: 'reel_from_template', arguments: { template: 'Smoke template' } });
   const sp = await mcp.getPrompt({ name: 'shorts_from_video', arguments: { count: '2', length: '20-40' } });
-  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical,shorts_from_video' && /create_from_template/.test(pr.messages[0].content.text) &&
+  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical,translate_reel,shorts_from_video' && /create_from_template/.test(pr.messages[0].content.text) &&
     /minDuration 20, maxDuration 40, count 8/.test(sp.messages[0].content.text), 'MCP prompts');
 
   console.log(`\nAll good. Output: ${outPath}\nTimeline frames: ${framesDir}`);

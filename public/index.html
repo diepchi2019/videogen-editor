@@ -49,12 +49,15 @@
           <div id="overlays"></div>
           <div id="texts"></div>
           <div id="stageEmpty">Add clips to start</div>
+          <div id="safeZones" hidden></div>
         </div>
       </div>
       <div id="transport">
         <button id="toStart" title="Go to start (Home)">⏮</button>
         <button id="play" title="Play / pause (Space)">▶</button>
         <span id="time">0:00.0 / 0:00.0</span>
+        <button id="checkReel" class="small" title="Check the reel before posting: safe zones, hook, captions, audio, length">✓ Check</button>
+        <button id="safeToggle" class="small toggle" title="Show where TikTok / Reels / Shorts put their buttons and text over the video">▦ Safe zones</button>
         <span class="hint" title="Ctrl/Shift+click selects several · Ctrl+C / Ctrl+V copy and paste at the playhead · Ctrl+D duplicate · Ctrl+G group (Shift: ungroup) · F freeze frame · I / O mark a range, Shift+Del removes it · Esc clear">Space play · S split · F freeze · I/O range · Del delete · ←/→ step</span>
       </div>
       <div id="inspector" class="panel"></div>
@@ -113,6 +116,7 @@
         </span>
         <span class="capgroup" title="Auto-captions from speech (local Whisper): transcribes the clips, overlays and voice items, then replaces any existing captions">
           <button id="captions" class="small">CC Captions</button>
+          <button id="translate" class="small" title="Ask Claude to translate the captions (shown under the original, or replacing them)">🌐 Translate</button>
           <button id="keywords" class="small" title="Highlight key words in the captions (numbers, money, strong words): their own color and bigger. Ask Claude to pick words by meaning or add emoji.">★ Keywords</button>
           <select id="capPreset" title="Caption look"></select>
           <select id="capLang" title="Speech language">

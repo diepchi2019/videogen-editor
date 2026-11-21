@@ -85,7 +85,7 @@ const PROMPTS = [
 2. ${a.style ? `apply_style "${a.style}" first` : 'list_styles and apply_style the one that fits best'} so new clips, titles, captions and music follow it.
 3. Build the edit with batch_edit: strongest moment first, punchy cuts, a title in the first 2 seconds. If there is music, mark_beats and fit_clips_to_beats.
 4. If anyone speaks: remove_silences (tightens the pauses and drops um/uh), add_captions, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
-5. look_at_timeline to check framing and text, fix problems, then export_video with quality draft and wait true. Report the file path.`,
+5. check_reel and fix what it finds, look_at_timeline to check framing and text, then export_video with quality draft and wait true. Report the file path.`,
   },
   {
     name: 'reel_from_template', description: 'Make a new reel by filling a saved template with clips from the media library',
@@ -109,6 +109,15 @@ const PROMPTS = [
 2. auto_reframe (no clipId) follows faces automatically${a.subject ? `; if ${a.subject} is not a person's face, skip it for the clips where it would follow the wrong thing` : ''}. For clips it reports without a face (or where the subject is not a face): look_at_asset with grid true over the clip's source in-out range (about one frame per second, up to 12), and read the subject's center as x (and y) fractions of the frame from the grid lines (every 10%, yellow at the middle).
 3. reframe_clip with those points in source seconds (points[].source). Use more points while the subject moves fast, fewer when it is still; if the subject stays put, one point is enough.
 4. look_at_timeline at a few times per clip to check the subject is in frame, adjust points that miss, then tell me what you changed.`,
+  },
+  {
+    name: 'translate_reel', description: 'Translate the captions (and titles) of the open project into another language, keeping the timing',
+    arguments: [{ name: 'language', description: 'Target language, e.g. English or Vietnamese', required: true }, { name: 'mode', description: 'below (two languages, default), replace, or copy (a new project)' }],
+    text: (a) => `Translate the captions and titles of the open VideoGen project into ${a.language}.
+1. get_timeline with detail full to read every caption line (ids cap_...) and the texts.
+2. Translate each line by meaning, short enough to read in the line's time; keep names, numbers and emoji. Titles too.
+3. translate_captions with mode ${a.mode || 'below'}, language "${a.language}", all lines and texts in one call.
+4. check_reel (two caption lines take more room: fix any safe-zone warning), then look_at_timeline at a few caption times and tell me what you did.`,
   },
   {
     name: 'shorts_from_video', description: 'Cut a long video or podcast into several vertical shorts, one project each',

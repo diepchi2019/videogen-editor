@@ -20,6 +20,7 @@ import { findPauseCuts, fineLoudness, peakDb, quietRuns } from './pauses.js';
 import { srcAt, localAt } from './timing.js';
 import { pickKeywords, findPhrase, planAutoZoom } from './emphasis.js';
 import { fetchEmoji } from './emoji.js';
+import { checkReel, checkText } from './check.js';
 import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
@@ -293,6 +294,24 @@ export const TOOLS = [
       clear: b('Remove the auto zoom'),
     }),
   },
+  {
+    name: 'check_reel',
+    description: 'Check the reel before posting to TikTok / Reels / Shorts and list what to fix: text, captions or logos under the app buttons and bottom text (safe zones), no hook in the first 2 seconds, ' +
+      'speech without captions, captions or titles too fast to read, clips that flash by, still photos without motion, music over speech without ducking, format and length. ' +
+      'Each problem comes with the tool call that fixes it. Run it before export_video and fix what it finds.',
+    input_schema: S({}),
+  },
+  {
+    name: 'translate_captions',
+    description: 'Put your translation of the captions (and titles) on the timeline, keeping the timing. Read the caption lines with get_timeline (detail full for long videos), translate each line by meaning, and pass them all. ' +
+      'mode below (default): the translation shows smaller under the original (two languages); replace: the captions become the translation; copy: a new project (opened) with the captions and titles replaced, the original kept.',
+    input_schema: S({
+      lines: { type: 'array', description: 'One per caption line', items: { type: 'object', properties: { lineId: s('Caption line id (cap_...)'), text: s('Translated text of that line') }, required: ['lineId', 'text'] } },
+      texts: { type: 'array', description: 'Titles to translate too', items: { type: 'object', properties: { textId: s('Text id'), text: s('Translated text') }, required: ['textId', 'text'] } },
+      mode: s('below (default), replace or copy', { enum: ['below', 'replace', 'copy'] }),
+      language: s('Language of the translation, e.g. English'),
+    }),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -423,7 +442,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['check_reel', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -708,6 +727,25 @@ export async function executeTool(name, input = {}, source = 'claude') {
         if (!plan.clips.length) return { content: `Nothing to zoom: ${plan.jumpCuts ? '' : 'no jump cuts (the same video continuing after a cut)'}${input.emphasis === false ? '' : `${plan.jumpCuts ? '' : ' and '}no emphasis found`}.${note}` };
         const msg = store.apply('set_auto_zoom', { clips: plan.clips, amount }, source);
         return { content: `${msg}${plan.punches ? ` Punch-ins on ${how}.` : ''}${note} Check with look_at_timeline.` };
+      }
+      case 'check_reel': {
+        const p = store.getProject(), transcripts = {};
+        for (const id of new Set([...p.clips.map((c) => c.assetId), ...p.music.filter((m) => m.role === 'voice').map((m) => m.assetId)])) {
+          const a = p.assets[id], t = a && readTranscript(a);
+          if (t?.words) transcripts[id] = t.words;
+        }
+        const r = checkReel(p, { words: timelineWords(p, transcripts, ['clips', 'voice']), loudness: String(setting('export.loudness') ?? '-14') });
+        const unknown = !Object.keys(transcripts).length && p.clips.some((c) => p.assets[c.assetId]?.hasAudio);
+        return { content: checkText(r) + (unknown ? '\n(Speech was not checked: nothing is transcribed yet. add_captions or transcribe_asset first.)' : ''), issues: r.issues };
+      }
+      case 'translate_captions': {
+        if (input.mode !== 'copy') return { content: store.apply('translate_captions', input, source) };
+        const p = store.getProject();
+        if (!(input.lines?.length || input.texts?.length)) return { content: 'Give lines [{lineId, text}] (and texts for titles) with your translation.', isError: true };
+        ops.translate_captions(structuredClone(p), { ...input, mode: 'replace' }); // a bad line id fails before the copy is made
+        const np = store.duplicateProject(null, `${p.name} (${input.language || 'translated'})`, source);
+        const msg = store.apply('translate_captions', { ...input, mode: 'replace' }, source);
+        return { content: `Made a copy ${np.id} "${np.name}" and opened it. ${msg} The original project ${p.id} is unchanged.` };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

@@ -614,13 +614,21 @@ function renderCaption(t, k) {
     const colr = st.mode === 'word' ? (lit ? st.highlightColor : em || st.color) : em || (lit ? st.highlightColor : st.color);
     return h('span', { style: { color: colr, ...(em ? { fontSize: emSize } : {}) } }, up(w.w) + (i < words.length - 1 ? ' ' : ''));
   }));
+  // Translation under the line (altY / ALT_SCALE in src/ass.js).
+  let altEl = null;
+  if (l.alt) {
+    const H = P.settings.height, size = st.size || 72, gap = (size * 0.6 + size * 0.72 * 0.6 + 8) / H;
+    const y = st.y + gap <= 0.96 ? st.y + gap : st.y - gap;
+    const aLook = textLook({ ...st, font: fam, size: Math.round(size * 0.72), outline: st.box ? undefined : Math.max(1, Math.round((st.outline ?? 4) * 0.75)), shadow: 0 }, k, fontInfo(fam).em, FALLBACK_FONTS);
+    altEl = h('div', { class: 'ov-caption', style: { ...aLook, top: `${y * 100}%`, color: st.color } }, up(l.alt));
+  }
   // Emoji above the line (emojiBox in src/ass.js): from its word until the next emoji or the line end.
   const emo = l.words.filter((w) => w.emoji && w.start <= t).pop();
-  if (!emo) return capEl;
+  if (!emo) return altEl ? [capEl, altEl] : capEl;
   const size = Math.max(16, Math.round((st.size || 72) * 1.4));
   const pop = Math.min(1, Math.max(0, (t - emo.start) / 0.15)); // fades in like the export
   const cy = P.settings.height * st.y - (st.size || 72) * 0.6 - size * 0.55;
-  return [capEl, h('div', { class: 'ov-emoji', style: { top: `${(cy / P.settings.height) * 100}%`, fontSize: `${(size * k * 0.85).toFixed(1)}px`, opacity: String(pop), transform: `translate(-50%, -50%) scale(${(0.6 + 0.4 * pop).toFixed(3)})` } }, emo.emoji)];
+  return [capEl, ...(altEl ? [altEl] : []), h('div', { class: 'ov-emoji', style: { top: `${(cy / P.settings.height) * 100}%`, fontSize: `${(size * k * 0.85).toFixed(1)}px`, opacity: String(pop), transform: `translate(-50%, -50%) scale(${(0.6 + 0.4 * pop).toFixed(3)})` } }, emo.emoji)];
 }
 
 function renderTexts(t) {
@@ -1424,6 +1432,33 @@ async function quickTool(btn, busy, name, input, failText) {
 $('#keywords').onclick = (e) => {
   if (!P.captions?.lines?.length) return toast('Add captions first (CC Captions), then highlight their key words.');
   quickTool(e.currentTarget, '★ …', 'emphasize_captions', { auto: true, clear: true }, 'Keywords failed');
+};
+$('#translate').onclick = () => {
+  if (!P.captions?.lines?.length) return toast('Add captions first (CC Captions), then translate them.');
+  const vi = /[ăâđêôơưàáạảãèéẹẻẽìíịỉĩòóọỏõùúụủũỳýỵỷỹ]/i.test(P.captions.lines.slice(0, 5).flatMap((l) => l.words.map((w) => w.w)).join(' '));
+  $('#chatInput').value = `Translate the captions${P.texts.length ? ' and titles' : ''} into ${vi ? 'English' : 'Vietnamese'} and show them under the original (translate_captions mode below). Use mode copy instead if I say "make a copy".`;
+  $('#chatInput').focus();
+  toast('Edit the request if you like (language, below / replace / copy) and press Enter. Claude does the translating.');
+};
+// Reel checker and the safe-zone guide (SAFE_ZONES in src/check.js; keep in sync).
+const SAFE_ZONES = [
+  { name: 'top bar', x: 0, y: 0, w: 1, h: 0.08 },
+  { name: 'buttons', x: 0.86, y: 0.38, w: 0.14, h: 0.45 },
+  { name: 'username / description', x: 0, y: 0.8, w: 1, h: 0.2 },
+];
+$('#safeZones').replaceChildren(...SAFE_ZONES.map((z) => h('div', { style: { left: `${z.x * 100}%`, top: `${z.y * 100}%`, width: `${z.w * 100}%`, height: `${z.h * 100}%` } }, z.name)));
+let safeOn = store.get('safe') === 'on';
+const renderSafe = () => { $('#safeZones').hidden = !safeOn; $('#safeToggle').classList.toggle('on', safeOn); };
+renderSafe();
+$('#safeToggle').onclick = () => { safeOn = !safeOn; store.set('safe', safeOn ? 'on' : 'off'); renderSafe(); };
+$('#checkReel').onclick = async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try {
+    const r = await tool('check_reel', {});
+    addMsg(r.error ? 'error' : 'assistant', r.error || String(r.content));
+    if (r.issues?.some((i) => i.area === 'safe zone') && !safeOn) { safeOn = true; renderSafe(); }
+  } finally { b.disabled = false; }
 };
 $('#autoZoom').onclick = (e) => quickTool(e.currentTarget, '🔍 Zooming…', 'auto_zoom', {}, 'Auto zoom failed');
 $('#tighten').onclick = async (e) => {
