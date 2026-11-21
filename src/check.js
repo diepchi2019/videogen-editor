@@ -107,6 +107,10 @@ export function checkReel(p, { words = [], loudness = '-14' } = {}) {
   if (loudness === 'off') add('audio', 'Loudness normalization is off, so the export may play quieter or louder than other videos.', 'export_video loudness -14');
   else good.push(`Exports are brought to ${loudness} LUFS`);
 
+  // Licensed library audio: the credit goes in the description.
+  const credited = [...new Set(p.music.map((m) => m.assetId))].map((id) => p.assets[id]?.credit).filter((c) => c && !['cc0', 'pdm'].includes(c.license));
+  if (credited.length) good.push(`${credited.length} library track(s) need credit in the post description (${credited.map((c) => c.licenseName).join(', ')}): exports write it to the .description.txt next to the video`);
+
   // Overlays that end past the video, or start after it.
   const lostOv = p.overlays.filter((o) => o.start >= L.videoDuration - 0.05);
   if (lostOv.length) add('overlays', `${lostOv.length} overlay(s) start after the video ends, so they never show.`);

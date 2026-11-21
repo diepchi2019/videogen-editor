@@ -35,9 +35,22 @@
     </div>
   </div>
 
+  <div id="musicDlg" class="dlg" hidden>
+    <div class="dlg-card">
+      <div class="dlg-head"><b>Free music &amp; sound effects</b><span class="note">From Openverse (Creative Commons). Only licenses that allow commercial use; credits are written next to each export.</span><button id="musicClose" class="small ghost" title="Close (Esc)">✕</button></div>
+      <form id="musicForm" class="row">
+        <select id="musicKind"><option value="music">Music</option><option value="sfx">Sound effects</option></select>
+        <input id="musicQuery" type="search" placeholder="upbeat, lofi chill, epic cinematic, whoosh…" />
+        <button class="primary small">Search</button>
+      </form>
+      <div id="musicNote" class="note"></div>
+      <div id="musicList"></div>
+    </div>
+  </div>
+
   <main>
     <section id="media" class="panel">
-      <div class="panel-title">Media <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*,.cube,.ttf,.otf" hidden /></label></div>
+      <div class="panel-title">Media <button id="musicOpen" class="small" title="Search free music and sound effects">🎵 Music</button> <label class="btn small">+ Import<input id="fileInput" type="file" multiple accept="video/*,image/*,audio/*,.cube,.ttf,.otf" hidden /></label></div>
       <div id="assets" class="assets"><div class="empty">Drop videos, images or music here</div></div>
     </section>
 

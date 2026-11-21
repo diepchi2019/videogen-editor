@@ -1468,6 +1468,38 @@ $('#checkReel').onclick = async (e) => {
     if (r.issues?.some((i) => i.area === 'safe zone') && !safeOn) { safeOn = true; renderSafe(); }
   } finally { b.disabled = false; }
 };
+// ---------- Music library (Openverse) ----------
+let musicAudio = null;
+function stopPreview() { if (musicAudio) { musicAudio.pause(); musicAudio = null; } }
+function closeMusic() { stopPreview(); $('#musicDlg').hidden = true; }
+$('#musicOpen').onclick = () => { $('#musicDlg').hidden = false; $('#musicQuery').focus(); };
+$('#musicClose').onclick = closeMusic;
+$('#musicDlg').addEventListener('pointerdown', (e) => { if (e.target.id === 'musicDlg') closeMusic(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#musicDlg').hidden) closeMusic(); });
+$('#musicForm').onsubmit = async (e) => {
+  e.preventDefault();
+  const kind = $('#musicKind').value;
+  $('#musicNote').textContent = 'Searching…';
+  const r = await tool('search_music', { query: $('#musicQuery').value.trim(), kind });
+  if (r.error || r.isError) { $('#musicNote').textContent = r.error || r.content; return; }
+  const tracks = r.tracks || [];
+  $('#musicNote').textContent = tracks.length ? `${tracks.length} shown. ▶ to listen, + to add at the playhead.` : String(r.content);
+  $('#musicList').replaceChildren(...tracks.map((t) => {
+    const play = h('button', { class: 'small', title: 'Listen', onclick: () => {
+      const same = musicAudio && musicAudio.src === t.url;
+      stopPreview();
+      if (!same) { musicAudio = new Audio(t.url); musicAudio.volume = 0.7; musicAudio.play().catch(() => toast('This preview cannot play here; add it to listen.')); }
+    } }, '▶');
+    const add = h('button', { class: 'small primary', title: kind === 'sfx' ? 'Add as a sound effect at the playhead' : 'Add as background music from the playhead (ducks under speech)', onclick: async (ev) => {
+      ev.target.disabled = true; ev.target.textContent = '…';
+      const res = await tool('add_library_audio', { id: t.id, role: kind === 'sfx' ? 'sfx' : 'music', start: +time.toFixed(2) });
+      ev.target.disabled = false; ev.target.textContent = '+';
+      if (!res.error && !res.isError) { toast(`Added "${t.title}"`); addMsg('action', `✓ ${String(res.content)}`); }
+    } }, '+');
+    const dur = t.duration ? `${Math.floor(t.duration / 60)}:${String(Math.round(t.duration % 60)).padStart(2, '0')}` : '';
+    return h('div', { class: 'trk' }, play, h('div', {}, h('div', {}, t.title), h('div', { class: 'meta' }, `${t.creator} · ${t.licenseName}${t.tags.length ? ` · ${t.tags.slice(0, 4).join(', ')}` : ''}`)), h('span', { class: 'meta' }, dur), add);
+  }));
+};
 $('#studioVoice').onclick = (e) => {
   const on = P.clips.some((c) => c.enhance) || P.music.some((m) => m.enhance);
   quickTool(e.currentTarget, '🎙 …', 'enhance_voice', on ? { off: true } : {}, 'Studio voice failed');

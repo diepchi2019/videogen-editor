@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { startMockElevenLabs } from './mock-elevenlabs.js';
+import { startMockOpenverse } from './mock-openverse.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fx = path.join(root, 'test', 'fixtures');
@@ -15,7 +16,9 @@ const data = fs.mkdtempSync(path.join(os.tmpdir(), 'videogen-test-'));
 const PORT = 3999, BASE = `http://localhost:${PORT}`;
 // A fake ElevenLabs API stands in for the real one (no key, no cost).
 const mockEl = await startMockElevenLabs(3201);
-const srvEnv = { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data, ELEVENLABS_BASE_URL: `http://localhost:${mockEl.port}` };
+// And a fake Openverse for the music library (no network).
+const mockOv = await startMockOpenverse(3202);
+const srvEnv = { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data, ELEVENLABS_BASE_URL: `http://localhost:${mockEl.port}`, OPENVERSE_URL: `http://localhost:${mockOv.port}` };
 delete srvEnv.ELEVENLABS_API_KEY;
 const srv = spawn('node', ['server.js'], { cwd: root, env: srvEnv, stdio: 'inherit' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -482,10 +485,24 @@ try {
       `set_layout, add_broll, set_chapters, set_progress_bar (${ch.content.split('.')[0]})`);
     const s2 = (await tool('get_timeline')).content;
     ok(/studio voice/.test(s2) && /stabilized 0\.6/.test(s2) && /Progress bar: #ff3366/.test(s2), 'summary shows studio voice, stabilize, progress bar');
+    // Music library: search, add a song (CC BY, credited) and a sound effect (CC0).
+    const sm = await tool('search_music', { query: 'upbeat happy' });
+    const song = await tool('add_library_audio', { id: sm.tracks[0].id });
+    const sx = await tool('search_music', { query: 'whoosh', kind: 'sfx' });
+    const fx1 = await tool('add_library_audio', { id: sx.tracks[0].id, role: 'sfx', start: 1 });
+    const libAgain = await tool('add_library_audio', { id: sm.tracks[0].id, timelineOnly: true });
+    te = (await tool('get_timeline')).project;
+    const ovq = mockOv.calls.filter((c) => c.path === '/v1/audio/');
+    ok(/Sunny Test Song" by Mock Artist, 0:08, CC BY 3\.0/.test(sm.content) && /put this credit in the post description/.test(song.content) && /no credit needed/.test(fx1.content) &&
+      te.music.some((m) => m.role === 'music' && m.duck === 0.6) && te.music.some((m) => m.role === 'sfx') && Object.values(te.assets).filter((a) => a.credit).length === 2 && /Added "Sunny/.test(libAgain.content) &&
+      ovq.every((c) => c.query.license_type === 'commercial,modification' && /^VideoGen/.test(c.ua)) && ovq.some((c) => c.query.source === 'freesound') && mockOv.calls.filter((c) => c.path === '/files/song.mp3').length === 1,
+      'search_music + add_library_audio: credits kept, commercial+video licenses only, downloaded once');
+    ok(/library track\(s\) need credit/.test((await tool('check_reel')).content), 'check_reel reminds about the credits');
     const tx = await tool('export_video', { quality: 'draft', wait: true });
     const tOut = /done 100% file: (.+?\.mp4)/.exec(tx.content)?.[1];
     const nCh = execFileSync('ffprobe', ['-v', 'error', '-show_chapters', '-of', 'csv=p=0', tOut]).toString().trim().split('\n').filter(Boolean).length;
-    ok(tOut && nCh === 3 && fs.existsSync(tOut.replace(/\.mp4$/, '.chapters.txt')) && /chapters: 3 /.test(tx.content), `export with stabilize + studio voice + layout + B-roll + progress bar: ${nCh} MP4 chapters and the description text`);
+    ok(tOut && nCh === 3 && /chapters: 3 /.test(tx.content) && /credits: 1 /.test(tx.content) &&
+      fs.readFileSync(tOut.replace(/\.mp4$/, '.description.txt'), 'utf8') === ['0:00 Welcome', '0:03 The plan', '0:06 Captions', '', 'Music and sounds:', '"Sunny Test Song" by Mock Artist is licensed under CC BY 3.0. https://example.org/track/1', ''].join(String.fromCharCode(10)), `export with stabilize + studio voice + layout + B-roll + progress bar: ${nCh} MP4 chapters and the description text`);
     const pbPix = [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(Number(probe(tOut, 'format=duration')) - 0.2), '-i', tOut, '-frames:v', '1', '-vf', 'crop=8:2:400:ih-3,scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
     ok(pbPix[0] > 200 && pbPix[1] < 110 && pbPix[2] > 60, `progress bar drawn at the end (pixel ${pbPix.join('/')})`);
     const tl = await tool('look_at_timeline', { times: [1.5] });
@@ -498,7 +515,7 @@ try {
   await mcp.connect(new StdioClientTransport({ command: 'node', args: [path.join(root, 'mcp.js')], env: { ...process.env, VIDEOGEN_URL: BASE } }));
   const { tools } = await mcp.listTools();
   const names = tools.map((t) => t.name);
-  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
+  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences', 'search_music', 'add_library_audio'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
   ok(tools.find((t) => t.name === 'get_timeline').annotations?.readOnlyHint === true && tools.find((t) => t.name === 'delete_project').annotations?.destructiveHint === true, 'MCP tool annotations');
   const { resources } = await mcp.listResources();
   const res = await mcp.readResource({ uri: 'videogen://project/json' });
@@ -518,4 +535,5 @@ try {
   await mcp?.close().catch(() => {});
   srv.kill();
   mockEl.server.close();
+  mockOv.close();
 }

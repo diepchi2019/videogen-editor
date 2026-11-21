@@ -289,7 +289,7 @@ export function summarize(p, extras = {}) {
     `${x.outline ? ` outline ${x.outline}${x.outlineColor ? ' ' + x.outlineColor : ''}` : ''}${x.shadow ? ` shadow ${x.shadow}` : ''}` +
     `${x.animation && x.animation !== 'none' ? `, in ${x.animation}` : ''}${x.animationOut && x.animationOut !== 'none' ? `, out ${x.animationOut}` : ''}${describeGroup(x)}`);
   const music = p.music.map((m) =>
-    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}") at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}${describeSound(m)}${describeGroup(m)}`);
+    `- ${m.id} [${m.role}, track ${m.track}]: asset ${m.assetId} ("${p.assets[m.assetId]?.name}"${p.assets[m.assetId]?.credit ? `, ${p.assets[m.assetId].credit.licenseName}` : ''}) at ${m.start}s, source ${m.in}-${m.out}s, volume ${m.volume}, fade in ${m.fadeIn}s / out ${m.fadeOut}s${m.duck ? `, ducks under speech (amount ${m.duck})` : ''}${describeSound(m)}${describeGroup(m)}`);
   const markers = p.markers || [];
   const byKind = {};
   for (const mk of markers) (byKind[mk.kind] ||= []).push(mk);

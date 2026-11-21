@@ -25,6 +25,7 @@ import { transcriptText as timelineTranscriptText, cutRange, findWords, wordsIn,
 import { detectShake } from './stabilize.js';
 import { clipStats, colorMatch } from './colormatch.js';
 import { LAYOUTS, layoutPlan } from './layouts.js';
+import { searchAudio, getTrack, downloadTrack, trackLine } from './library.js';
 import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
@@ -381,6 +382,24 @@ export const TOOLS = [
     description: 'A thin bar along the top or bottom that fills up as the video plays (keeps people watching to the end). enabled false removes it.',
     input_schema: S({ enabled: b('false removes it'), color: s('Hex color (default white)'), height: n('Pixels 2-60 (default 10)'), position: s('top or bottom (default)', { enum: ['top', 'bottom'] }) }),
   },
+  {
+    name: 'search_music',
+    description: 'Search free music (kind music) or sound effects (kind sfx) from Openverse (Creative Commons audio from Jamendo, Freesound and others). By default only licenses that allow commercial use and use in a video (CC0, public domain, CC BY, CC BY-SA). ' +
+      'Search with mood/genre/tempo words ("upbeat corporate", "lofi chill", "epic cinematic", "whoosh", "camera shutter"). Then add_library_audio with the id. CC BY tracks need credit in the post description: exports write it next to the video.',
+    input_schema: S({
+      query: s('Search words'), kind: s('music (default) or sfx', { enum: ['music', 'sfx'] }),
+      minDuration: n('Seconds'), maxDuration: n('Seconds'), page: n('Result page 1-10'),
+      anyLicense: b('Also NonCommercial / NoDerivatives licenses (NC, ND): only for personal use, check the license'),
+    }),
+  },
+  {
+    name: 'add_library_audio',
+    description: 'Download a track from search_music (by id) into the media library and put it on the timeline as music (default) or a sound effect. Same options as add_music (start, volume, fades, duck...). The credit is kept with the file.',
+    input_schema: S({
+      id: s('Track id from search_music'), role: s('music (default), sfx or voice', { enum: AUDIO_ROLES }), start: n('Timeline seconds (default 0)'),
+      in: n('Source start seconds'), out: n('Source end seconds'), volume: n('0-2'), fadeIn: n('Seconds'), fadeOut: n('Seconds'), duck: n('0-1 lower it under speech (music default: 0.6)'), timelineOnly: b('Only add it to the media library'),
+    }, ['id']),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -511,7 +530,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['search_music', 'check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items', 'cut_transcript', 'remove_retakes']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -526,7 +545,7 @@ const imageBlocks = (title, frames, label) => [{ type: 'text', text: title }, ..
   { type: 'text', text: label(f) },
   { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.data } },
 ])];
-const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}${j.loudness ? ` loudness: ${j.loudness.note}` : ''}${j.chapters ? ` chapters: ${j.chapters.length} (in the MP4, and a list for the description in ${path.basename(j.path).replace(/\.mp4$/i, '.chapters.txt')})` : ''}`;
+const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}${j.loudness ? ` loudness: ${j.loudness.note}` : ''}${j.chapters ? ` chapters: ${j.chapters.length} (in the MP4)` : ''}${j.credits ? ` credits: ${j.credits.length} (put them in the post description)` : ''}${j.chapters || j.credits ? ` description text: ${path.basename(j.path).replace(/\.mp4$/i, '.description.txt')}` : ''}`;
 
 // Speech on the timeline (clips and voice items) as timeline words. transcribe false uses cached transcripts only.
 async function timelineSpeech(p, { transcribe: doIt = true, language } = {}) {
@@ -978,6 +997,28 @@ export async function executeTool(name, input = {}, source = 'claude') {
         if (plan.mask) steps.push({ name: 'set_mask', input: { overlayId: `$${steps.length}`, ...plan.mask } });
         store.applyBatch(steps, source);
         return { content: `Layout ${input.preset}: ${plan.clip ? `${clips.length} clip(s) placed in their part, ` : ''}"${second.name}" added from ${start.toFixed(2)}s for ${dur.toFixed(1)}s${dur < end - start - 0.1 ? ' (it is shorter than the clips)' : ''}. Check with look_at_timeline; move crops with set_clip / set_overlay crop.` };
+      }
+      case 'search_music': {
+        const r = await searchAudio({ query: input.query, kind: input.kind === 'sfx' ? 'sfx' : 'music', commercial: !input.anyLicense, minDuration: Number(input.minDuration) || undefined, maxDuration: Number(input.maxDuration) || undefined, page: Number(input.page) || 1 });
+        if (!r.tracks.length) return { content: `No ${input.kind === 'sfx' ? 'sound effects' : 'music'} found for "${input.query || ''}". Try other words (mood, genre, instrument).` };
+        return { content: `${input.kind === 'sfx' ? 'Sound effects' : 'Music'} for "${input.query || ''}" (${r.total} found, ${input.anyLicense ? 'any license: check NC/ND terms' : 'commercial use and video use allowed'}):\n${r.tracks.map(trackLine).join('\n')}\nAdd one with add_library_audio {id}.`, tracks: r.tracks };
+      }
+      case 'add_library_audio': {
+        const t = await getTrack(input.id);
+        const dl = await downloadTrack(t);
+        let a = Object.values(store.getProject().assets).find((x) => x.file === dl.file);
+        if (!a) {
+          const meta = await probe(dl.path);
+          if (!meta.duration) return { content: `The downloaded file of "${t.title}" could not be read.`, isError: true };
+          a = { id: uid('aud'), name: `${t.title} - ${t.creator}`.slice(0, 120), file: dl.file, ...meta, credit: { title: t.title, creator: t.creator, license: t.license, licenseName: t.licenseName, attribution: t.attribution, page: t.page, source: t.source } };
+          store.addAsset(a);
+        }
+        const credit = a.credit.license && !['cc0', 'pdm'].includes(a.credit.license) ? ` License ${a.credit.licenseName}: put this credit in the post description: ${a.credit.attribution} (exports write it next to the video).` : ` ${a.credit.licenseName}: no credit needed.`;
+        if (input.timelineOnly) return { content: `Added "${a.name}" (${a.id}, ${a.duration.toFixed(1)}s) to the media library.${credit}` };
+        const role = input.role || 'music';
+        const { id: _i, timelineOnly: _t, ...rest } = input;
+        const msg = store.apply('add_music', { ...rest, assetId: a.id, role, ...(role === 'music' && input.duck === undefined ? { duck: 0.6 } : {}) }, source);
+        return { content: `${msg}: "${t.title}" by ${t.creator} (${a.duration.toFixed(1)}s).${credit}`, assetId: a.id };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

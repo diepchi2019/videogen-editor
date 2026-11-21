@@ -8,6 +8,7 @@ import { buildAss, captionEmoji, emojiBox } from './ass.js';
 import { emojiFile } from './emoji.js';
 import { stabFile } from './stabilize.js';
 import { chapterTime } from './model.js';
+import { projectCredits } from './library.js';
 import { defaultFont, stageFonts } from './fonts.js';
 import { createJob, finishJob, getJob, listJobs } from './jobs.js';
 import { run } from './media.js';
@@ -717,7 +718,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     args.push(...filterGraphArgs(graphFile), '-map', `[${vPrev}]`, '-map', `[${aFinal}]`, ...chapArgs,
       '-t', f3(total), ...encoderArgs(enc, { draft: quality === 'draft', bitrate }),
       '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outFile);
-    return { args, total, tmpDir, graph: filters.join(';\n'), encoder: enc, width: W, height: H, fps, chapters: chapters.map((m) => `${chapterTime(m.t)} ${m.label || ''}`.trim()) };
+    return { args, total, tmpDir, graph: filters.join(';\n'), encoder: enc, width: W, height: H, fps, chapters: chapters.map((m) => `${chapterTime(m.t)} ${m.label || ''}`.trim()), credits: projectCredits(project) };
   }
   return { args, total, tmpDir, graph: filters.join(';\n') };
 }
@@ -782,9 +783,12 @@ export function startExport(project, opts = {}) {
   p.on('close', (code) => {
     fs.rmSync(cmd.tmpDir, { recursive: true, force: true });
     if (code !== 0) return finishJob(job, tail.split('\n').filter(Boolean).slice(-6).join('\n'));
-    if (cmd.chapters?.length) {
-      job.chapters = cmd.chapters;
-      try { fs.writeFileSync(job.path.replace(/\.mp4$/i, '.chapters.txt'), cmd.chapters.join('\n') + '\n'); } catch { /* the video is still fine */ }
+    // Text for the video description next to the export: chapters and the credits the licenses ask for.
+    if (cmd.chapters?.length || cmd.credits?.length) {
+      if (cmd.chapters?.length) job.chapters = cmd.chapters;
+      if (cmd.credits?.length) job.credits = cmd.credits;
+      const parts = [cmd.chapters?.length ? cmd.chapters.join('\n') : '', cmd.credits?.length ? `Music and sounds:\n${cmd.credits.join('\n')}` : ''].filter(Boolean);
+      try { fs.writeFileSync(job.path.replace(/\.mp4$/i, '.description.txt'), parts.join('\n\n') + '\n'); } catch { /* the video is still fine */ }
     }
     if (loud === null) return finishJob(job, null);
     job.stage = 'loudness';

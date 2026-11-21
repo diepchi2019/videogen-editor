@@ -1608,3 +1608,23 @@ test('color match, layouts, chapters, progress bar, studio voice and stabilize i
   assert.equal(M.TEXT_STYLES.hook.animation, 'pop');
   assert.equal(M.TEXT_STYLES.subscribe.boxColor, '#ff0033');
 });
+
+test('music library: license names, credits only where needed, Openverse results, project credits', async () => {
+  const Lb = await import('../src/library.js');
+  assert.equal(Lb.licenseName('by', '3.0'), 'CC BY 3.0');
+  assert.equal(Lb.licenseName('cc0', '1.0'), 'CC0 (public domain)');
+  assert.equal(Lb.licenseName('by-sa', '4.0'), 'CC BY-SA 4.0');
+  assert.ok(Lb.needsCredit('by') && Lb.needsCredit('by-sa') && !Lb.needsCredit('cc0') && !Lb.needsCredit('pdm'));
+  const t = Lb.toTrack({ id: 'x', title: 'Song', creator: 'Ann', duration: 125400, license: 'by', license_version: '3.0', url: 'u', filetype: 'mp32', foreign_landing_url: 'https://e/1', tags: [{ name: 'chill' }], attribution: '"Song" by Ann is licensed under CC BY 3.0.' });
+  assert.deepEqual([t.duration, t.licenseName, t.tags, t.page], [125.4, 'CC BY 3.0', ['chill'], 'https://e/1']);
+  assert.equal(Lb.trackLine(t, 0), '1. x "Song" by Ann, 2:05, CC BY 3.0 [chill]');
+  const p = M.emptyProject();
+  p.assets.a = { id: 'a', type: 'audio', file: 'a.mp3', duration: 9, credit: { license: 'by', licenseName: 'CC BY 3.0', attribution: '"Song" by Ann is licensed under CC BY 3.0.', page: 'https://e/1' } };
+  p.assets.b = { id: 'b', type: 'audio', file: 'b.mp3', duration: 1, credit: { license: 'cc0', licenseName: 'CC0', attribution: 'x' } };
+  p.assets.c = { id: 'c', type: 'audio', file: 'c.mp3', duration: 3, credit: { license: 'by', licenseName: 'CC BY 3.0', attribution: 'unused' } };
+  M.ops.add_music(p, { assetId: 'a' });
+  M.ops.add_music(p, { assetId: 'a', start: 4 });
+  M.ops.add_music(p, { assetId: 'b', role: 'sfx' });
+  assert.deepEqual(Lb.projectCredits(p), ['"Song" by Ann is licensed under CC BY 3.0. https://e/1'], 'once, only what is used and needs credit');
+  assert.match(M.summarize(p), /"a\.mp3"?.*CC BY 3\.0|CC BY 3\.0\) at 0s/);
+});
