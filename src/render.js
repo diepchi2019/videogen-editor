@@ -176,6 +176,10 @@ function applyEffect(filters, inL, fx, tag, W, H, fps) {
   const I = fx.intensity ?? 0.5, r = fx.rate ?? 2;
   const shift = Math.max(2, Math.round(W * 0.02 * I));
   const out = tag;
+  // For filters without timeline support: process a copy and show it only inside the range.
+  const branch = (proc) => {
+    filters.push(`[${inL}]split[${tag}a][${tag}b]`, `[${tag}b]${proc}[${tag}c]`, `[${tag}a][${tag}c]overlay=enable='${on()}'[${out}]`);
+  };
   switch (fx.type) {
     case 'shake': {
       const amp = Math.max(2, Math.round(Math.min(W, H) * 0.035 * I));
@@ -213,10 +217,59 @@ function applyEffect(filters, inL, fx, tag, W, H, fps) {
     case 'invert':
       filters.push(`[${inL}]negate=enable='${on()}'[${out}]`);
       break;
+    case 'pixelate': {
+      const N = Math.round(4 + 36 * I);
+      branch(`scale=${even(W / N)}:${even(H / N)}:flags=area,scale=${W}:${H}:flags=neighbor,setsar=1`);
+      break;
+    }
+    case 'mirror': // left half mirrored onto the right
+      filters.push(`[${inL}]split[${tag}a][${tag}b]`);
+      filters.push(`[${tag}b]crop=${even(W / 2)}:${H}:0:0,split[${tag}l][${tag}r]`, `[${tag}r]hflip[${tag}rf]`);
+      filters.push(`[${tag}l][${tag}rf]hstack,scale=${W}:${H},setsar=1[${tag}c]`);
+      filters.push(`[${tag}a][${tag}c]overlay=enable='${on()}'[${out}]`);
+      break;
+    case 'kaleidoscope': // top-left quarter mirrored into all four corners
+      filters.push(`[${inL}]split[${tag}a][${tag}b]`);
+      filters.push(`[${tag}b]crop=${even(W / 2)}:${even(H / 2)}:0:0,split[${tag}q][${tag}r]`, `[${tag}r]hflip[${tag}rf]`);
+      filters.push(`[${tag}q][${tag}rf]hstack,split[${tag}t][${tag}u]`, `[${tag}u]vflip[${tag}uf]`);
+      filters.push(`[${tag}t][${tag}uf]vstack,scale=${W}:${H},setsar=1[${tag}c]`);
+      filters.push(`[${tag}a][${tag}c]overlay=enable='${on()}'[${out}]`);
+      break;
+    case 'film_grain':
+      filters.push(`[${inL}]noise=alls=${Math.round(10 + 40 * I)}:allf=t+u:enable='${on()}'[${out}]`);
+      break;
+    case 'strobe':
+      filters.push(`[${inL}]eq=brightness='${f3(0.8 * I)}*${on()}*gt(sin(2*PI*${f3(r)}*(t-${f3(fx.from)})),0)':eval=frame[${out}]`);
+      break;
+    case 'comic':
+      branch(`edgedetect=mode=colormix:high=${f3(0.3 - 0.2 * I)}:low=0.05,eq=saturation=1.5`);
+      break;
     default:
       return inL;
   }
   return out;
+}
+
+// ---------- Overlay masks ----------
+// geq expression (0-1) of a mask on a W x H frame: a signed distance to the shape's edge, softened
+// over the feather width (at least 1px, so hard edges are still antialiased).
+export function maskExpr(m) {
+  const cx = `${r6(m.x)}*W`, cy = `${r6(m.y)}*H`;
+  const F = `max(1,${r6((m.feather || 0) * 0.25)}*min(W,H))`;
+  let sd;
+  if (m.shape === 'circle') {
+    sd = `(hypot((X-${cx})/(${r6(m.w / 2)}*W),(Y-${cy})/(${r6(m.h / 2)}*H))-1)*min(${r6(m.w)}*W,${r6(m.h)}*H)/2`;
+  } else if (m.shape === 'rect') {
+    const r = `${r6(m.round || 0)}*min(${r6(m.w / 2)}*W,${r6(m.h / 2)}*H)`;
+    const qx = `(abs(X-${cx})-${r6(m.w / 2)}*W+${r})`, qy = `(abs(Y-${cy})-${r6(m.h / 2)}*H+${r})`;
+    sd = `(hypot(max(${qx},0),max(${qy},0))+min(max(${qx},${qy}),0)-${r})`;
+  } else {
+    const a = r6(((m.angle || 0) * Math.PI) / 180);
+    const d = `((Y-${cy})*${r6(Math.cos(a))}-(X-${cx})*${r6(Math.sin(a))})`;
+    sd = m.shape === 'mirror' ? `(abs(${d})-${r6(m.h / 2)}*H)` : `(-${d})`;
+  }
+  const v = `clip(0.5-(${sd})/${F},0,1)`;
+  return m.invert ? `(1-${v})` : v;
 }
 
 // ---------- Encoders ----------
@@ -306,6 +359,28 @@ export function motionFilter(m, W, H, fps, dur) {
 // opts.still: frames at full output size and high JPEG quality (cover images).
 // Noise reduction 0-1 -> FFT denoiser strength (6-30 dB) with adaptive noise tracking.
 const denoiseFilter = (d) => (d > 0 ? `afftdn=nr=${f3(6 + 24 * d)}:nf=-40:tn=1` : null);
+// Voice effects (VOICE_EFFECTS in model.js). Each keeps the length (echo tails are cut by the item length).
+export const VOICE_FX = {
+  chipmunk: { pitch: 7 },
+  deep: { pitch: -5 },
+  robot: { af: "afftfilt=real='hypot(re,im)*sin(0)':imag='hypot(re,im)*cos(0)':win_size=512:overlap=0.75" },
+  echo: { af: 'aecho=0.8:0.85:180|360:0.4|0.25' },
+  hall: { af: 'aecho=0.8:0.9:40|70|110|160:0.35|0.3|0.25|0.2' },
+  telephone: { af: 'highpass=f=300,lowpass=f=3400,acompressor=threshold=0.1:ratio=4,volume=1.4' },
+  radio: { af: 'highpass=f=200,lowpass=f=5000,acompressor=threshold=0.08:ratio=6:makeup=2,acrusher=bits=10:mode=log:mix=0.2' },
+  megaphone: { af: 'highpass=f=600,lowpass=f=3500,acrusher=bits=6:mode=log:mix=0.4,volume=1.5' },
+};
+// Pitch shift in semitones without changing the length: resample, then stretch back with atempo.
+export function pitchFilter(st) {
+  if (!st) return null;
+  const k = 2 ** (st / 12);
+  return `asetrate=${Math.round(48000 * k)},aresample=48000,${atempoChain(1 / k)}`;
+}
+// Denoise, voice effect and pitch for an item, in that order (input is 48 kHz stereo).
+export function soundFilters(x) {
+  const v = VOICE_FX[x.voice] || {};
+  return [denoiseFilter(x.denoise), pitchFilter((x.pitch || 0) + (v.pitch || 0)), v.af].filter(Boolean);
+}
 // Blend mode -> ffmpeg blend filter mode.
 const BLEND_FF = { screen: 'screen', multiply: 'multiply', overlay: 'overlay', softlight: 'softlight', lighten: 'lighten', darken: 'darken', add: 'addition', difference: 'difference' };
 
@@ -343,8 +418,13 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const timing = [];
     if (c.freeze) timing.push('trim=end_frame=1', 'setpts=PTS-STARTPTS', `tpad=stop_mode=clone:stop_duration=${f3(dur + 1)}`);
     else {
-      if (c.reverse) { const M = Math.max(W, H); timing.push(`fps=${fps}`, `scale=w='min(iw,${M})':h='min(ih,${M})':force_original_aspect_ratio=decrease`, 'reverse'); }
+      // Smooth slow motion interpolates the in-between frames (only where the clip is slowed).
+      const smooth = c.smooth && (c.ramp ? c.ramp.points.some((q) => q.speed < 1) : sp < 1) ? c.smooth : null;
+      const M = Math.max(W, H), cap = `scale=w='min(iw,${M})':h='min(ih,${M})':force_original_aspect_ratio=decrease`;
+      if (c.reverse) timing.push(`fps=${fps}`, cap, 'reverse');
+      else if (smooth === 'motion') timing.push(cap);
       timing.push(c.ramp ? `setpts='(${rampExpr(c)})/TB'` : `setpts=PTS/${sp}`);
+      if (smooth) timing.push(smooth === 'motion' ? `minterpolate=fps=${fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1` : `minterpolate=fps=${fps}:mi_mode=blend`);
     }
     filters.push(`${cleaned ? `[${cleaned}]` : `[${n}:v]setpts=PTS-STARTPTS,`}${timing.join(',')}${geo.length ? `,${geo.join(',')}` : ''}[h${i}]`);
     const src = applyColor(filters, `h${i}`, c.color, `cc${i}`, 'yuv420p');
@@ -399,7 +479,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
 
     if (a.type === 'video' && a.hasAudio && !c.freeze) {
       const vol = c.keyframes?.volume ? `volume='${kfExpr(c.keyframes.volume)}':eval=frame` : `volume=${c.volume ?? 1}`;
-      const head = `[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS${c.reverse ? ',areverse' : ''}${c.denoise ? `,${denoiseFilter(c.denoise)}` : ''}`;
+      const head = `[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS${c.reverse ? ',areverse' : ''}${soundFilters(c).map((f) => `,${f}`).join('')}`;
       const tail = `${vol},apad=whole_dur=${f3(dur)},atrim=duration=${f3(dur)},asetpts=PTS-STARTPTS[a${i}]`;
       const segs = c.ramp ? rampAudioSegments(c) : null;
       if (!segs || segs.length === 1) filters.push(`${head},${atempoChain(segs ? segs[0].tempo : sp)},${tail}`);
@@ -441,18 +521,30 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const vis = Math.min(dur, total - o.start);
     const file = path.join(MEDIA_DIR, a.file);
     if (a.type === 'image') args.push('-loop', '1', '-framerate', String(fps), '-t', f3(vis), '-i', file);
-    else args.push('-ss', f3(o.in), '-t', f3(vis * sp), '-i', file);
+    else args.push(...(o.loop ? ['-stream_loop', '-1'] : []), '-ss', f3(o.in), '-t', f3(vis * sp), '-i', file);
     const n = input++;
     const K = o.keyframes || {};
     const free = o.fit !== 'cover' && o.fit !== 'contain';
     filters.push(`[${n}:v]setpts=(PTS-STARTPTS)/${sp},fps=${fps},${[...geometry({ crop: o.crop, flipH: o.flipH, flipV: o.flipV }, 'black'), 'format=yuva420p'].join(',')}[oh${i}]`);
     const osrc = applyColor(filters, `oh${i}`, o.color, `oc${i}`, 'yuva420p');
-    const ch = [];
+    let ch = [];
     // Chroma key first, on the source pixels (before scaling softens the edges).
     if (o.key) {
       ch.push(`chromakey=color=0x${o.key.color.slice(1)}:similarity=${f3(o.key.similarity)}:blend=${f3(o.key.blend)}`);
       const spill = o.key.despill && spillOf(o.key.color);
       if (spill) ch.push(`despill=type=${spill}`, 'format=yuva420p');
+    }
+    // Mask: drawn once on the first frame's alpha (so it has the overlay's exact size), repeated for
+    // every frame and multiplied into the alpha (keeps PNG transparency and the chroma key).
+    let ovIn = osrc;
+    if (o.mask) {
+      const t = `mk${i}`;
+      filters.push(`[${osrc}]${ch.length ? `${ch.join(',')},` : ''}split[${t}c][${t}s]`);
+      filters.push(`[${t}s]alphaextract,split[${t}a][${t}f]`);
+      filters.push(`[${t}f]trim=end_frame=1,geq=lum='255*${maskExpr(o.mask)}',loop=loop=-1:size=1,setpts=N/${fps}/TB[${t}m]`);
+      filters.push(`[${t}a][${t}m]blend=all_mode=multiply:shortest=1[${t}b]`);
+      filters.push(`[${t}c][${t}b]alphamerge[${t}o]`);
+      ovIn = `${t}o`; ch = [];
     }
     // Alpha first, on fixed-size frames: geq crashes when a keyframed scale changes the frame size mid-stream.
     if (K.opacity) ch.push(`geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*(${kfExpr(K.opacity, 'T')})'`);
@@ -466,16 +558,19 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     const hyp = even(Math.hypot(iw0, ih0));
     // Rotation runs in a fixed box before the scale when either is keyframed (filters after a per-frame scale must cope with changing sizes).
     const rotA = K.rotate ? `(${kfExpr(K.rotate)})*PI/180` : o.rotate ? `${o.rotate}*PI/180` : null;
-    const rotFirst = free && rotA && (K.rotate || K.scale);
+    // Pop: grows from nothing with a small overshoot (free fit; overlay-local t, before the start shift).
+    const PD = f3(Math.min(0.35, vis / 2));
+    const pop = free && o.animation === 'pop' ? `(if(lt(t,${PD}),1+2.70158*pow(t/${PD}-1,3)+1.70158*pow(t/${PD}-1,2),1))` : null;
+    const rotFirst = free && rotA && (K.rotate || K.scale || pop);
     if (rotFirst) ch.push(`rotate=a='${rotA}':ow=${hyp}:oh=${hyp}:c=none`);
     const widen = rotFirst ? hyp / iw0 : 1;
     if (o.fit === 'cover') ch.push(`scale=${W}:${H}:force_original_aspect_ratio=increase`, `crop=${W}:${H}`);
     else if (o.fit === 'contain') ch.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease`);
-    else if (K.scale) ch.push(`scale=w='max(2,trunc(${W}*(${kfExpr(K.scale)})*${f3(widen)}/2)*2)':h=-2:eval=frame`);
+    else if (K.scale || pop) ch.push(`scale=w='max(2,trunc(${W}*(${K.scale ? kfExpr(K.scale) : o.scale})${pop ? `*${pop}` : ''}*${f3(widen)}/2)*2)':h=-2:eval=frame`);
     else ch.push(`scale=${even(W * o.scale * widen)}:-2`);
     if (rotA && !rotFirst) ch.push(K.rotate ? `rotate=a='${rotA}':ow='hypot(iw,ih)':oh=ow:c=none` : `rotate=${rotA}:ow=rotw(${rotA}):oh=roth(${rotA}):c=none`);
     ch.push(`setpts=PTS+${f3(o.start)}/TB`);
-    filters.push(`[${osrc}]${ch.join(',')}[ov${i}]`);
+    filters.push(`[${ovIn}]${ch.join(',')}[ov${i}]`);
     // Overlay position: keyframes use the main timeline t, shifted to overlay-local time.
     const lt = `(t-${f3(o.start)})`;
     const cx = !free ? f3(W / 2) : K.x ? `${W}*(${kfExpr(K.x, lt)})` : f3(W * o.x);
@@ -501,7 +596,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     if (a.type === 'video' && a.hasAudio && ((o.volume ?? 0) > 0 || K.volume)) {
       const ms = Math.round(o.start * 1000);
       const vol = K.volume ? `volume='${kfExpr(K.volume)}':eval=frame` : `volume=${o.volume}`;
-      filters.push(`[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,${o.denoise ? `${denoiseFilter(o.denoise)},` : ''}${atempoChain(sp)},atrim=duration=${f3(vis)},${vol}${ms > 0 ? `,adelay=${ms}|${ms}` : ''}[oa${i}]`);
+      filters.push(`[${n}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=PTS-STARTPTS,${soundFilters(o).map((f) => `${f},`).join('')}${atempoChain(sp)},atrim=duration=${f3(vis)},${vol}${ms > 0 ? `,adelay=${ms}|${ms}` : ''}[oa${i}]`);
       mixIn.push(`[oa${i}]`);
     }
   });
@@ -525,7 +620,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     args.push('-ss', f3(m.in), '-t', f3(m.out - m.in), '-i', path.join(MEDIA_DIR, a.file));
     const n = input++;
     const len = Math.min(m.out - m.in, total - m.start);
-    const ch = [`aformat=sample_rates=48000:channel_layouts=stereo`, `asetpts=PTS-STARTPTS`, denoiseFilter(m.denoise), `atrim=duration=${f3(len)}`, `volume=${m.volume}`].filter(Boolean);
+    const ch = [`aformat=sample_rates=48000:channel_layouts=stereo`, `asetpts=PTS-STARTPTS`, ...soundFilters(m), `atrim=duration=${f3(len)}`, `volume=${m.volume}`].filter(Boolean);
     if (m.fadeIn > 0) ch.push(`afade=t=in:st=0:d=${f3(m.fadeIn)}`);
     if (m.fadeOut > 0) ch.push(`afade=t=out:st=${f3(Math.max(0, len - m.fadeOut))}:d=${f3(m.fadeOut)}`);
     const ms = Math.round(m.start * 1000);

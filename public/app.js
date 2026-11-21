@@ -376,6 +376,48 @@ function renderFrame(force) {
   }
 }
 
+// Overlay mask preview with CSS masks (maskExpr in src/render.js draws the real one). ar = box width / height;
+// the feather follows render.js: the edge fades over feather * 0.25 * the short side.
+function maskCss(m, ar) {
+  if (!m) return { maskImage: '', webkitMaskImage: '', maskComposite: '', webkitMaskComposite: '' };
+  const W = ar, H = 1, F = Math.max(0.002, (m.feather || 0) * 0.25 * Math.min(W, H));
+  const pc = (v) => `${(v * 100).toFixed(2)}%`;
+  const [on, off] = m.invert ? ['transparent', '#000'] : ['#000', 'transparent'];
+  let layers, comp = [];
+  if (m.shape === 'circle') {
+    const k = F / Math.min(m.w * W, m.h * H);
+    layers = [`radial-gradient(ellipse ${pc(m.w / 2)} ${pc(m.h / 2)} at ${pc(m.x)} ${pc(m.y)}, ${on} ${pc(1 - k)}, ${off} ${pc(1 + k)})`];
+  } else if (m.shape === 'rect') {
+    const band = (dir, c, size, f) => `linear-gradient(${dir}, transparent ${pc(c - size / 2 - f / 2)}, #000 ${pc(c - size / 2 + f / 2)}, #000 ${pc(c + size / 2 - f / 2)}, transparent ${pc(c + size / 2 + f / 2)})`;
+    layers = [band('to right', m.x, m.w, F / W), band('to bottom', m.y, m.h, F / H)];
+    comp = ['intersect'];
+    if (m.invert) { layers.unshift('linear-gradient(#000, #000)'); comp = ['exclude', 'intersect']; }
+  } else {
+    // Gradient along the normal that points at the kept side (CSS angle = mask angle + 180).
+    const th = ((m.angle || 0) + 180) * Math.PI / 180, dx = Math.sin(th), dy = -Math.cos(th);
+    const Lg = Math.abs(W * dx) + Math.abs(H * dy);
+    const at = 0.5 + ((m.x - 0.5) * W * dx + (m.y - 0.5) * H * dy) / Lg, k = F / 2 / Lg;
+    const deg = `${((m.angle || 0) + 180).toFixed(1)}deg`;
+    if (m.shape === 'linear') layers = [`linear-gradient(${deg}, ${off} ${pc(at - k)}, ${on} ${pc(at + k)})`];
+    else {
+      const hh = (m.h * H) / 2 / Lg;
+      layers = [`linear-gradient(${deg}, ${off} ${pc(at - hh - k)}, ${on} ${pc(at - hh + k)}, ${on} ${pc(at + hh - k)}, ${off} ${pc(at + hh + k)})`];
+    }
+  }
+  const img = layers.join(', ');
+  const c = comp.length ? [...comp, 'add'].join(', ') : '';
+  const wc = comp.length ? [...comp.map((x) => ({ intersect: 'source-in', exclude: 'xor' })[x]), 'source-over'].join(', ') : '';
+  return { maskImage: img, webkitMaskImage: img, maskComposite: c, webkitMaskComposite: wc };
+}
+// Pop animation of overlays: same curve as render.js (back-out over 0.35s).
+function popScale(o, lt) {
+  if (o.animation !== 'pop' || o.fit === 'cover' || o.fit === 'contain') return 1;
+  const D = Math.min(0.35, ovDur(o) / 2);
+  if (lt >= D) return 1;
+  const u = Math.max(0, lt) / D - 1;
+  return Math.max(0, 1 + 2.70158 * u ** 3 + 1.70158 * u ** 2);
+}
+
 const ovEls = new Map();
 function renderOverlays(t) {
   const box = $('#overlays');
@@ -385,7 +427,9 @@ function renderOverlays(t) {
     const a = P.assets[o.assetId];
     if (!a) return;
     let el = ovEls.get(o.id);
-    const tag = a.type === 'image' ? 'IMG' : 'VIDEO';
+    // Animated GIFs (stickers) play as images: the browser animates them and keeps their transparency.
+    const gif = a.codec === 'gif';
+    const tag = a.type === 'image' || gif ? 'IMG' : 'VIDEO';
     if (!el || el.tagName !== tag) {
       el?.remove();
       el = h(tag.toLowerCase(), { class: 'ov-media', playsinline: true, preload: 'auto' });
@@ -394,11 +438,13 @@ function renderOverlays(t) {
     keep.add(o.id);
     const on = t >= o.start && t < o.start + ovDur(o);
     el.style.display = on ? 'block' : 'none';
-    const src = mediaSrc(a);
+    const src = gif ? `/media/${a.file}` : mediaSrc(a);
     const lt = t - o.start;
     const vol = kfVal(o, 'volume', lt, o.volume);
-    if (a.type === 'image') { if (el.getAttribute('src') !== src) el.src = src; }
-    else if (on) syncVideo(el, src, o.in + lt * o.speed, o.speed, vol, playing);
+    let srcT = o.in + lt * o.speed;
+    if (o.loop && a.duration && srcT >= a.duration) srcT %= a.duration; // looping restarts from 0, like -stream_loop
+    if (tag === 'IMG') { if (el.getAttribute('src') !== src) el.src = src; }
+    else if (on) syncVideo(el, src, srcT, o.speed, vol, playing);
     else el.pause();
     if (!on) return;
     const full = o.fit === 'cover' || o.fit === 'contain';
@@ -407,8 +453,9 @@ function renderOverlays(t) {
       zIndex: String(z + 10), mixBlendMode: BLEND_CSS[o.blend] || 'normal', opacity: String(kfVal(o, 'opacity', lt, o.opacity) * fade), objectFit: o.fit === 'cover' ? 'cover' : 'contain',
       left: full ? '50%' : `${kfVal(o, 'x', lt, o.x) * 100}%`, top: full ? '50%' : `${kfVal(o, 'y', lt, o.y) * 100}%`,
       width: full ? '100%' : `${kfVal(o, 'scale', lt, o.scale) * 100}%`, height: full ? '100%' : 'auto',
-      transform: `translate(-50%, -50%) rotate(${kfVal(o, 'rotate', lt, o.rotate || 0)}deg) scale(${o.flipH ? -1 : 1}, ${o.flipV ? -1 : 1})`,
+      transform: `translate(-50%, -50%) rotate(${kfVal(o, 'rotate', lt, o.rotate || 0)}deg) scale(${(o.flipH ? -1 : 1) * popScale(o, lt)}, ${(o.flipV ? -1 : 1) * popScale(o, lt)})`,
       filter: colorCss(o.color),
+      ...maskCss(o.mask, full ? P.settings.width / P.settings.height : (a.width || 1) / (a.height || 1)),
     });
   });
   for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
@@ -755,6 +802,30 @@ function select(kind, id, focusTransition) {
   renderTimeline(); renderInspector(); renderTexts(time);
   if (focusTransition) $('#insp-trans')?.focus();
 }
+// Voice effect + pitch (VOICE_EFFECTS in src/model.js; export only).
+const VOICE_EFFECTS = ['none', 'chipmunk', 'deep', 'robot', 'echo', 'hall', 'telephone', 'radio', 'megaphone'];
+const voiceFields = (x, set) => [
+  h('label', { title: 'Voice effect (export only, not in this preview)' }, 'Voice', h('select', { onchange: (e) => set({ voiceEffect: e.target.value }) },
+    ...VOICE_EFFECTS.map((v) => h('option', { value: v, selected: (x.voice || 'none') === v }, v)))),
+  field('Pitch', x.pitch || 0, (v) => set({ pitch: v }), { min: -12, max: 12, step: '1', title: 'Semitones, speed unchanged (export only)' }),
+];
+const MASK_SHAPES = ['none', 'circle', 'rect', 'linear', 'mirror'];
+function maskFields(o) {
+  const m = o.mask, set = (x) => tool('set_mask', { overlayId: o.id, ...x });
+  const line = m && (m.shape === 'linear' || m.shape === 'mirror');
+  return [
+    h('label', { title: 'Show only part of the overlay: circle / rect cut-out, linear = split screen, mirror = band' }, 'Mask', h('select', { onchange: (e) => set({ shape: e.target.value }) },
+      ...MASK_SHAPES.map((v) => h('option', { value: v, selected: (m?.shape || 'none') === v }, v)))),
+    ...(!m ? [] : [
+      field('MX', m.x, (v) => set({ x: v }), { step: '0.05', title: 'Mask center x (fraction of the overlay)' }),
+      field('MY', m.y, (v) => set({ y: v }), { step: '0.05', title: 'Mask center y' }),
+      line ? field('Angle', m.angle, (v) => set({ angle: v }), { step: '15', title: '0 keeps below the line, 90 keeps the left, -90 the right, 180 above' }) : field('MW', m.w, (v) => set({ w: v }), { step: '0.05', title: 'Mask width' }),
+      m.shape !== 'linear' ? field('MH', m.h, (v) => set({ h: v }), { step: '0.05', title: m.shape === 'mirror' ? 'Band thickness' : 'Mask height' }) : null,
+      field('Feather', m.feather || 0, (v) => set({ feather: v }), { min: 0, max: 1, step: '0.05' }),
+      h('label', {}, 'Invert', h('input', { type: 'checkbox', checked: !!m.invert, onchange: (e) => set({ invert: e.target.checked }) })),
+    ]),
+  ];
+}
 const denoiseField = (v, set) => field('Denoise', v || 0, set, { min: 0, max: 1, step: '0.1', title: 'Noise reduction for hiss, fan or wind noise: 0 = off, 0.5 = typical (export only, not in this preview)' });
 function field(label, value, onchange, attrs = {}) {
   return h('label', {}, label, h('input', { type: 'number', step: '0.1', value, ...attrs, onchange: (e) => onchange(+e.target.value) }));
@@ -813,6 +884,9 @@ function renderInspector() {
       a.type === 'video' && !c.freeze ? h('label', { title: 'Play backwards (up to 10s of source). The preview shows it by seeking, without sound.' }, 'Reverse', h('input', { type: 'checkbox', checked: !!c.reverse, onchange: (e) => tool('set_clip', { clipId: c.id, reverse: e.target.checked }) })) : null,
       field('Volume', c.volume, (v) => tool('set_clip', { clipId: c.id, volume: v }), { min: 0, max: 2, step: '0.1' }),
       a.type === 'video' && a.hasAudio && !c.freeze ? denoiseField(c.denoise, (v) => tool('set_clip', { clipId: c.id, denoise: v })) : null,
+      ...(a.type === 'video' && a.hasAudio && !c.freeze ? voiceFields(c, (x) => tool('set_clip', { clipId: c.id, ...x })) : []),
+      a.type === 'video' && !c.freeze ? h('label', { title: 'Fill in frames of slowed clips: blend = fast, motion = smoothest (slow to export). Export only' }, 'Smooth', h('select', { onchange: (e) => tool('set_clip', { clipId: c.id, smoothSlowMo: e.target.value }) },
+        ...['off', 'blend', 'motion'].map((v) => h('option', { value: v, selected: (c.smooth || 'off') === v }, v)))) : null,
       h('label', {}, 'Fit', h('select', { onchange: (e) => tool('set_clip', { clipId: c.id, fit: e.target.value }) },
         ...['contain', 'cover', 'blur'].map((f) => h('option', { value: f, selected: (c.fit || 'contain') === f }, f)))),
       c.index > 0 ? h('label', {}, 'Transition in', h('select', { id: 'insp-trans', onchange: (e) => tool('set_transition', { clipId: c.id, type: e.target.value, duration: c.transition?.duration || 0.5 }) },
@@ -867,6 +941,11 @@ function renderInspector() {
       o.key ? field('Edge', o.key.blend, (v) => tool('set_overlay', { overlayId: o.id, keyBlend: v }), { min: 0, max: 1, step: '0.02', title: 'Edge softness' }) : null,
       o.key ? h('label', { class: 'key-note' }, 'key shows in export') : null,
       P.assets[o.assetId]?.type === 'video' && P.assets[o.assetId]?.hasAudio ? denoiseField(o.denoise, (v) => tool('set_overlay', { overlayId: o.id, denoise: v })) : null,
+      ...(P.assets[o.assetId]?.type === 'video' && P.assets[o.assetId]?.hasAudio ? voiceFields(o, (x) => tool('set_overlay', { overlayId: o.id, ...x })) : []),
+      P.assets[o.assetId]?.type === 'video' ? h('label', { title: 'Repeat the video / GIF for the whole overlay length' }, 'Loop', h('input', { type: 'checkbox', checked: !!o.loop, onchange: (e) => tool('set_overlay', { overlayId: o.id, loop: e.target.checked }) })) : null,
+      h('label', {}, 'Anim', h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, animation: e.target.value }) },
+        ...['none', 'fade', 'pop'].map((v) => h('option', { value: v, selected: (o.animation || 'none') === v }, v)))),
+      ...maskFields(o),
       lookSelect({ overlayId: o.id }, o.color),
       o.keyframes ? h('span', { class: 'note' }, `◆ keyframes: ${Object.keys(o.keyframes).join(', ')}`) : null,
       h('button', { class: 'small danger', onclick: () => tool('delete_overlay', { overlayId: o.id }) }, 'Delete'),
@@ -882,6 +961,7 @@ function renderInspector() {
       field('Fade in', m.fadeIn, (v) => tool('update_music', { musicId: m.id, fadeIn: v })),
       field('Fade out', m.fadeOut, (v) => tool('update_music', { musicId: m.id, fadeOut: v })),
       denoiseField(m.denoise, (v) => tool('update_music', { musicId: m.id, denoise: v })),
+      ...voiceFields(m, (x) => tool('update_music', { musicId: m.id, ...x })),
       m.role !== 'voice' ? field('Duck', m.duck || 0, (v) => tool('update_music', { musicId: m.id, duck: v }), { min: 0, max: 1, step: '0.1', title: 'Lower under speech (export only)' }) : null,
       h('button', { class: 'small', title: 'Detect beats and add beat markers', onclick: () => tool('mark_beats', { musicId: m.id }) }, '♩ Mark beats'),
       h('button', { class: 'small danger', onclick: () => tool('delete_music', { musicId: m.id }) }, 'Delete'),

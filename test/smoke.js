@@ -246,6 +246,32 @@ try {
   const kx = await tool('export_video', { quality: 'draft', wait: true });
   const kPath = /done 100% file: (.+?\.mp4)/.exec(kx.content)?.[1];
   ok(kPath && Math.abs(Number(probe(kPath, 'format=duration')) - s.layout.duration) < 0.25, `chroma key + blend + denoise export (${kPath ? path.basename(kPath) : kx.content})`);
+  // Phase 2.5 extras, part 2: a looping transparent GIF sticker that pops in, a split-screen mask,
+  // voice effects, smooth slow motion and the newer effects.
+  const gifFile = path.join(data, 'sticker.gif');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', "color=c=black@0:s=120x120:d=1:r=10,format=rgba,geq=r=255:g=200:b=0:a='if(lt(hypot(X-60-30*sin(2*PI*T),Y-60),25),255,0)',split[a][b];[a]palettegen=reserve_transparent=1[p];[b][p]paletteuse=alpha_threshold=128", '-loop', '0', gifFile]);
+  const sf = new FormData();
+  sf.append('files', new Blob([fs.readFileSync(gifFile)]), 'sticker.gif');
+  const [gifA] = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: sf })).json()).added;
+  ok(gifA.type === 'video' && gifA.codec === 'gif', 'animated GIF imported as a video sticker');
+  await tool('add_overlay', { assetId: gifA.id, start: 0.5, duration: 4, x: 0.3, y: 0.3, scale: 0.25, animation: 'pop', track: 5 });
+  s = await tool('get_timeline');
+  const stk = s.project.overlays.find((o) => o.assetId === gifA.id);
+  ok(stk.loop && stk.out === 4, 'GIF sticker loops past its 1s length');
+  await tool('set_mask', { overlayId: s.project.overlays.find((o) => o.assetId === texA.id).id, shape: 'linear', angle: 90, feather: 0.05 });
+  await tool('set_clip', { clipId: s.project.clips[0].id, voiceEffect: 'echo', pitch: -2 });
+  await tool('update_music', { musicId: voice, voiceEffect: 'radio' });
+  const slow = s.project.clips.find((c) => !c.freeze && !c.ramp && s.project.assets[c.assetId].type === 'video');
+  if (slow) await tool('set_clip', { clipId: slow.id, speed: 0.5, smoothSlowMo: 'blend' });
+  await tool('add_effect', { clipId: s.project.clips[0].id, type: 'kaleidoscope', intensity: 0.5 });
+  s = await tool('get_timeline');
+  ok(/pop in, loops/.test(s.content) && /mask linear/.test(s.content) && /voice echo, pitch -2/.test(s.content) && /kaleidoscope/.test(s.content) && (!slow || /smooth slow motion blend/.test(s.content)),
+    'summary shows sticker, mask, voice effect, smooth slow motion, new effect');
+  const xFrames = await tool('look_at_timeline', { times: [1.2] });
+  xFrames.content.filter((b) => b.type === 'image').forEach((b) => fs.writeFileSync(path.join(framesDir, 'sticker-mask.jpg'), Buffer.from(b.source.data, 'base64')));
+  const xx = await tool('export_video', { quality: 'draft', wait: true });
+  const xPath = /done 100% file: (.+?\.mp4)/.exec(xx.content)?.[1];
+  ok(xPath && Math.abs(Number(probe(xPath, 'format=duration')) - s.layout.duration) < 0.25, `sticker + mask + voice + smooth slow-mo export (${xPath ? path.basename(xPath) : xx.content})`);
   // Auto reframe: a red box moves across a 16:9 shot; reframed into 9:16 it must stay in the middle.
   const mv = path.join(data, 'moving.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=blue:s=1280x720:d=4:r=30', '-f', 'lavfi', '-i', 'color=c=red:s=80x80:d=4:r=30',

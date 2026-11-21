@@ -951,3 +951,92 @@ test('LUTs: import, resolve, set_color, render graph; freeze/reverse/ramp in the
     fs.rmSync(path.join(LU.LUTS_DIR, 'My_Film_Look.cube'), { force: true });
   }
 });
+
+test('Phase 2.5 extras: voice effects, masks, GIF loop + pop, smooth slow motion, new effects', () => {
+  const p = project();
+  p.assets.vid_g = { id: 'vid_g', name: 's.gif', type: 'video', file: 's.gif', duration: 1, width: 160, height: 160, hasAudio: false, codec: 'gif' };
+  run(p, 'add_clip', { assetId: 'vid_a', out: 4 });
+  run(p, 'add_clip', { assetId: 'img_c', duration: 2 });
+  const [c, ci] = p.clips;
+  // Voice effects + pitch on clips, overlays and audio items.
+  run(p, 'set_clip', { clipId: c.id, voiceEffect: 'robot', pitch: 3 });
+  assert.equal(c.voice, 'robot'); assert.equal(c.pitch, 3);
+  assert.throws(() => run(p, 'set_clip', { clipId: c.id, voiceEffect: 'alien' }), /voiceEffect must be one of/);
+  assert.throws(() => run(p, 'set_clip', { clipId: c.id, pitch: 20 }), /pitch/);
+  run(p, 'add_music', { assetId: 'aud_m', role: 'voice', voiceEffect: 'telephone' });
+  assert.equal(p.music[0].voice, 'telephone');
+  // Smooth slow motion: video clips only; the message says when the clip is not slowed.
+  assert.match(run(p, 'set_clip', { clipId: c.id, smoothSlowMo: 'motion' }), /only changes slowed parts/);
+  run(p, 'set_clip', { clipId: c.id, speed: 0.5 });
+  assert.equal(c.smooth, 'motion');
+  assert.throws(() => run(p, 'set_clip', { clipId: ci.id, smoothSlowMo: 'blend' }), /video clips/);
+  // GIF sticker: loops by default (3s), can run past the file, pop animation.
+  run(p, 'add_overlay', { assetId: 'vid_g', start: 1, x: 0.3, y: 0.7, scale: 0.2, animation: 'pop' });
+  const g = p.overlays[0];
+  assert.equal(g.loop, true); assert.equal(g.out, 3); assert.equal(g.animation, 'pop');
+  run(p, 'set_overlay', { overlayId: g.id, duration: 4.5 });
+  assert.equal(g.out, 4.5);
+  assert.throws(() => run(structuredClone(p), 'set_overlay', { overlayId: g.id, loop: false }), /set loop: true/); // ops run on a draft in the store
+  assert.throws(() => run(p, 'add_overlay', { assetId: 'img_c', loop: true }), /loop is for video/);
+  // Masks on overlays.
+  run(p, 'add_overlay', { assetId: 'vid_b', fit: 'cover', start: 0, duration: 3 });
+  const o = p.overlays[1];
+  assert.throws(() => run(p, 'set_mask', { overlayId: o.id }), /shape is required/);
+  assert.throws(() => run(p, 'set_mask', { clipId: c.id, shape: 'circle' }), /Masks work on overlays/);
+  assert.match(run(p, 'set_mask', { overlayId: o.id, shape: 'linear', angle: 90, feather: 0.1 }), /linear line through \(0\.5,0\.5\) at 90°/);
+  assert.deepEqual(o.mask, { shape: 'linear', x: 0.5, y: 0.5, angle: 90, feather: 0.1 });
+  run(p, 'set_mask', { overlayId: o.id, shape: 'rect', round: 0.5, invert: true });
+  assert.deepEqual(o.mask, { shape: 'rect', x: 0.5, y: 0.5, w: 0.6, h: 0.6, feather: 0.1, round: 0.5, invert: true });
+  run(p, 'set_mask', { overlayId: o.id, shape: 'circle', w: 0.5, invert: false });
+  assert.deepEqual(o.mask, { shape: 'circle', x: 0.5, y: 0.5, w: 0.5, h: 0.6, feather: 0.1 });
+  // New effects; strobe gets a rate.
+  run(p, 'add_effect', { clipId: c.id, type: 'strobe', start: 0, end: 1 });
+  for (const type of ['pixelate', 'mirror', 'kaleidoscope', 'film_grain', 'comic']) run(p, 'add_effect', { clipId: c.id, type, start: 1, end: 2 });
+  assert.equal(c.effects[0].rate, 8);
+  const sum = M.summarize(p);
+  assert.match(sum, /smooth slow motion motion/);
+  assert.match(sum, /voice robot, pitch \+3 semitones/);
+  assert.match(sum, /pop in, loops/);
+  assert.match(sum, /mask circle center \(0\.5,0\.5\) size 0\.5x0\.6 feather 0\.1/);
+  assert.match(sum, /strobe .* rate 8\/s/);
+  const { graph, args, tmpDir } = buildCommand(p, 'out.mp4', { quality: 'draft' });
+  try {
+    assert.match(graph, /minterpolate=fps=30:mi_mode=mci/);
+    assert.match(graph, /asetrate=57082,aresample=48000,atempo=0\.8409,afftfilt=/);   // +3 semitones, then robot
+    assert.match(graph, /highpass=f=300,lowpass=f=3400/);
+    const gi = args.indexOf('-stream_loop');
+    assert.ok(gi > 0 && args[gi + 1] === '-1', 'looping overlay input');
+    assert.match(graph, /scale=w='max\(2,trunc\(\d+\*\(0\.2\)\*\(if\(lt\(t,0\.350\)/);  // pop
+    assert.match(graph, /trim=end_frame=1,geq=lum='255\*clip\(0\.5-\(\(hypot/);       // circle mask
+    assert.match(graph, /blend=all_mode=multiply:shortest=1\[mk0b\]/);
+    assert.match(graph, /\[mk0c\]\[mk0b\]alphamerge/);
+    for (const re of [/flags=neighbor/, /hstack/, /vstack/, /noise=alls=\d+:allf=t\+u/, /gt\(sin\(2\*PI\*8\.000/, /edgedetect=mode=colormix/]) assert.match(graph, re);
+  } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  // Turning things off removes the fields.
+  run(p, 'set_clip', { clipId: c.id, voiceEffect: 'none', pitch: 0, smoothSlowMo: 'off' });
+  assert.ok(!('voice' in c) && !('pitch' in c) && !('smooth' in c));
+  run(p, 'set_mask', { overlayId: o.id, shape: 'none' });
+  assert.ok(!('mask' in o));
+});
+
+test('maskExpr: linear angles keep the documented side', async () => {
+  const { maskExpr } = await import('../src/render.js');
+  // Evaluate the geq expression in JS on a 100x100 frame.
+  const evalAt = (m, X, Y) => {
+    const e = maskExpr(m).replace(/\b(hypot|abs|max|min)\(/g, 'Math.$1(').replace(/clip\(/g, 'clamp(');
+    const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+    return Function('X', 'Y', 'W', 'H', 'clamp', `return ${e}`)(X, Y, 100, 100, clamp);
+  };
+  const lin = (angle) => ({ shape: 'linear', x: 0.5, y: 0.5, angle });
+  assert.equal(evalAt(lin(0), 50, 90), 1); assert.equal(evalAt(lin(0), 50, 10), 0);     // below kept
+  assert.equal(evalAt(lin(90), 10, 50), 1); assert.equal(evalAt(lin(90), 90, 50), 0);   // left kept
+  assert.equal(evalAt(lin(-90), 90, 50), 1); assert.equal(evalAt(lin(180), 50, 10), 1); // right / above
+  const circ = { shape: 'circle', x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+  assert.equal(evalAt(circ, 50, 50), 1); assert.equal(evalAt(circ, 5, 5), 0);
+  assert.equal(evalAt({ ...circ, invert: true }, 5, 5), 1);
+  const band = { shape: 'mirror', x: 0.5, y: 0.5, angle: 0, h: 0.2 };
+  assert.equal(evalAt(band, 50, 50), 1); assert.equal(evalAt(band, 50, 80), 0);
+  const rect = { shape: 'rect', x: 0.5, y: 0.5, w: 0.4, h: 0.4, round: 0.5 };
+  assert.equal(evalAt(rect, 50, 50), 1); assert.equal(evalAt(rect, 31, 31), 0);         // rounded corner cut off
+  assert.equal(evalAt(rect, 50, 31), 1);
+});

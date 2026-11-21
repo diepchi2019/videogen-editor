@@ -1,7 +1,7 @@
 // Tool definitions shared by the in-app Claude chat and the MCP server.
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS, BLEND_MODES,
-  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, RAMP_PRESETS, REVERSE_MAX, summarize, timelineWords, layout, env, ops,
+  CAPTION_MODES, CAPTION_STYLES, REGION_MODES, MASK_SHAPES, VOICE_EFFECTS, SMOOTH_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, RAMP_PRESETS, REVERSE_MAX, summarize, timelineWords, layout, env, ops,
   styleFromProject, describeStyle, normalizeStyle, makeTemplate, describeTemplate, fillTemplate,
 } from './model.js';
 import { listStyles, loadStyle, saveStyle, deleteStyle, listTemplates, loadTemplate, saveTemplate, deleteTemplate } from './presets.js';
@@ -43,18 +43,25 @@ const captionStyleProps = {
   color: s('Hex text color'), highlightColor: s('Hex color of the spoken word'), outline: n('Outline px'), outlineColor: s('Hex'),
   box: b('Background box'), boxColor: s('Hex'), uppercase: b('ALL CAPS'), bold: b('Bold'), maxWords: n('Max words per line (1-12)'),
 };
+// Voice effect + pitch, on clips, overlays and audio items.
+const soundProps = {
+  voiceEffect: s('Voice effect (export only): chipmunk (high), deep (low), robot, echo, hall (big room reverb), telephone, radio, megaphone; none removes', { enum: VOICE_EFFECTS }),
+  pitch: n('Pitch shift in semitones -12..12 without changing speed (0 = original; adds to chipmunk/deep)'),
+};
 const overlayProps = {
   start: n('Timeline start seconds'), end: n('Timeline end seconds (alternative to duration)'), duration: n('Seconds on the timeline'),
   in: n('Source start seconds (video)'), out: n('Source end seconds (video)'), speed: n('0.25-4'),
   fit: s('free = position with x/y/scale; cover = fill the whole frame (B-roll cutaway); contain = whole frame, letterboxed', { enum: OVERLAY_FITS }),
   x: n('Center x 0-1 (free fit)'), y: n('Center y 0-1 (free fit)'), scale: n('Width as a fraction of the canvas width (free fit), e.g. 0.35 for picture-in-picture, 0.15 for a logo'),
   rotate: n('Degrees'), opacity: n('0-1'), volume: n('0-2, audio of a video overlay (0 = mute)'), track: n('Layer 1-20, higher is on top'),
-  crop: cropSchema, flipH: b('Mirror horizontally'), flipV: b('Flip vertically'), animation: s('fade = fade in and out', { enum: OVERLAY_ANIMS }),
+  crop: cropSchema, flipH: b('Mirror horizontally'), flipV: b('Flip vertically'), animation: s('fade = fade in and out; pop = grows in with a bounce (free fit, good for stickers)', { enum: OVERLAY_ANIMS }),
+  loop: b('Repeat a video / animated GIF for as long as the overlay lasts (default on for GIFs); then duration may be longer than the file'),
   blend: s('How it mixes with the video under it: screen (light leaks, fire, sparkles on black), multiply (paper/texture, darkens), overlay/softlight (texture with contrast), add, lighten, darken, difference; normal removes. Export only, the preview shows an approximation', { enum: BLEND_MODES }),
   chromaKey: s('Remove a green or blue screen: green, blue, a hex color of the backdrop (pick it with look_at_asset), or none'),
   keySimilarity: n('How far from the key color still counts as backdrop, 0.01-1 (default 0.25; raise it if green remains, lower it if the subject gets holes)'),
   keyBlend: n('Edge softness 0-1 (default 0.08)'), keyDespill: b('Remove the green/blue tint on the subject edges (default on for green/blue)'),
   denoise: n('Noise reduction on the audio 0-1 (0 = off, 0.5 = typical for hiss/fan/wind)'),
+  ...soundProps,
 };
 const idsSchema = (d) => ({ type: 'array', items: { type: 'string' }, description: d });
 const pickProps = (o, keys) => Object.fromEntries(keys.map((k) => [k, o[k]]));
@@ -145,6 +152,8 @@ export const TOOLS = [
       animOut: s('Exit animation of the clip (none removes). zoom_in grows, zoom_out shrinks, slide_X leaves in that direction', { enum: CLIP_ANIMS }),
       animOutDuration: n('Seconds (default 0.5)'),
       reverse: b(`Play the clip backwards (video clips, up to ${REVERSE_MAX}s of source; audio is reversed too)`),
+      smoothSlowMo: s('Smooth slow motion for clips slowed below 1x (speed or ramp): blend = cross-fades frames (fast), motion = motion-interpolated new frames (best, slow to export, can warp fast motion); off removes. Export only', { enum: SMOOTH_MODES }),
+      ...soundProps,
     }, ['clipId']),
   },
   {
@@ -178,9 +187,10 @@ export const TOOLS = [
   {
     name: 'add_effect',
     description: `Add a video effect to a main-track clip for a time range: ${EFFECTS.join(', ')}. ` +
-      'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative. ' +
+      'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative; ' +
+      'pixelate = big pixels (intensity = block size); mirror = left half mirrored to the right; kaleidoscope = top-left quarter mirrored 4 ways; film_grain = moving grain; strobe = white flicker (rate = flashes per second); comic = colored edge drawing. ' +
       'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. Export and look_at_timeline only (not shown in the browser preview).',
-    input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse: cycles per second (shake default 8, zoom_pulse default 2)') }, ['clipId', 'type']),
+    input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse / strobe: cycles per second (shake default 8, zoom_pulse 2, strobe 8)') }, ['clipId', 'type']),
   },
   { name: 'delete_effect', description: 'Remove an effect (ids are listed with each clip in get_timeline).', input_schema: S({ effectId: s('Effect id') }, ['effectId']) },
   {
@@ -248,6 +258,18 @@ export const TOOLS = [
   },
   { name: 'add_overlay', description: 'Put a video or image ON TOP of the main video track at a timeline time: picture-in-picture, logo/watermark, B-roll cutaway (fit cover), reaction cam. Overlays do not shift other clips.', input_schema: S({ assetId: s('Asset id'), ...overlayProps }, ['assetId']) },
   { name: 'set_overlay', description: 'Change an overlay (timing, position, size, opacity, crop, volume, blend mode, chroma key for green screen, audio noise reduction...).', input_schema: S({ overlayId: s('Overlay id'), ...overlayProps }, ['overlayId']) },
+  {
+    name: 'set_mask',
+    description: 'Mask an overlay so only part of it shows: circle (round picture-in-picture or face cut-out), rect (with round corners), linear (split screen: keeps one side of a line, see angle), mirror (a band along a line). ' +
+      'Positions and sizes are fractions of the overlay frame itself (after crop), so the mask moves and scales with it. For a split screen put the second clip as an overlay with fit cover and a linear mask. Only the fields you pass change. Preview shows an approximation.',
+    input_schema: S({
+      overlayId: s('Overlay id'), shape: s('Mask shape; none removes the mask', { enum: MASK_SHAPES }),
+      x: n('Center x (circle/rect) or a point on the line (linear/mirror), 0-1 of the overlay (default 0.5)'), y: n('Center y / point on the line, 0-1 (default 0.5)'),
+      w: n('Width 0-1 of the overlay (circle/rect, default 0.6)'), h: n('Height 0-1 (circle/rect, default 0.6); mirror: band thickness (default 0.4)'),
+      angle: n('linear/mirror: tilt in degrees. 0 = horizontal line, keeps the part BELOW it; 180 keeps the part above; 90 = vertical line, keeps the LEFT part; -90 keeps the right part'),
+      feather: n('Soft edge 0-1 (0 = sharp)'), round: n('rect: corner roundness 0-1'), invert: b('Show the outside instead of the inside'),
+    }, ['overlayId']),
+  },
   { name: 'delete_overlay', description: 'Remove an overlay.', input_schema: S({ overlayId: s('Overlay id') }, ['overlayId']) },
 
   { name: 'add_text', description: 'Add a text overlay/title. x,y are the center as fractions of the frame (0.5,0.5 = center; y 0.15 = top; y 0.8 = lower third). Use style presets for quick looks.', input_schema: S(textProps, ['text', 'start', 'end']) },
@@ -261,8 +283,8 @@ export const TOOLS = [
   { name: 'update_captions', description: 'Restyle captions, or fix one line (lineId + text and/or start/end). Changing maxWords regroups all lines.', input_schema: S({ lineId: s('Caption line id (from get_timeline)'), text: s('Corrected words for that line'), start: n('Line start s'), end: n('Line end s'), ...captionStyleProps }) },
   { name: 'delete_captions', description: 'Delete one caption line (lineId) or all captions.', input_schema: S({ lineId: s('Optional line id') }) },
 
-  { name: 'add_music', description: 'Add an audio item: music (default), sfx (sound effect) or voice (voiceover). Mixed under the clip audio. Each role gets its own track by default (music 1, voice 2, sfx 3).', input_schema: S({ assetId: s('Asset id (audio, or a video with audio)'), role: s('music, sfx or voice', { enum: AUDIO_ROLES }), track: n('Audio track 1-20'), start: n('Timeline start seconds (default 0)'), in: n('Source start s'), out: n('Source end s'), volume: n('0-2 (music default 0.6, others 1)'), fadeIn: n('Seconds'), fadeOut: n('Seconds (music default 1)'), duck: n('0-1: automatically lower this audio while someone speaks (clip audio and voice items). 0 = off, 0.6 = typical'), denoise: n('Noise reduction 0-1, for voiceovers recorded with hiss or room noise (0 = off)') }, ['assetId']) },
-  { name: 'update_music', description: 'Change an audio item (music, sfx or voice). duck 0-1 lowers it under speech (0 = off; export only, not in the browser preview).', input_schema: S({ musicId: s('Audio item id'), role: s('Role', { enum: AUDIO_ROLES }), track: n('Track'), start: n('s'), in: n('s'), out: n('s'), volume: n('0-2'), fadeIn: n('s'), fadeOut: n('s'), duck: n('0-1 ducking under speech, 0 = off'), denoise: n('Noise reduction 0-1, 0 = off') }, ['musicId']) },
+  { name: 'add_music', description: 'Add an audio item: music (default), sfx (sound effect) or voice (voiceover). Mixed under the clip audio. Each role gets its own track by default (music 1, voice 2, sfx 3).', input_schema: S({ assetId: s('Asset id (audio, or a video with audio)'), role: s('music, sfx or voice', { enum: AUDIO_ROLES }), track: n('Audio track 1-20'), start: n('Timeline start seconds (default 0)'), in: n('Source start s'), out: n('Source end s'), volume: n('0-2 (music default 0.6, others 1)'), fadeIn: n('Seconds'), fadeOut: n('Seconds (music default 1)'), duck: n('0-1: automatically lower this audio while someone speaks (clip audio and voice items). 0 = off, 0.6 = typical'), denoise: n('Noise reduction 0-1, for voiceovers recorded with hiss or room noise (0 = off)'), ...soundProps }, ['assetId']) },
+  { name: 'update_music', description: 'Change an audio item (music, sfx or voice). duck 0-1 lowers it under speech (0 = off; export only, not in the browser preview).', input_schema: S({ musicId: s('Audio item id'), role: s('Role', { enum: AUDIO_ROLES }), track: n('Track'), start: n('s'), in: n('s'), out: n('s'), volume: n('0-2'), fadeIn: n('s'), fadeOut: n('s'), duck: n('0-1 ducking under speech, 0 = off'), denoise: n('Noise reduction 0-1, 0 = off'), ...soundProps }, ['musicId']) },
   { name: 'analyze_audio', description: 'Analyse an audio or video asset: tempo (BPM) and beat times, loudness, and silences, all in SOURCE seconds. Use it to plan cuts on the beat, find quiet gaps, or pick a music section. Cached per file.', input_schema: S({ assetId: s('Asset id (or give musicId to analyse what an audio item uses)'), musicId: s('Audio item id: limits the result to the part it plays'), from: n('Source seconds'), to: n('Source seconds'), force: b('Re-run even if cached') }) },
   { name: 'mark_beats', description: 'Detect the beats of an audio item (music) and put them on the timeline as beat markers (replaces old beat markers). Then fit_clips_to_beats cuts on them, or use the times for effects/text.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
   { name: 'fit_clips_to_beats', description: 'Cut to the beat: trims each main-track clip\'s out point so every cut (and the end) lands on a beat marker. every = beats per clip (1 = cut on every beat, 2 = every other, 4 = once per bar). Clips whose source is too short are kept and reported. Needs beat markers (mark_beats).', input_schema: S({ every: n('Beats per clip (default 1)'), skipBeats: n('Ignore this many beat markers at the start (default 0)') }) },
