@@ -16,6 +16,11 @@ import { listFonts, resolveFont, defaultFont } from './fonts.js';
 import { listLuts, resolveLut } from './luts.js';
 import { loudness, sceneChanges, findMoments, momentsText } from './moments.js';
 import { faceSamples, subjectPath, faceModelPath, FACE_HELP } from './faces.js';
+import { findPauseCuts, fineLoudness, peakDb, quietRuns } from './pauses.js';
+import { srcAt, localAt } from './timing.js';
+import { pickKeywords, findPhrase, planAutoZoom } from './emphasis.js';
+import { fetchEmoji } from './emoji.js';
+import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
 
@@ -240,6 +245,54 @@ export const TOOLS = [
     description: 'Ripple delete: cut timeline seconds start..end out of the whole video and close the gap. Clips are split at both ends; texts, overlays, sfx/voice, captions and markers after the range move left, those inside are deleted, those across it get shorter. Background music (role music) keeps playing and only moves if it starts after the range.',
     input_schema: S({ start: n('Timeline seconds'), end: n('Timeline seconds') }, ['start', 'end']),
   },
+  {
+    name: 'remove_silences',
+    description: 'Tighten talking: cut the pauses and filler words (um, uh, ờ, ừm...) out of main-track clips with speech, as jump cuts, in one undo step. ' +
+      'Uses the local Whisper transcript (transcribes when needed) and checks each pause is really quiet, so gaps with music or words Whisper missed stay. ' +
+      'A pause longer than minPause is shortened to keepPause on each side; silence before the first and after the last word of a clip is cut too. Captions, texts and sound effects move with the cuts; background music keeps playing. ' +
+      'Use dryRun to see the cuts first. For other words to drop ("like", repeated words, a false start) read get_transcript and use delete_range.',
+    input_schema: S({
+      clipId: s('Only this clip (default: every main-track clip with speech)'),
+      minPause: n('Cut pauses longer than this, seconds (default 0.6; 0.3 = very tight, 1.2 = only long pauses)'),
+      keepPause: n('Seconds of pause kept on each side of a cut (default 0.15)'),
+      fillers: b('Also cut filler words (default true)'),
+      fillerWords: { type: 'array', items: { type: 'string' }, description: 'Extra words to treat as fillers, e.g. ["like"]' },
+      ignoreSound: b('Cut pauses even when there is sound in them (default false)'),
+      language: s('Speech language for transcribing (default auto)'),
+      dryRun: b('Only list the cuts, change nothing'),
+    }),
+  },
+  {
+    name: 'emphasize_captions',
+    description: 'Highlight key words in the captions (Hormozi style): the word gets the emphasis color and is drawn bigger, and can carry an emoji that pops up above the caption line (a color image in the export). ' +
+      'Pick words by meaning: numbers and money, names, strong verbs, the payoff of a sentence; about one per line or fewer, so they stay special. ' +
+      'words: [{text: "ten thousand dollars", emoji: "💰"}] marks every place that word or phrase is said (give at, timeline seconds, for just the nearest one). auto: true picks numbers and long uncommon words without you. ' +
+      'Emphasized words are shown as *word* in get_timeline. auto_zoom then punches in on them.',
+    input_schema: S({
+      words: { type: 'array', description: 'Words or phrases to emphasize', items: { type: 'object', properties: {
+        text: s('Word or phrase as spoken (case and punctuation ignored)'), at: n('Only the occurrence nearest this timeline second'),
+        color: s('Hex color for this word (default: the emphasis color)'), emoji: s('One emoji shown above the line from this word on, e.g. 🔥'),
+        remove: b('Remove the emphasis and emoji from this word instead'),
+      }, required: ['text'] } },
+      auto: b('Pick words automatically (numbers, money, long uncommon words)'),
+      clear: b('Remove all emphasis first'),
+      emphasisColor: s('Hex color for emphasized words (default yellow, or green when the caption style already lights words in yellow)'),
+      emphasisScale: n('Size of emphasized words, 1-2 (default 1.15)'),
+    }),
+  },
+  {
+    name: 'auto_zoom',
+    description: 'Zoom like a talking-head editor, in one undo step: (1) on jump cuts (the same video continuing after a cut, e.g. after remove_silences) every other clip is framed tighter, which hides the jump; ' +
+      '(2) quick punch-ins on emphasis: at the times you give, else on the emphasized caption words (emphasize_captions), else on the loudest words. Running it again replaces the previous auto zoom; clear removes it. ' +
+      'Scale keyframes you set yourself are kept (no punch-ins on those clips). Check with look_at_timeline.',
+    input_schema: S({
+      amount: n('Zoom factor 1.05-1.5 (default 1.15; 1.1 subtle, 1.3 strong)'),
+      cuts: b('Frame every other jump-cut clip tighter (default true)'),
+      emphasis: b('Punch in on emphasis (default true)'),
+      times: { type: 'array', items: { type: 'number' }, description: 'Timeline seconds to punch in at (you pick the moments)' },
+      clear: b('Remove the auto zoom'),
+    }),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -360,6 +413,7 @@ export const TOOLS = [
       quality: s('draft (fast, half resolution) or final', { enum: ['draft', 'final'] }), wait: b('Wait until done (up to 10 min)'),
       resolution: s('Short side of the output (overrides draft scaling)', { enum: Object.keys(RESOLUTIONS) }), fps: n('Output frames per second (default: canvas fps)'),
       bitrate: n('Video bitrate in Mbps (default: constant quality)'), encoder: s('cpu (default), gpu or auto', { enum: ['cpu', 'gpu', 'auto'] }),
+      loudness: s('Loudness of the finished file in LUFS: -14 (TikTok, Reels, Shorts, YouTube), -16 (podcasts), -23 (broadcast) or off. Default from Settings (-14)', { enum: ['-14', '-16', '-23', 'off'] }),
     }),
   },
   { name: 'export_cover', description: 'Save a cover image (thumbnail) of the finished video: a full-size JPEG of the timeline frame at time t, with text and overlays, next to the exports. Returns the path and shows you the image.', input_schema: S({ t: n('Timeline seconds (default 0)'), name: s('File name without extension (default: project name + "-cover")') }) },
@@ -384,7 +438,7 @@ const imageBlocks = (title, frames, label) => [{ type: 'text', text: title }, ..
   { type: 'text', text: label(f) },
   { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.data } },
 ])];
-const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}`;
+const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}${j.loudness ? ` loudness: ${j.loudness.note}` : ''}`;
 
 // Returns { content: string | Array<content block>, isError?: boolean }
 export async function executeTool(name, input = {}, source = 'claude') {
@@ -547,6 +601,114 @@ export async function executeTool(name, input = {}, source = 'claude') {
         if (steps.length) store.applyBatch(steps, source);
         return { content: `Auto reframe${steps.length ? '' : ': nothing changed'}:\n${report.join('\n')}${steps.length ? '\nCheck with look_at_timeline.' : ''}` };
       }
+      case 'remove_silences': {
+        const p = store.getProject(), L = layout(p);
+        const num = (v, d, lo, hi, name) => { const x = v === undefined ? d : Number(v); if (!(x >= lo && x <= hi)) throw new Error(`${name} must be ${lo}-${hi}`); return x; };
+        const minPause = num(input.minPause, 0.6, 0.2, 5, 'minPause'), keep = num(input.keepPause, 0.15, 0, 0.5, 'keepPause');
+        const talk = (c) => { const a = p.assets[c.assetId]; return a?.type === 'video' && a.hasAudio && (c.volume ?? 1) > 0 && !c.reverse && !c.freeze; };
+        let clips = L.clips;
+        if (input.clipId) {
+          clips = clips.filter((c) => c.id === input.clipId);
+          if (!clips.length) return { content: `No clip ${input.clipId}. Clips: ${L.clips.map((c) => c.id).join(', ')}`, isError: true };
+          if (!talk(clips[0])) return { content: `${input.clipId} has no sound to tighten (image, muted, reversed or a freeze frame).`, isError: true };
+        }
+        clips = clips.filter(talk);
+        if (!clips.length) return { content: 'No main-track clip with sound: nothing to tighten.', isError: true };
+        const transcripts = {}, curves = {};
+        for (const c of clips) {
+          const a = p.assets[c.assetId];
+          if (transcripts[a.id]) continue;
+          try { transcripts[a.id] = (await transcribe(a, { language: input.language || 'auto' })).words; } catch (e) {
+            return { content: e.message === MODEL_HELP ? MODEL_HELP : `Could not transcribe "${a.name}": ${e.message}`, isError: true };
+          }
+          if (!input.ignoreSound) curves[a.id] = await fineLoudness(a);
+        }
+        const words = timelineWords(p, transcripts, ['clips']);
+        const spans = clips.map((c) => {
+          const next = L.clips[c.index + 1];
+          const curve = curves[c.assetId];
+          return {
+            lo: c.start + (c.index > 0 ? c.overlap || 0 : 0), hi: c.end - (next?.overlap || 0),
+            words: words.filter((w) => (w.start + w.end) / 2 >= c.start && (w.start + w.end) / 2 <= c.end),
+            level: curve ? (x, y) => peakDb(curve, srcAt(c, x - c.start), srcAt(c, y - c.start)) : null,
+            quiet: curve ? (x, y, thr) => quietRuns(curve, srcAt(c, x - c.start), srcAt(c, y - c.start), thr)
+              .map((q) => ({ s: c.start + localAt(c, q.s), e: c.start + localAt(c, q.e) })) : null,
+          };
+        });
+        const r = findPauseCuts(spans, { minPause, keep, fillers: input.fillers !== false, extraFillers: Array.isArray(input.fillerWords) ? input.fillerWords : [], ignoreSound: !!input.ignoreSound });
+        const total = r.cuts.reduce((x, c) => x + c.end - c.start, 0);
+        const count = (k) => r.cuts.filter((c) => c.kind === k).length;
+        const fill = Object.entries(r.fillers).map(([w, k]) => `${w} x${k}`).join(', ');
+        const what = `${count('pause')} pause${count('pause') === 1 ? '' : 's'}, ${count('edge')} silent start/end${count('edge') === 1 ? '' : 's'} and ${count('filler')} filler${count('filler') === 1 ? '' : 's'}${fill ? ` (${fill})` : ''}`;
+        const keptNote = r.keptSound ? `\nLeft ${r.keptSound} pause${r.keptSound > 1 ? 's' : ''} that have sound in them (music, or words Whisper did not write); ignoreSound true cuts them too.` : '';
+        if (!r.cuts.length) return { content: `Nothing to cut: no pause longer than ${minPause}s${input.fillers !== false ? ' and no filler words' : ''}.${keptNote}` };
+        const list = r.cuts.map((c) => `${c.start.toFixed(2)}-${c.end.toFixed(2)}s ${c.kind}${c.fillers ? ` "${c.fillers.join(' ')}"` : ''}`);
+        if (input.dryRun) return { content: `Would cut ${what}: ${total.toFixed(1)}s in all (timeline seconds now):\n${list.join('\n')}${keptNote}` };
+        // Last cut first, so the earlier times stay valid.
+        store.applyBatch([...r.cuts].reverse().map((c) => ({ name: 'delete_range', input: { start: c.start, end: c.end } })), source);
+        const after = layout(store.getProject()).duration;
+        return { content: `Removed ${what}: ${total.toFixed(1)}s shorter, ${L.duration.toFixed(1)}s -> ${after.toFixed(1)}s (one undo step). Check the jumps with look_at_timeline or play it.${keptNote}` };
+      }
+      case 'emphasize_captions': {
+        const p = store.getProject();
+        if (!p.captions?.lines?.length) return { content: 'No captions yet. Use add_captions first.', isError: true };
+        const marks = [], missing = [], notes = [];
+        for (const spec of Array.isArray(input.words) ? input.words : []) {
+          let hits = findPhrase(p.captions.lines, spec.text);
+          if (!hits.length) { missing.push(spec.text); continue; }
+          if (spec.at !== undefined) hits = [hits.reduce((x, y) => (Math.abs(y.start - spec.at) < Math.abs(x.start - spec.at) ? y : x))];
+          for (const hit of hits) {
+            for (let i = hit.from; i <= hit.to; i++) {
+              marks.push({ lineId: hit.lineId, index: i, em: spec.remove ? false : spec.color || true, ...(i === hit.to && (spec.emoji || spec.remove) ? { emoji: spec.remove ? null : spec.emoji } : {}) });
+            }
+          }
+        }
+        if (input.auto) marks.push(...pickKeywords(p.captions.lines).map((m) => ({ ...m, em: true })));
+        if (!marks.length && !input.clear && input.emphasisColor === undefined && input.emphasisScale === undefined) {
+          return { content: missing.length ? `Not found in the captions: ${missing.map((x) => `"${x}"`).join(', ')}. get_timeline shows the caption text.` : 'Nothing to emphasize: give words, or auto true.', isError: true };
+        }
+        // Color emoji are images in the export: download the ones not there yet (the preview shows them anyway).
+        for (const e of new Set(marks.map((m) => m.emoji).filter(Boolean))) {
+          try { await fetchEmoji(e); } catch (err) { notes.push(`Emoji ${e} could not be downloaded (${err.message}): it shows in the preview but not in the export until it can be.`); }
+        }
+        const msg = store.apply('emphasize_words', { marks, clear: input.clear, emphasisColor: input.emphasisColor, emphasisScale: input.emphasisScale }, source);
+        return { content: `${msg}${missing.length ? ` Not found: ${missing.map((x) => `"${x}"`).join(', ')}.` : ''}${notes.length ? `\n${notes.join('\n')}` : ''}` };
+      }
+      case 'auto_zoom': {
+        if (input.clear) return { content: store.apply('set_auto_zoom', { clear: true }, source) };
+        const p = store.getProject(), L = layout(p);
+        const amount = input.amount === undefined ? 1.15 : Number(input.amount);
+        if (!(amount >= 1.05 && amount <= 1.5)) return { content: 'amount must be 1.05-1.5', isError: true };
+        const clips = L.clips.filter((c) => p.assets[c.assetId]?.type !== 'audio');
+        let times = Array.isArray(input.times) && input.times.length ? input.times.map(Number) : null, how = times ? 'the times you gave' : '';
+        let loudWords = [], note = '';
+        if (!times && input.emphasis !== false) {
+          const em = (p.captions?.lines || []).flatMap((l) => l.words.filter((w) => w.em).map((w) => w.start));
+          if (em.length) { times = em; how = 'the emphasized caption words'; } else {
+            const talk = clips.filter((c) => { const a = p.assets[c.assetId]; return a.type === 'video' && a.hasAudio && (c.volume ?? 1) > 0 && !c.reverse && !c.freeze; });
+            const transcripts = {}, curves = {};
+            try {
+              for (const c of talk) {
+                const a = p.assets[c.assetId];
+                if (transcripts[a.id]) continue;
+                transcripts[a.id] = (await transcribe(a, {})).words;
+                curves[a.id] = await fineLoudness(a);
+              }
+            } catch (e) { note = ` No punch-ins: ${e.message === MODEL_HELP ? 'no Whisper model to find the words' : e.message}.`; }
+            if (!note) {
+              for (const w of timelineWords(p, transcripts, ['clips'])) {
+                const c = talk.find((x) => (w.start + w.end) / 2 >= x.start && (w.start + w.end) / 2 <= x.end);
+                if (c) loudWords.push({ ...w, db: peakDb(curves[c.assetId], srcAt(c, w.start - c.start), srcAt(c, w.end - c.start)) });
+              }
+              how = 'the loudest words';
+            }
+          }
+        }
+        const plan = planAutoZoom(clips, { amount, cuts: input.cuts !== false, times, loudWords });
+        if (!plan.clips.length) return { content: `Nothing to zoom: ${plan.jumpCuts ? '' : 'no jump cuts (the same video continuing after a cut)'}${input.emphasis === false ? '' : `${plan.jumpCuts ? '' : ' and '}no emphasis found`}.${note}` };
+        const msg = store.apply('set_auto_zoom', { clips: plan.clips, amount }, source);
+        return { content: `${msg}${plan.punches ? ` Punch-ins on ${how}.` : ''}${note} Check with look_at_timeline.` };
+      }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];
         if (!a) return { content: `No asset ${input.assetId}`, isError: true };
@@ -702,7 +864,9 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const bitrate = input.bitrate === undefined ? undefined : Number(input.bitrate);
         if (bitrate !== undefined && !(bitrate >= 0.5 && bitrate <= 200)) return { content: 'bitrate must be between 0.5 and 200 Mbps', isError: true };
         if (input.encoder !== undefined && !['cpu', 'gpu', 'auto'].includes(input.encoder)) return { content: 'encoder must be cpu, gpu or auto', isError: true };
-        let job = startExport(store.getProject(), { quality: input.quality || 'final', resolution: input.resolution, fps, bitrate, encoder: input.encoder || 'cpu' });
+        const loud = String(input.loudness ?? setting('export.loudness') ?? '-14');
+        if (loud !== 'off' && !(Number(loud) >= -30 && Number(loud) <= -6)) return { content: 'loudness must be -14, -16, -23 (LUFS) or off', isError: true };
+        let job = startExport(store.getProject(), { quality: input.quality || 'final', resolution: input.resolution, fps, bitrate, encoder: input.encoder || 'cpu', loudness: loud === 'off' ? null : Number(loud) });
         if (job.status === 'error') return { content: `Export failed: ${job.error}`, isError: true };
         if (!input.wait) return { content: `Export started, job ${job.id}. Output: ${job.path} (URL /exports/${job.file})` };
         job = await waitJob(job.id, 600000);

@@ -113,6 +113,7 @@
         </span>
         <span class="capgroup" title="Auto-captions from speech (local Whisper): transcribes the clips, overlays and voice items, then replaces any existing captions">
           <button id="captions" class="small">CC Captions</button>
+          <button id="keywords" class="small" title="Highlight key words in the captions (numbers, money, strong words): their own color and bigger. Ask Claude to pick words by meaning or add emoji.">★ Keywords</button>
           <select id="capPreset" title="Caption look"></select>
           <select id="capLang" title="Speech language">
             <option value="auto">Auto language</option><option value="en">English</option><option value="vi">Tiếng Việt</option>
@@ -120,6 +121,8 @@
             <option value="ja">日本語</option><option value="ko">한국어</option><option value="zh">中文</option><option value="th">ไทย</option><option value="id">Indonesia</option>
           </select>
         </span>
+        <button id="tighten" class="small" title="Cut the pauses and filler words (um, uh, ờ…) out of clips with speech, as jump cuts. One undo step.">✂ Remove pauses</button>
+        <button id="autoZoom" class="small" title="Zoom like a talking-head edit: frame every other jump cut tighter and punch in on emphasized words (or the loudest ones). One undo step; click again to redo it.">🔍 Auto zoom</button>
         <button id="cutRange" class="small" title="Remove the range marked with I / O and close the gap (Shift+Del)" disabled>⌫ Cut range</button>
         <button id="snap" class="small toggle" title="Snap to the playhead, clip edges, markers and other items while dragging">🧲 Snap</button>
         <label class="zoom">Zoom <input id="zoom" type="range" min="10" max="300" value="80" /></label>

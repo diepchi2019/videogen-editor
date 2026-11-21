@@ -91,6 +91,28 @@ function captionTags(st, W, H, font) {
   return textTags(t, n0(W / 2), n0(H * st.y), font) + `\\pos(${n0(W / 2)},${n0(H * st.y)})`;
 }
 
+// Emphasized caption words (word.em): their own color and a bigger size. The default color is yellow, or
+// green when the mode already lights the spoken word in yellow. Keep in sync with renderCaption in app.js.
+export function emphasisColor(st) {
+  if (st.emphasisColor) return st.emphasisColor;
+  const lit = ['karaoke', 'word', 'single'].includes(st.mode) && String(st.highlightColor || '').toLowerCase() === '#ffde00';
+  return lit ? '#4dff88' : '#ffde00';
+}
+// Emoji on caption words show above the line, from the word until the line ends (or the next emoji).
+// Returns [{emoji, start, end}] in timeline seconds; emojiBox gives the size and centre in canvas px.
+export function captionEmoji(captions, total = Infinity) {
+  const out = [];
+  for (const l of captions?.lines || []) {
+    const ws = l.words.filter((w) => w.emoji && w.start < Math.min(l.end, total));
+    ws.forEach((w, i) => out.push({ emoji: w.emoji, start: w.start, end: Math.min(i + 1 < ws.length ? ws[i + 1].start : l.end, total) }));
+  }
+  return out.filter((e) => e.end > e.start);
+}
+export function emojiBox(st, W, H) {
+  const size = Math.max(16, Math.round((st.size || 72) * 1.4));
+  return { size, x: W / 2, y: H * st.y - (st.size || 72) * 0.6 - size * 0.55 };
+}
+
 // Events for the caption lines in the chosen mode.
 export function captionEvents(captions, W, H, font, total = Infinity) {
   if (!captions?.lines?.length) return [];
@@ -100,6 +122,9 @@ export function captionEvents(captions, W, H, font, total = Infinity) {
   const word = (w) => assText(st.uppercase ? w.w.toUpperCase() : w.w);
   const cs = (d) => Math.max(0, Math.round(d * 100));
   const hl = assColor(st.highlightColor || '#ffde00'), col = assColor(st.color || '#ffffff');
+  const emDefault = emphasisColor(st), sc = Math.round((st.emphasisScale ?? 1.15) * 100);
+  const emc = (w) => assColor(typeof w.em === 'string' ? w.em : emDefault);
+  const big = `\\fscx${sc}\\fscy${sc}`, normal = '\\fscx100\\fscy100';
   const out = [];
   for (const l of captions.lines) {
     if (l.start >= total) continue;
@@ -108,6 +133,7 @@ export function captionEvents(captions, W, H, font, total = Infinity) {
       let prev = l.start;
       const body = l.words.map((w) => {
         const gap = cs(w.start - prev); prev = w.end;
+        if (w.em) return `${gap ? `{\\k${gap}}` : ''}{\\kf${cs(w.end - w.start)}\\1c${emc(w)}\\2c${emc(w)}${big}}${word(w)}{\\1c${hl}\\2c${col}${normal}}`;
         return `${gap ? `{\\k${gap}}` : ''}{\\kf${cs(w.end - w.start)}}${word(w)}`;
       }).join(' ');
       out.push({ start: l.start, end: le, style, text: `{${base}\\1c${hl}\\2c${col}\\fad(80,80)}${body}` });
@@ -116,17 +142,19 @@ export function captionEvents(captions, W, H, font, total = Infinity) {
         const a = i === 0 ? l.start : w.start;
         const b = Math.min(le, i + 1 < l.words.length ? l.words[i + 1].start : le);
         if (b <= a) return;
-        const body = l.words.map((x, j) => (j === i ? `{\\1c${hl}}${word(x)}{\\1c${col}}` : word(x))).join(' ');
+        const body = l.words.map((x, j) => (j === i ? `{\\1c${hl}${x.em ? big : ''}}${word(x)}{\\1c${col}${x.em ? normal : ''}}`
+          : x.em ? `{\\1c${emc(x)}${big}}${word(x)}{\\1c${col}${normal}}` : word(x))).join(' ');
         out.push({ start: a, end: b, style, text: `{${base}}${body}` });
       });
     } else if (st.mode === 'single') {
       l.words.forEach((w, i) => {
         const next = l.words[i + 1]?.start ?? le;
         const b = Math.min(le, Math.max(w.end, Math.min(next, w.end + 0.5), w.start + 0.15));
-        out.push({ start: w.start, end: b, style, text: `{${base}\\1c${hl}\\fscx80\\fscy80\\t(0,90,\\fscx100\\fscy100)}${word(w)}` });
+        const to = w.em ? sc : 100;
+        out.push({ start: w.start, end: b, style, text: `{${base}\\1c${w.em ? emc(w) : hl}\\fscx${Math.round(to * 0.8)}\\fscy${Math.round(to * 0.8)}\\t(0,90,\\fscx${to}\\fscy${to})}${word(w)}` });
       });
     } else {
-      out.push({ start: l.start, end: le, style, text: `{${base}\\fad(80,80)}${l.words.map(word).join(' ')}` });
+      out.push({ start: l.start, end: le, style, text: `{${base}\\fad(80,80)}${l.words.map((x) => (x.em ? `{\\1c${emc(x)}${big}}${word(x)}{\\1c${col}${normal}}` : word(x))).join(' ')}` });
     }
   }
   return out;

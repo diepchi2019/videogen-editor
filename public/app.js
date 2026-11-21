@@ -604,10 +604,23 @@ function renderCaption(t, k) {
   // Same style as captionTags in src/ass.js: outline 4 by default, no shadow.
   const fam = st.font || defaultFont;
   const look = textLook({ ...st, font: fam, outline: st.box ? undefined : (st.outline ?? 4), shadow: 0 }, k, fontInfo(fam).em, FALLBACK_FONTS);
-  return h('div', { class: 'ov-caption', style: { ...look, top: `${st.y * 100}%` } }, ...words.map((w, i) => {
-    const lit = st.mode === 'karaoke' ? t >= w.start : st.mode === 'word' ? l.words.indexOf(w) === cur : st.mode === 'single';
-    return h('span', { style: { color: lit ? st.highlightColor : st.color } }, up(w.w) + (i < words.length - 1 ? ' ' : ''));
+  // Emphasized words: same rules as captionEvents/emphasisColor in src/ass.js.
+  const emDefault = st.emphasisColor || (['karaoke', 'word', 'single'].includes(st.mode) && String(st.highlightColor).toLowerCase() === '#ffde00' ? '#4dff88' : '#ffde00');
+  const emSize = `${Math.round((st.emphasisScale ?? 1.15) * 100)}%`;
+  const capEl = h('div', { class: 'ov-caption', style: { ...look, top: `${st.y * 100}%` } }, ...words.map((w, i) => {
+    const idx = l.words.indexOf(w);
+    const lit = st.mode === 'karaoke' ? t >= w.start : st.mode === 'word' ? idx === cur : st.mode === 'single';
+    const em = w.em ? (typeof w.em === 'string' ? w.em : emDefault) : null;
+    const colr = st.mode === 'word' ? (lit ? st.highlightColor : em || st.color) : em || (lit ? st.highlightColor : st.color);
+    return h('span', { style: { color: colr, ...(em ? { fontSize: emSize } : {}) } }, up(w.w) + (i < words.length - 1 ? ' ' : ''));
   }));
+  // Emoji above the line (emojiBox in src/ass.js): from its word until the next emoji or the line end.
+  const emo = l.words.filter((w) => w.emoji && w.start <= t).pop();
+  if (!emo) return capEl;
+  const size = Math.max(16, Math.round((st.size || 72) * 1.4));
+  const pop = Math.min(1, Math.max(0, (t - emo.start) / 0.15)); // fades in like the export
+  const cy = P.settings.height * st.y - (st.size || 72) * 0.6 - size * 0.55;
+  return [capEl, h('div', { class: 'ov-emoji', style: { top: `${(cy / P.settings.height) * 100}%`, fontSize: `${(size * k * 0.85).toFixed(1)}px`, opacity: String(pop), transform: `translate(-50%, -50%) scale(${(0.6 + 0.4 * pop).toFixed(3)})` } }, emo.emoji)];
 }
 
 function renderTexts(t) {
@@ -633,7 +646,7 @@ function renderTexts(t) {
     return el;
   }));
   const cap = renderCaption(t, k);
-  if (cap) box.append(cap);
+  if (cap) box.append(...[cap].flat());
 }
 const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
 
@@ -1295,13 +1308,16 @@ const SETTING_GROUPS = [
   ['Text to speech', ['tts.engine', 'tts.elevenlabs.apiKey', 'tts.piperCommand']],
   ['Captions', ['captions.whisperModel']],
   ['Text', ['text.defaultFont']],
+  ['Export', ['export.loudness']],
 ];
+const CHOICE_LABELS = { 'export.loudness': { '-14': '-14 LUFS (TikTok, Reels, Shorts, YouTube)', '-16': '-16 LUFS (podcasts, Apple)', '-23': '-23 LUFS (TV broadcast)', off: 'Off (keep the mix as it is)' } };
 const SETTING_HELP = {
   'claude.apiKey': 'console.anthropic.com → API keys. Not needed when you edit from Claude Code (MCP).',
   'tts.elevenlabs.apiKey': 'elevenlabs.io → Developers → API keys. Pick the model and voice in the 🗣 Voice panel.',
   'tts.piperCommand': 'Path to a piper executable. Leave empty to use "python -m piper" (pip install piper-tts).',
   'captions.whisperModel': 'Models in models/. Auto picks the most accurate one found.',
   'text.defaultFont': 'Used by texts and captions that do not set a font.',
+  'export.loudness': 'Every export is measured and brought to this loudness, so reels are never too quiet or too loud next to others. Claude can override it per export.',
 };
 async function openSettings(focusKey) {
   $('#settingsDlg').hidden = false;
@@ -1336,7 +1352,7 @@ function renderSettings({ settings: S, choices: C }) {
       const opts = s.choices || (key === 'captions.whisperModel' ? ['', ...C.whisperModels] : key === 'claude.model' ? C.claudeModels : null);
       if (opts && key !== 'claude.model') {
         input = h('select', { disabled: s.source === 'env', onchange: (e) => saveSetting(key, e.target.value) },
-          ...opts.map((o) => h('option', { value: o, selected: (s.value || '') === o }, o || 'Auto')),
+          ...opts.map((o) => h('option', { value: o, selected: (s.value || '') === o }, CHOICE_LABELS[key]?.[o] || o || 'Auto')),
           s.value && !opts.includes(s.value) ? h('option', { value: s.value, selected: true }, s.value) : null);
       } else {
         const list = key === 'claude.model' ? 'dl-claude' : key === 'text.defaultFont' ? 'dl-fonts' : null;
@@ -1395,6 +1411,30 @@ $('#captions').onclick = async () => {
     const r = await tool('add_captions', { preset: $('#capPreset').value, language: $('#capLang').value });
     note.textContent = r.isError || r.error ? 'Captions failed' : `✓ ${String(r.content).split('\n')[0]}`;
   } finally { captioning = false; renderCaptionButton(); }
+};
+// Busy button + one line in the chat panel for the one-click talking-head tools.
+async function quickTool(btn, busy, name, input, failText) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = busy;
+  try {
+    const r = await tool(name, input);
+    addMsg('action', r.error ? `${failText}: ${r.error}` : `${r.isError ? '' : '✓ '}${String(r.content).replace(/ ?Check with look_at_timeline\.?/, '')}`);
+  } finally { btn.disabled = false; btn.textContent = label; }
+}
+$('#keywords').onclick = (e) => {
+  if (!P.captions?.lines?.length) return toast('Add captions first (CC Captions), then highlight their key words.');
+  quickTool(e.currentTarget, '★ …', 'emphasize_captions', { auto: true, clear: true }, 'Keywords failed');
+};
+$('#autoZoom').onclick = (e) => quickTool(e.currentTarget, '🔍 Zooming…', 'auto_zoom', {}, 'Auto zoom failed');
+$('#tighten').onclick = async (e) => {
+  if (whisperModel === null) return toast('Removing pauses needs a Whisper model (it reads where the words are). See the README.');
+  const b = e.currentTarget;
+  b.disabled = true; b.textContent = '✂ Finding pauses…';
+  const note = addMsg('action', 'Finding pauses and filler words… (the first run of a file transcribes it)');
+  try {
+    const r = await tool('remove_silences', {});
+    note.textContent = r.error ? `Remove pauses failed: ${r.error}` : `${r.isError ? '' : '✓ '}${String(r.content).split('\n').filter((l) => !/look_at_timeline/.test(l)).join(' ').replace(/ Check the jumps.*?\./, '')}`;
+  } finally { b.disabled = false; b.textContent = '✂ Remove pauses'; }
 };
 $('#cutRange').onclick = () => range && tool('delete_range', { start: +range.in.toFixed(3), end: +range.out.toFixed(3) }).then((r) => { if (!r.isError && !r.error) { range = null; renderTimeline(); } });
 $('#snap').onclick = () => { snapOn = !snapOn; store.set('snap', snapOn ? 'on' : 'off'); renderTimeline(); };

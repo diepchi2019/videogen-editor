@@ -4,7 +4,8 @@ import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { layout, overlayDuration, uid, spillOf, reframeTrack } from './model.js';
 import { DATA_DIR, EXPORT_DIR, MEDIA_DIR } from './store.js';
-import { buildAss } from './ass.js';
+import { buildAss, captionEmoji, emojiBox } from './ass.js';
+import { emojiFile } from './emoji.js';
 import { defaultFont, stageFonts } from './fonts.js';
 import { createJob, finishJob, getJob, listJobs } from './jobs.js';
 import { run } from './media.js';
@@ -612,6 +613,22 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     filters.push(`[${vPrev}]ass=filename=${q(assFile)}:fontsdir=${q(fontsDir)}:shaping=complex[vtxt]`);
     vPrev = 'vtxt';
   }
+  // Caption emoji: color PNGs over the text (libass would draw them black and white). Missing files are skipped.
+  if (project.captions) {
+    const kk = W / project.settings.width, b0 = emojiBox(project.captions.style, project.settings.width, project.settings.height);
+    const box = { size: even(b0.size * kk), x: b0.x * kk, y: b0.y * kk };
+    captionEmoji(project.captions, total).slice(0, 60).forEach((e, i) => {
+      const file = emojiFile(e.emoji);
+      if (!file) return;
+      const d = e.end - e.start;
+      args.push('-loop', '1', '-framerate', String(fps), '-t', f3(d), '-i', file);
+      const n = input++;
+      const pop = Math.min(0.15, d / 3);
+      filters.push(`[${n}:v]format=rgba,scale=${box.size}:${box.size},fade=t=in:st=0:d=${f3(pop)}:alpha=1,setpts=PTS+${f3(e.start)}/TB[em${i}]`);
+      filters.push(`[${vPrev}][em${i}]overlay=x=${f3(box.x - box.size / 2)}:y=${f3(box.y - box.size / 2)}:eof_action=pass:enable='between(t,${f3(e.start)},${f3(e.end)})'[vem${i}]`);
+      vPrev = `vem${i}`;
+    });
+  }
 
   // 5. Audio items (music, sfx, voice) mixed under the clip audio.
   project.music.forEach((m, i) => {
@@ -672,13 +689,46 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
   return { args, total, tmpDir, graph: filters.join(';\n') };
 }
 
-// opts: { quality, resolution, fps, bitrate, encoder } (see buildCommand).
+// ---------- Loudness: two-pass loudnorm on the finished file (EBU R128 integrated loudness) ----------
+export const TRUE_PEAK = -1.5;
+// The JSON block loudnorm prints with print_format=json (first pass).
+export function parseLoudnorm(stderr) {
+  const m = String(stderr).match(/\{[^{}]*"input_i"[^{}]*\}/);
+  if (!m) return null;
+  const j = JSON.parse(m[0]), v = (k) => Number(j[k]);
+  return { i: v('input_i'), tp: v('input_tp'), lra: v('input_lra'), thresh: v('input_thresh'), offset: v('target_offset') };
+}
+// Second pass with the measured values: linear gain when the peaks allow it (loudnorm falls back to its
+// dynamic mode otherwise). LRA is raised to the measured range so linear mode is not refused for that.
+export function loudnormFilter(target, m) {
+  const lra = Math.min(50, Math.max(11, Math.ceil(m.lra || 0)));
+  return `loudnorm=I=${target}:TP=${TRUE_PEAK}:LRA=${lra}:measured_I=${m.i}:measured_TP=${m.tp}:measured_LRA=${m.lra}:measured_thresh=${m.thresh}:offset=${m.offset}:linear=true:print_format=summary`;
+}
+export async function normalizeLoudness(file, target) {
+  let log = '';
+  await run('ffmpeg', ['-hide_banner', '-nostdin', '-i', file, '-vn', '-af', `loudnorm=I=${target}:TP=${TRUE_PEAK}:LRA=11:print_format=json`, '-f', 'null', '-'], { onStderr: (s) => { log += s; } });
+  const m = parseLoudnorm(log);
+  if (!m || !Number.isFinite(m.i) || m.i < -70) return { target, measured: null, applied: false, note: 'silent, left as it was' };
+  const was = `${m.i.toFixed(1)} LUFS`;
+  if (Math.abs(m.i - target) < 0.5 && m.tp <= TRUE_PEAK + 0.5) return { target, measured: m.i, applied: false, note: `already ${was}` };
+  const tmp = file.replace(/\.mp4$/i, '') + '.loud.mp4';
+  try {
+    await run('ffmpeg', ['-hide_banner', '-nostdin', '-y', '-i', file, '-map', '0:v?', '-map', '0:a', '-c:v', 'copy', '-af', loudnormFilter(target, m),
+      '-ar', '48000', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', tmp]);
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, { force: true }); }
+  return { target, measured: m.i, applied: true, note: `${target} LUFS (was ${was})` };
+}
+
+// opts: { quality, resolution, fps, bitrate, encoder, loudness (LUFS target or null) } (see buildCommand).
 export function startExport(project, opts = {}) {
   if (typeof opts === 'string') opts = { quality: opts };
   const quality = opts.quality || 'final';
   const tag = opts.resolution ? `-${opts.resolution}` : quality === 'draft' ? '-draft' : '';
   const file = `${(project.name || 'video').replace(/[^\w-]+/g, '_')}-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}${tag}.mp4`;
   const job = createJob('export', { file, quality, path: path.join(EXPORT_DIR, file) });
+  const loud = Number.isFinite(opts.loudness) ? opts.loudness : null;
+  const share = loud === null ? 0.99 : 0.95; // the loudness passes take the last few percent
   let cmd;
   try {
     cmd = buildCommand(project, path.join(EXPORT_DIR, file), { ...opts, quality });
@@ -693,13 +743,17 @@ export function startExport(project, opts = {}) {
     const s = d.toString();
     tail = (tail + s).slice(-4000);
     const m = /time=(\d+):(\d+):([\d.]+)/.exec(s);
-    if (m) job.progress = Math.min(0.99, (+m[1] * 3600 + +m[2] * 60 + +m[3]) / cmd.total);
+    if (m) job.progress = Math.min(share, share * (+m[1] * 3600 + +m[2] * 60 + +m[3]) / cmd.total);
   });
   p.on('error', (e) => finishJob(job, `Could not start ffmpeg: ${e.message}`));
   p.on('close', (code) => {
     fs.rmSync(cmd.tmpDir, { recursive: true, force: true });
-    if (code === 0) finishJob(job, null);
-    else finishJob(job, tail.split('\n').filter(Boolean).slice(-6).join('\n'));
+    if (code !== 0) return finishJob(job, tail.split('\n').filter(Boolean).slice(-6).join('\n'));
+    if (loud === null) return finishJob(job, null);
+    job.stage = 'loudness';
+    normalizeLoudness(job.path, loud)
+      .then((r) => { job.loudness = r; finishJob(job, null); })
+      .catch((e) => { job.loudness = { target: loud, applied: false, note: `not normalized (${e.message.slice(-200)})` }; finishJob(job, null); });
   });
   return job;
 }

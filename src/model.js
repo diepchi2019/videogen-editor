@@ -71,6 +71,9 @@ export const TEXT_STYLES = {
   sticker: { color: '#111111', box: true, boxColor: '#ffffff', bold: true, outline: 0, shadow: 0 },
 };
 
+// One emoji (pictograph, optionally with joiners and modifiers).
+export const EMOJI_RE = /^(?=.*\p{Extended_Pictographic})(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\u200d|\ufe0f)+$/u;
+
 // Caption style presets (see set_captions).
 export const CAPTION_STYLES = {
   classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.82 },
@@ -177,7 +180,7 @@ export function groupWords(words, { maxWords = 5, maxChars = 32, maxGap = 0.6 } 
       cur = { words: [], sentenceEnd: false };
       lines.push(cur);
     }
-    cur.words.push({ w: text, start: r3(w.start), end: r3(Math.max(w.end, w.start + 0.05)) });
+    cur.words.push({ w: text, start: r3(w.start), end: r3(Math.max(w.end, w.start + 0.05)), ...(w.em ? { em: w.em } : {}), ...(w.emoji ? { emoji: w.emoji } : {}) });
     cur.sentenceEnd = /[.!?…。！？]$/.test(text);
   }
   return lines.map((l, i) => {
@@ -249,7 +252,8 @@ export function summarize(p, extras = {}) {
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
     describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
-    (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : '') + describeReframe(c, c.start));
+    (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : '') + describeReframe(c, c.start) +
+    (c.autoZoom ? `, auto zoom (framing x${c.autoZoom.scale}${c.autoZoom.punches ? `, ${c.autoZoom.punches} punch-in${c.autoZoom.punches > 1 ? 's' : ''}` : ''})` : ''));
   const overlays = [...p.overlays].sort((a, b) => a.track - b.track || a.start - b.start).map((o) =>
     `- ${o.id} (track ${o.track}${o.styleRole ? `, style ${o.styleRole}` : ''}): asset ${o.assetId} ("${p.assets[o.assetId]?.name}"), timeline ${fmtT(o.start)}-${fmtT(o.start + overlayDuration(o))}s, source ${fmtT(o.in)}-${fmtT(o.out)}s` +
     (o.fit === 'free' ? `, center (${o.x},${o.y}) width ${o.scale} of frame` : `, fit ${o.fit}`) +
@@ -275,8 +279,9 @@ export function summarize(p, extras = {}) {
   if (p.captions?.lines?.length) {
     const st = p.captions.style;
     const shown = p.captions.lines.slice(0, extras.full ? Infinity : 40);
-    captions = `${p.captions.lines.length} lines, style ${st.preset} (mode ${st.mode}, size ${st.size}, y ${st.y}${st.font ? `, font "${st.font}"` : ''})\n` +
-      shown.map((l) => `- ${l.id} ${fmtT(l.start)}-${fmtT(l.end)}s: ${l.words.map((w) => w.w).join(' ')}`).join('\n') +
+    const nEm = p.captions.lines.reduce((k, l) => k + l.words.filter((w) => w.em || w.emoji).length, 0);
+    captions = `${p.captions.lines.length} lines, style ${st.preset} (mode ${st.mode}, size ${st.size}, y ${st.y}${st.font ? `, font "${st.font}"` : ''}${nEm ? `, ${nEm} emphasized words shown as *word*, emphasis color ${st.emphasisColor || 'auto'}` : ''})\n` +
+      shown.map((l) => `- ${l.id} ${fmtT(l.start)}-${fmtT(l.end)}s: ${l.words.map((w) => `${w.em ? `*${w.w}*` : w.w}${w.emoji ? ` ${w.emoji}` : ''}`).join(' ')}`).join('\n') +
       (shown.length < p.captions.lines.length ? `\n- … ${p.captions.lines.length - shown.length} more (get_timeline detail=full)` : '');
   }
   return [
@@ -582,7 +587,8 @@ function captionStyle(base, input) {
   for (const [k, min, max] of [['size', 8, 400], ['y', 0, 1], ['outline', 0, 40], ['maxWords', 1, 12]]) {
     const v = num(input[k], k, min, max); if (v !== undefined) st[k] = k === 'maxWords' ? Math.round(v) : r3(v);
   }
-  for (const k of ['color', 'highlightColor', 'outlineColor', 'boxColor']) { const v = color(input[k], k); if (v) st[k] = v; }
+  for (const k of ['color', 'highlightColor', 'outlineColor', 'boxColor', 'emphasisColor']) { const v = color(input[k], k); if (v) st[k] = v; }
+  const es = num(input.emphasisScale, 'emphasisScale', 1, 2); if (es !== undefined) st.emphasisScale = r3(es);
   for (const k of ['uppercase', 'box', 'bold']) { const v = bool(input[k]); if (v !== undefined) st[k] = v; }
   const f = font(input.font); if (f) st.font = f;
   return st;
@@ -597,7 +603,7 @@ const DEFAULT_CAPTION = { preset: 'classic', ...CAPTION_STYLES.classic, highligh
 export const STYLE_PARTS = ['canvas', 'clips', 'texts', 'captions', 'music', 'intro', 'outro', 'logo'];
 const STYLE_KEY = { texts: 'title' };
 const TITLE_KEYS = ['style', 'font', 'size', 'color', 'bold', 'italic', 'outline', 'outlineColor', 'shadow', 'shadowColor', 'blur', 'box', 'boxColor', 'animation', 'animationOut', 'x', 'y'];
-const CAPTION_KEYS = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'uppercase', 'box', 'bold', 'font'];
+const CAPTION_KEYS = ['preset', 'mode', 'size', 'y', 'outline', 'maxWords', 'color', 'highlightColor', 'outlineColor', 'boxColor', 'emphasisColor', 'emphasisScale', 'uppercase', 'box', 'bold', 'font'];
 const COLOR_INPUT_KEYS = [...COLOR_KEYS.map(([k]) => k), 'filter', 'filterIntensity', 'lut', 'lutIntensity'];
 const MUSIC_KEYS = [['volume', 0, 2], ['fadeIn', 0, 30], ['fadeOut', 0, 30], ['duck', 0, 1]];
 const pick = (o, keys) => Object.fromEntries(keys.filter((k) => o?.[k] !== undefined && o[k] !== null).map((k) => [k, o[k]]));
@@ -1516,6 +1522,69 @@ export const ops = {
     const lines = groupWords(words.map((w) => ({ w: w.w, start: +w.start, end: +w.end })), { maxWords: st.maxWords });
     p.captions = { style: st, lines };
     return `Captions: ${lines.length} lines (${words.length} words), style ${st.preset}, mode ${st.mode}`;
+  },
+
+  // Mark caption words for emphasis (no schema: emphasize_captions in tools.js finds the words).
+  // marks: [{lineId, index, em?: true|false|'#hex', emoji?: string|null}]; clear removes every mark first.
+  emphasize_words(p, { marks = [], clear, emphasisColor, emphasisScale }) {
+    if (!p.captions) fail('No captions yet. Use add_captions first.');
+    if (bool(clear)) for (const l of p.captions.lines) l.words = l.words.map(({ em, emoji, ...w }) => w);
+    let n = 0;
+    for (const m of marks) {
+      const l = p.captions.lines[findIn(p.captions.lines, m.lineId, 'caption line')];
+      const w = l.words[m.index];
+      if (!w) fail(`Line ${l.id} has no word ${m.index}`);
+      if (m.em !== undefined) {
+        if (m.em === false) delete w.em;
+        else w.em = m.em === true ? true : color(m.em, 'color');
+      }
+      if (m.emoji !== undefined) {
+        if (!m.emoji) delete w.emoji;
+        else if (!EMOJI_RE.test(m.emoji) || String(m.emoji).length > 16) fail(`"${m.emoji}" is not an emoji`);
+        else w.emoji = String(m.emoji);
+      }
+      n++;
+    }
+    if (emphasisColor !== undefined || emphasisScale !== undefined) p.captions.style = captionStyle(p.captions.style, { emphasisColor, emphasisScale });
+    const total = p.captions.lines.reduce((k, l) => k + l.words.filter((w) => w.em || w.emoji).length, 0);
+    return `${clear ? 'Cleared the emphasis, then marked' : 'Marked'} ${n} word(s); ${total} caption word(s) are emphasized now.`;
+  },
+
+  // Auto zoom (no schema: auto_zoom in tools.js plans it). clips: [{clipId, scale, punches: [{t, hold}]}] with
+  // punch times in timeline seconds. Replaces what an earlier auto zoom set (marked by clip.autoZoom); keeps
+  // scale keyframes the user made.
+  set_auto_zoom(p, { clips = [], amount = 1.15, clear }) {
+    const amt = num(amount, 'amount', 1.02, 1.6);
+    for (const c of p.clips) {
+      if (!c.autoZoom) continue;
+      if (c.transform?.scale === c.autoZoom.scale) { delete c.transform.scale; if (!Object.keys(c.transform).length) delete c.transform; }
+      if (c.keyframes?.scale?.auto) { delete c.keyframes.scale; if (!Object.keys(c.keyframes).length) delete c.keyframes; }
+      delete c.autoZoom;
+    }
+    if (bool(clear)) return 'Removed the auto zoom.';
+    const L = layout(p);
+    let framed = 0, punched = 0;
+    for (const e of clips) {
+      const c = p.clips[findClip(p, e.clipId)], lc = L.clips.find((x) => x.id === c.id);
+      const scale = r3(num(e.scale ?? 1, 'scale', 1, 1.6));
+      if (scale !== 1) { (c.transform ||= {}).scale = scale; framed++; }
+      const base = c.transform?.scale ?? 1;
+      const pts = [];
+      if (!c.keyframes?.scale) {
+        const peak = r3(Math.min(1.6, base + amt - 1));
+        for (const q of [...(e.punches || [])].sort((x, y) => x.t - y.t)) {
+          const t = q.t - lc.start, hold = num(q.hold ?? 1, 'hold', 0.2, 5);
+          const last = pts.length ? pts[pts.length - 1].t : -1;
+          if (t < 0.1 || t > lc.duration - 0.2 || t - 0.06 <= last) continue;
+          const back = Math.min(lc.duration, t + hold + 0.3);
+          pts.push({ t: r3(t - 0.06), v: base }, { t: r3(t), v: peak }, { t: r3(Math.min(t + hold, back - 0.01)), v: peak }, { t: r3(back), v: base });
+          punched++;
+        }
+        if (pts.length) (c.keyframes ||= {}).scale = { easing: 'linear', points: pts, auto: true };
+      }
+      if (scale !== 1 || pts.length) c.autoZoom = { scale, ...(pts.length ? { punches: pts.length / 4 } : {}) };
+    }
+    return `Auto zoom: ${framed} clip(s) framed tighter (x${clips.find((e) => (e.scale ?? 1) !== 1)?.scale ?? amt}) to hide jump cuts, ${punched} punch-in(s) on emphasis.`;
   },
 
   update_captions(p, input) {

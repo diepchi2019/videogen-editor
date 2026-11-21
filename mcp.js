@@ -84,7 +84,7 @@ const PROMPTS = [
 1. get_timeline, then look_at_asset on the videos to find the best moments.
 2. ${a.style ? `apply_style "${a.style}" first` : 'list_styles and apply_style the one that fits best'} so new clips, titles, captions and music follow it.
 3. Build the edit with batch_edit: strongest moment first, punchy cuts, a title in the first 2 seconds. If there is music, mark_beats and fit_clips_to_beats.
-4. add_captions if anyone speaks.
+4. If anyone speaks: remove_silences (tightens the pauses and drops um/uh), add_captions, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
 5. look_at_timeline to check framing and text, fix problems, then export_video with quality draft and wait true. Report the file path.`,
   },
   {
@@ -121,7 +121,7 @@ const PROMPTS = [
 2. find_moments on it with minDuration ${mn || 15}, maxDuration ${mx || 60}, count ${Math.max(8, 2 * (Number(a.count) || 3))}${a.topic ? `, query "${a.topic}"` : ''}.
 3. Read the excerpts and pick the ${a.count || 3} best that stand alone: a hook in the first seconds, one complete thought, a payoff at the end. Use get_transcript to move in/out to a better sentence if needed.
 4. For each pick: make_short with a short punchy title${a.style ? ` and styleId "${a.style}"` : ''}, open false except for the last one.
-5. make_short follows the speaker's face automatically. For the open short: look_at_timeline; if the framing is wrong (no face found, or the wrong person), auto_reframe with a different smoothness or reframe_clip with points read from look_at_asset grid frames. Do the same for the others with open_project.
+5. make_short follows the speaker's face automatically. In each short, remove_silences tightens the pauses (open_project first for the ones not open; captions move with the cuts). For the open short: look_at_timeline; if the framing is wrong (no face found, or the wrong person), auto_reframe with a different smoothness or reframe_clip with points read from look_at_asset grid frames. Do the same for the others with open_project.
 6. Tell me the project names, their source ranges and why you picked each.`;
     },
   },

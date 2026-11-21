@@ -1,6 +1,6 @@
 // End-to-end smoke test: start server on a temp data dir, upload, edit through tools, export, verify with ffprobe.
 // Also drives the MCP server (mcp.js) with a real MCP client.
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -381,6 +381,53 @@ try {
   await tool('open_project', { projectId: ms.projectId });
   s = await tool('get_timeline');
   ok(s.project.clips.length === 1 && s.project.texts[0]?.text === 'Best bit' && (!hasWhisper || s.project.captions?.lines?.length > 0), 'short has the clip, the title and captions');
+  // Remove silences: the talk has 1.5s, 2s and 1s of digital silence between the takes.
+  if (hasWhisper) {
+    await tool('create_project', { name: 'Tight talk', aspect: '16:9' });
+    await tool('add_clip', { assetId: talk.id });
+    const before = (await tool('get_timeline')).layout.duration;
+    const dry = await tool('remove_silences', { dryRun: true });
+    ok(/^Would cut [1-9]\d* pauses?/.test(dry.content) && (await tool('get_timeline')).layout.duration === before, `remove_silences dryRun: ${dry.content.split(':')[0]}`);
+    const rs = await tool('remove_silences', {});
+    const after = (await tool('get_timeline')).layout.duration;
+    // The 4.5s of inserted silence goes (less 0.3s kept per cut), plus the short natural pauses in the speech.
+    ok(/^Removed /.test(rs.content) && before - after > 3.6 && before - after < 11, `remove_silences: ${before.toFixed(1)}s -> ${after.toFixed(1)}s (${rs.content.split(':')[0]})`);
+    const again = await tool('remove_silences', {});
+    ok(/^Nothing to cut/.test(again.content), 'remove_silences a second time finds nothing');
+    // Keyword highlight with an emoji, then auto zoom. The emoji image is put in place first (no download in tests).
+    await tool('add_captions', {});
+    fs.mkdirSync(path.join(data, 'emoji'), { recursive: true });
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x00ff00:s=64x64', '-frames:v', '1', path.join(data, 'emoji', 'emoji_u1f525.png')]);
+    let tp = (await tool('get_timeline')).project;
+    const line = [...tp.captions.lines].sort((x, y) => (y.end - y.words.at(-1).start) - (x.end - x.words.at(-1).start))[0];
+    const kw = line.words.at(-1);
+    const emr = await tool('emphasize_captions', { words: [{ text: kw.w, at: kw.start, emoji: '🔥' }], auto: true });
+    tp = (await tool('get_timeline')).project;
+    const marked = tp.captions.lines.flatMap((l) => l.words).filter((w) => w.em);
+    ok(marked.length >= 1 && marked.some((w) => w.emoji === '🔥') && !/could not be downloaded/.test(emr.content), `emphasize_captions: ${emr.content.split(/\r?\n/)[0]} (${marked.map((w) => w.w).join(', ')})`);
+    const az = await tool('auto_zoom', {});
+    tp = (await tool('get_timeline')).project;
+    ok(tp.clips.some((c) => c.transform?.scale === 1.15) && tp.clips.some((c) => c.keyframes?.scale?.auto) && /punch-in/.test(az.content), `auto_zoom: ${az.content.split(' Check')[0]}`);
+    const lx = await tool('export_video', { quality: 'draft', wait: true });
+    const lout = /done 100% file: (.+?\.mp4)/.exec(lx.content)?.[1];
+    // The emoji (green square) sits above the caption line in the export (draft = half size).
+    const cst = tp.captions.style, esz = Math.round(cst.size * 1.4), ecy = (1080 * cst.y - cst.size * 0.6 - esz * 0.55) / 2;
+    const emPix = [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(kw.start + 0.3), '-i', lout, '-frames:v', '1', '-vf', `crop=8:8:476:${Math.round(ecy) - 4},scale=1:1`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
+    ok(emPix[1] > 180 && emPix[0] < 90 && emPix[2] < 90, `caption emoji drawn in color above the line (pixel ${emPix.join('/')})`);
+    const meas = spawnSync('ffmpeg', ['-hide_banner', '-nostdin', '-i', lout, '-af', 'ebur128', '-f', 'null', '-'], { encoding: 'utf8' }).stderr;
+    const I = Number(/I:\s+(-?[\d.]+) LUFS\s+Threshold/.exec(meas)?.[1]);
+    ok(/loudness: -14 LUFS \(was/.test(lx.content) && Math.abs(I + 14) < 1.5, `export normalized to ${I} LUFS (${/loudness: .*/.exec(lx.content)?.[0]})`);
+    // No word lost: Whisper hears the same words in the tightened export.
+    const tf = new FormData();
+    tf.append('files', new Blob([fs.readFileSync(lout)]), 'tight.mp4');
+    const tight = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: tf })).json()).added[0];
+    const wordsOf = async (id) => (await tool('get_transcript', { assetId: id })).content.split(/\r?\n/).slice(1).join(' ').toLowerCase().match(/[a-z']+/g) || [];
+    const [w0, w1] = [await wordsOf(talk.id), await wordsOf(tight.id)];
+    const lost = w0.filter((w) => !w1.includes(w));
+    ok(w0.length >= 8 && Math.abs(w0.length - w1.length) <= 3 && lost.length <= 1, `tightened export keeps the words (${w0.length} -> ${w1.length}${lost.length ? `, missing ${lost.join(' ')}` : ''})`);
+    const ux = await tool('export_video', { quality: 'draft', wait: true, loudness: 'off' });
+    ok(!/loudness:/.test(ux.content), 'export with loudness off skips it');
+  } else console.log('skip - remove silences (no whisper model)');
   await tool('open_project', { projectId: firstId });
 
   // --- MCP server over stdio ---

@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 57 CapCut features listed, VideoGen has 49 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips and text to speech). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
+Of the 61 CapCut features listed, VideoGen has 53 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights and auto zoom). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -45,7 +45,8 @@ Of the 57 CapCut features listed, VideoGen has 49 and 2 more in part (updated No
 | Text | Fonts, outline, shadow, styles presets | Yes | Have (any installed or imported font, 8 style presets) | P0 |
 | Text | Auto-captions from speech | Yes | Have (local Whisper, cached per file) | P0 |
 | Text | Word-by-word karaoke captions | Yes | Have (karaoke, word highlight, single word, line) | P0 |
-| Text | Stickers, emoji, GIFs | Yes | Partial (transparent PNG and animated GIF stickers as overlays: GIFs loop, pop-in animation; no emoji or sticker library) | P2 |
+| Text | Stickers, emoji, GIFs | Yes | Partial (transparent PNG and animated GIF stickers as overlays: GIFs loop, pop-in animation; color emoji on caption words; no emoji or sticker library) | P2 |
+| Text | Keyword highlight in captions | Yes | Have (emphasize_captions and ★ Keywords: own color, bigger, optional emoji above the line; Claude picks by meaning or auto picks numbers and strong words) | P1 |
 | Text | Text to speech | Yes | Have (local Piper voices, free, auto-picked by language; or ElevenLabs with your API key for expressive voices and [excited]-style tags; Expressive slider; added as a voice track, so ducking, voice effects and captions apply; 🗣 Voice panel; no lipsync) | P1 |
 | Audio | Music track with fades | Yes | Have | P0 |
 | Audio | Multiple audio tracks, sound effects | Yes | Have (music / sfx / voice roles, numbered tracks) | P0 |
@@ -54,6 +55,8 @@ Of the 57 CapCut features listed, VideoGen has 49 and 2 more in part (updated No
 | Audio | Voiceover recording | Yes | Have (records from the playhead onto a voice track) | P1 |
 | Audio | Ducking music under speech | Yes | Have (sidechain compression keyed by clip audio + voice; export only) | P1 |
 | Audio | Noise reduction, voice effects | Yes | Have (noise reduction, 8 voice effects and pitch shift on clips, overlays and audio items; export only) | P2 |
+| Clip | Auto zoom on talking heads (jump-cut framing, punch-ins) | Yes | Have (auto_zoom and 🔍 Auto zoom: every other jump cut framed tighter, punch-ins on highlighted or loudest words) | P1 |
+| Audio | Remove silences and filler words | Yes | Have (remove_silences and the ✂ Remove pauses button: cuts the quiet stretches between Whisper words and um/uh/ờ/ừm, one undo step, captions ripple) | P1 |
 | Audio | Royalty-free music library | Yes | Missing | P2 |
 | AI | Background removal (no green screen) | Yes | Missing | P2 |
 | AI | Auto reframe (16:9 to 9:16 following the subject) | Yes | Have (local face detector: the crop follows the main face, smooth within a shot, jumps at cuts; auto_reframe tool and ⌖ button, used by make_short; non-face subjects via reframe_clip with Claude reading gridded frames) | P1 |
@@ -71,6 +74,7 @@ Of the 57 CapCut features listed, VideoGen has 49 and 2 more in part (updated No
 | Export | Resolution, fps, bitrate choice | Yes | Have (480p-2160p, fps, Mbps, draft) | P1 |
 | Export | Export cover image / thumbnail | Yes | Have (export_cover: full-size JPEG of any frame) | P1 |
 | Export | GPU encoding | Yes | Have (NVENC, Quick Sync, AMF; encoder gpu/auto) | P2 |
+| Export | Loudness normalization | Yes | Have (two-pass loudnorm after every export, -14 LUFS by default, set in Settings or per export) | P1 |
 | Export | Publish to TikTok / YouTube / Facebook | Yes (TikTok, YouTube) | Missing | P2 |
 
 ## MCP server features
@@ -119,7 +123,7 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe (done Nov 21, 2026: local face detector, `auto_reframe`), text to speech (done Nov 21, 2026: local Piper voices, `add_voiceover`), connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
+Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
 
 ### Auto-captions setup (added Nov 5, 2026)
 

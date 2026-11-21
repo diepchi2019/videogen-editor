@@ -1343,3 +1343,113 @@ test('faces: YuNet decoding, NMS, subject tracking (gaps, two people, cuts), smo
   assert.ok(sm[2] < 0.5 && sm[0] === 0 && sm[5] === 0.5);
   assert.deepEqual(F.simplify([[0, 0, 0], [1, 0.5, 0], [2, 1, 0]], 0.02), [[0, 0, 0], [2, 1, 0]]);
 });
+
+test('pauses: cut long pauses, fillers and silent edges; keep pauses with sound and clips without speech', async () => {
+  const { findPauseCuts, peakDb, quietRuns, norm } = await import('../src/pauses.js');
+  const W = (w, start, end) => ({ w, start, end });
+  const words = [W('Hello', 0.7, 0.9), W('world.', 1.0, 1.4), W('So', 2.6, 2.8), W('um,', 2.9, 3.2), W('this', 3.3, 3.5), W('works', 3.6, 4.0), W('fine', 5.5, 5.9)];
+  const quiet = () => -60;
+  // A loudness curve (50 ms steps): each word sounds 0.1s past the end Whisper gives it, and a cough at 4.5-5.0.
+  const loud = [...words.map((w) => [w.start, w.end + 0.1]), [4.5, 5.0]];
+  const curve = { step: 0.05, db: Array.from({ length: 140 }, (_, i) => (loud.some(([x, y]) => i * 0.05 + 0.025 >= x && i * 0.05 + 0.025 < y) ? -20 : -60)) };
+  let r = findPauseCuts([{ lo: 0, hi: 7, words, level: (x, y) => peakDb(curve, x, y), quiet: (x, y, t) => quietRuns(curve, x, y, t) }]);
+  const k = (c) => `${c.kind} ${c.start}-${c.end}`;
+  assert.deepEqual(r.cuts.map(k), ['edge 0-0.55', 'pause 1.65-2.45', 'filler 2.95-3.15', 'edge 6.15-7'], 'cuts start where the voice has faded, not at the word end');
+  assert.equal(r.keptSound, 1, 'the 4.0-5.5 pause has a cough in it and no quiet stretch of 0.6s');
+  assert.deepEqual(r.fillers, { um: 1 });
+  // Without loudness every long pause goes; fillers off keeps "um" (its 0.1s gaps are short).
+  r = findPauseCuts([{ lo: 0, hi: 7, words }], { fillers: false });
+  assert.deepEqual(r.cuts.map(k), ['edge 0-0.55', 'pause 1.55-2.45', 'pause 4.15-5.35', 'edge 6.05-7']);
+  // minPause, keep, extra filler words, spans limited to lo..hi, a clip without words untouched.
+  r = findPauseCuts([{ lo: 0, hi: 3, words: words.slice(0, 4), level: quiet }, { lo: 3, hi: 9, words: [] }], { minPause: 1.5, keep: 0, extraFillers: ['So'] });
+  assert.deepEqual(r.cuts.map(k), ['filler 1.4-3']);
+  assert.deepEqual(r.fillers, { so: 1 }, '"um" is centred past hi, so it belongs to the next span');
+  assert.equal(norm('Ừm,'), 'ừm');
+  assert.equal(peakDb({ step: 0.5, db: [-60, -10, -50] }, 1.0, 1.4), -50);
+  assert.equal(peakDb({ step: 0.5, db: [-60, -10, -50] }, 0.2, 0.7), -10);
+  assert.deepEqual(quietRuns({ step: 0.5, db: [-60, -60, -10, -50] }, 0.2, 2, -30), [{ s: 0.2, e: 1 }, { s: 1.5, e: 2 }]);
+});
+
+test('loudness: parse the loudnorm measurement and build the second pass', async () => {
+  const { parseLoudnorm, loudnormFilter } = await import('../src/render.js');
+  const log = `[Parsed_loudnorm_0 @ 0x1]\n{\n\t"input_i" : "-23.41",\n\t"input_tp" : "-6.02",\n\t"input_lra" : "14.20",\n\t"input_thresh" : "-34.01",\n\t"output_i" : "-14.2",\n\t"normalization_type" : "dynamic",\n\t"target_offset" : "0.21"\n}\n`;
+  const m = parseLoudnorm(log);
+  assert.deepEqual(m, { i: -23.41, tp: -6.02, lra: 14.2, thresh: -34.01, offset: 0.21 });
+  assert.equal(loudnormFilter(-14, m), 'loudnorm=I=-14:TP=-1.5:LRA=15:measured_I=-23.41:measured_TP=-6.02:measured_LRA=14.2:measured_thresh=-34.01:offset=0.21:linear=true:print_format=summary');
+  assert.equal(parseLoudnorm('no json here'), null);
+});
+
+test('emphasis: keyword picks, phrase search, emphasize_words op, ASS colors and sizes, caption emoji', async () => {
+  const { pickKeywords, findPhrase } = await import('../src/emphasis.js');
+  const { captionEmoji, emojiBox, emphasisColor } = await import('../src/ass.js');
+  const { emojiName } = await import('../src/emoji.js');
+  const L = (id, start, text) => ({ id, start, end: start + 2, words: text.split(' ').map((w, i) => ({ w, start: start + i * 0.4, end: start + i * 0.4 + 0.3 })) });
+  const lines = [L('a', 0, 'I made $10,000 last month'), L('b', 2, 'with one ridiculous trick'), L('c', 4, 'and honestly everybody can'), L('d', 6, 'learn this incredible method'), L('e', 8, 'Ten thousand dollars, really')];
+  assert.deepEqual(pickKeywords(lines), [{ lineId: 'a', index: 2 }, { lineId: 'c', index: 2 }, { lineId: 'e', index: 1 }]);
+  assert.deepEqual(findPhrase(lines, 'ten THOUSAND dollars'), [{ lineId: 'e', from: 0, to: 2, start: 8 }]);
+  assert.deepEqual(findPhrase(lines, 'trick.').map((h) => h.lineId), ['b']);
+  assert.deepEqual(findPhrase(lines, 'nope'), []);
+
+  const p = M.emptyProject();
+  p.captions = { style: { mode: 'line', size: 72, y: 0.8, color: '#ffffff', highlightColor: '#ffde00' }, lines: structuredClone(lines) };
+  M.ops.emphasize_words(p, { marks: [{ lineId: 'a', index: 2, em: true, emoji: '💰' }, { lineId: 'b', index: 2, em: '#ff0000' }] });
+  assert.deepEqual(p.captions.lines[0].words[2], { w: '$10,000', start: 0.8, end: 1.1, em: true, emoji: '💰' });
+  assert.throws(() => M.ops.emphasize_words(p, { marks: [{ lineId: 'a', index: 0, emoji: '12' }] }), /not an emoji/);
+  assert.throws(() => M.ops.emphasize_words(p, { marks: [{ lineId: 'a', index: 0, em: 'red' }] }), /color/i);
+  assert.match(M.summarize(p), /I made \*\$10,000\* 💰 last month/);
+  // Regrouping (maxWords change) keeps the marks.
+  M.ops.update_captions(p, { maxWords: 3 });
+  assert.ok(p.captions.lines.flatMap((l) => l.words).some((w) => w.em === '#ff0000' && w.w === 'ridiculous'));
+  const ev = (await import('../src/ass.js')).captionEvents(p.captions, 1080, 1920, 'Arial');
+  assert.ok(ev.some((e) => e.text.includes(String.raw`{\1c&H00DEFF&\fscx115\fscy115}$10,000{\1c&HFFFFFF&\fscx100\fscy100}`)), 'line mode: yellow and bigger');
+  assert.ok(ev.some((e) => e.text.includes(String.raw`{\1c&H0000FF&\fscx115\fscy115}ridiculous`)), 'own color');
+  assert.equal(emphasisColor({ mode: 'karaoke', highlightColor: '#FFDE00' }), '#4dff88');
+  assert.equal(emphasisColor({ mode: 'line', highlightColor: '#ffde00' }), '#ffde00');
+  assert.equal(emphasisColor({ mode: 'word', emphasisColor: '#123456' }), '#123456');
+  const em = captionEmoji(p.captions, 100);
+  assert.equal(em.length, 1);
+  assert.equal(em[0].emoji, '💰');
+  assert.ok(em[0].start === 0.8 && em[0].end === p.captions.lines.find((l) => l.words.some((w) => w.emoji)).end);
+  const box = emojiBox({ size: 100, y: 0.8 }, 1080, 1920);
+  assert.equal(box.size, 140);
+  assert.ok(Math.abs(box.y - (1536 - 60 - 77)) < 1e-9);
+  M.ops.emphasize_words(p, { clear: true, emphasisColor: '#00ff00', emphasisScale: 1.3 });
+  assert.ok(!p.captions.lines.flatMap((l) => l.words).some((w) => w.em || w.emoji));
+  assert.equal(p.captions.style.emphasisScale, 1.3);
+  assert.equal(emojiName('❤️'), 'emoji_u2764.png');
+  assert.equal(emojiName('👍🏽'), 'emoji_u1f44d_1f3fd.png');
+});
+
+test('auto zoom: alternate framing on jump cuts, punch-ins spaced out, op replaces its own work only', async () => {
+  const { planAutoZoom } = await import('../src/emphasis.js');
+  const C = (id, assetId, inn, out, start, tr) => ({ id, assetId, in: inn, out, start, end: start + out - inn, ...(tr ? { transition: { type: tr, duration: 0.5 } } : {}) });
+  const clips = [C('c1', 'v', 0, 3, 0), C('c2', 'v', 4, 7, 3), C('c3', 'v', 8, 12, 6), C('c4', 'w', 0, 3, 10), C('c5', 'w', 3.5, 6, 13, 'fade')];
+  let r = planAutoZoom(clips, { amount: 1.2, times: [1, 1.5, 7, 9.2, 13.05] });
+  assert.deepEqual(r.clips, [
+    { clipId: 'c1', scale: 1, punches: [{ t: 1, hold: 1.2 }] },
+    { clipId: 'c2', scale: 1.2, punches: [] },
+    { clipId: 'c3', scale: 1, punches: [{ t: 7, hold: 1.2 }] },
+  ], 'c4 starts a new file, c5 has a transition: no framing; 1.5 is too close to 1, 9.2 to 7; 13.05 is at the very start of c5');
+  assert.equal(r.jumpCuts, 2);
+  // Loudest words when no times are given: well above the median, spaced, about one per 4 s.
+  const loud = [0.5, 1.2, 2.0, 4.6, 5.0, 7.5, 8.0, 9.0].map((s, i) => ({ start: s, end: s + 0.3, db: [-30, -30, -30, -18, -30, -20, -16, -30][i] }));
+  r = planAutoZoom(clips, { cuts: false, loudWords: loud });
+  assert.deepEqual(r.clips.flatMap((e) => e.punches.map((q) => q.t)), [4.6, 8]);
+
+  const p = M.emptyProject();
+  p.assets.v = { id: 'v', type: 'video', file: 'v.mp4', duration: 20, width: 1920, height: 1080, hasAudio: true };
+  for (const [a, b] of [[0, 3], [4, 7], [8, 12]]) M.ops.add_clip(p, { assetId: 'v', in: a, out: b });
+  const ids = p.clips.map((c) => c.id);
+  M.ops.set_clip(p, { clipId: ids[0], scale: 1.05 });
+  M.ops.set_keyframes(p, { clipId: ids[2], property: 'scale', keyframes: [{ t: 6, value: 1 }, { t: 9, value: 1.4 }] });
+  const msg = M.ops.set_auto_zoom(p, { amount: 1.2, clips: [{ clipId: ids[0], scale: 1, punches: [{ t: 1, hold: 1 }] }, { clipId: ids[1], scale: 1.2, punches: [] }, { clipId: ids[2], scale: 1, punches: [{ t: 7, hold: 1 }] }] });
+  assert.match(msg, /1 clip\(s\) framed tighter .*1 punch-in/);
+  assert.deepEqual(p.clips[0].keyframes.scale, { easing: 'linear', auto: true, points: [{ t: 0.94, v: 1.05 }, { t: 1, v: 1.25 }, { t: 2, v: 1.25 }, { t: 2.3, v: 1.05 }] });
+  assert.equal(p.clips[1].transform.scale, 1.2);
+  assert.equal(p.clips[2].keyframes.scale.auto, undefined, 'own keyframes kept, no punch on them');
+  assert.match(M.summarize(p), /auto zoom \(framing x1\.2\)/);
+  M.ops.set_auto_zoom(p, { clear: true });
+  assert.equal(p.clips[0].transform.scale, 1.05, 'the user scale stays');
+  assert.ok(!p.clips[0].keyframes && !p.clips[1].transform && !p.clips.some((c) => c.autoZoom));
+  assert.deepEqual(p.clips[2].keyframes.scale.points.map((q) => q.v), [1, 1.4]);
+});

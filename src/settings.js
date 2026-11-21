@@ -17,6 +17,7 @@ export const SETTINGS = {
   'tts.elevenlabs.voice': { default: null, label: 'ElevenLabs voice' },
   'tts.piperCommand': { env: 'VIDEOGEN_PIPER', default: null, label: 'Piper executable (empty = python -m piper)' },
   'captions.whisperModel': { env: 'VIDEOGEN_WHISPER_MODEL', default: null, label: 'Whisper model (empty = most accurate found)' },
+  'export.loudness': { default: '-14', choices: ['-14', '-16', '-23', 'off'], label: 'Loudness of exported videos (LUFS)' },
   'text.defaultFont': { env: 'VIDEOGEN_FONT', default: null, label: 'Default text font (empty = Arial or the first common sans)' },
 };
 
