@@ -655,6 +655,10 @@ function renderTexts(t) {
   }));
   const cap = renderCaption(t, k);
   if (cap) box.append(...[cap].flat());
+  const pb = P.progressBar, bar = $('#progressBar');
+  bar.hidden = !pb;
+  if (pb) Object.assign(bar.style, { background: pb.color, height: `${Math.max(1, pb.height * k)}px`, width: `${Math.min(100, (t / Math.max(0.01, L.duration)) * 100)}%`, top: pb.position === 'top' ? '0' : '', bottom: pb.position === 'top' ? '' : '0' });
+  if (!$('#transcriptPanel').hidden) markTranscript(t);
 }
 const hexA = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
 
@@ -705,7 +709,7 @@ function renderTimeline() {
   const marks = (P.markers || []).map((m) => h('div', {
     class: `mk ${m.kind}`, style: { left: `${m.t * pps}px` }, title: `${m.kind}${m.label ? ` "${m.label}"` : ''} at ${m.t.toFixed(2)}s`,
     onpointerdown: (e) => { e.stopPropagation(); seek(m.t); },
-  }, m.kind === 'note' && m.label ? m.label : ''));
+  }, (m.kind === 'note' || m.kind === 'chapter') && m.label ? m.label : ''));
   $('#ruler').replaceChildren(...ticks, ...marks);
 
   // video track
@@ -1047,6 +1051,10 @@ function renderInspector() {
         if (!r.isError && !r.error) addMsg('assistant', String(r.content).split('\n').slice(1, 2).join(' ').replace(/^#\d+ \S+: /, 'Auto reframe: '));
         e.target.disabled = false; e.target.textContent = '⌖ Auto reframe';
       } }, '⌖ Auto reframe') : null,
+      a.type === 'video' && !c.freeze ? (c.stabilize
+        ? h('span', { class: 'note', title: 'Camera shake is smoothed in the export' }, `〰 stabilized ${c.stabilize}`, h('button', { class: 'small ghost', title: 'Remove the stabilization', onclick: () => tool('stabilize_clip', { clipId: c.id, off: true }) }, '✕'))
+        : h('button', { class: 'small', title: 'Smooth out camera shake (analyses the clip, then the export is stabilized)', onclick: (e) => quickTool(e.target, '〰 Analysing…', 'stabilize_clip', { clipId: c.id }, 'Stabilize failed') }, '〰 Stabilize')) : null,
+      P.clips.length > 1 && a.type !== 'audio' ? h('button', { class: 'small', title: 'Make every other clip match the colors of this one', onclick: (e) => quickTool(e.target, '🎨 Matching…', 'match_color', { referenceClipId: c.id }, 'Match color failed') }, '🎨 Match others to this') : null,
       c.reframe ? h('span', { class: 'note', title: 'The crop follows the subject (set by reframe_clip: ask Claude to reframe this clip)' },
         `⌖ reframe: ${c.reframe.points.length} point${c.reframe.points.length > 1 ? 's' : ''}${c.reframe.zoom ? `, ${c.reframe.zoom}x` : ''}`,
         h('button', { class: 'small ghost', title: 'Remove the reframe', onclick: () => tool('reframe_clip', { clipId: c.id, points: [] }) }, '✕')) : null,
@@ -1234,7 +1242,7 @@ $('#chatReset').onclick = async () => { await api('/api/chat/reset', {}); $('#me
 
 // ---------- Live updates (edits from chat / Claude Code MCP) ----------
 const es = new EventSource('/api/events');
-es.addEventListener('project', (e) => { const d = JSON.parse(e.data); setState({ project: d.project, layout: d.layout }); });
+es.addEventListener('project', (e) => { const d = JSON.parse(e.data); setState({ project: d.project, layout: d.layout }); transcriptChanged(); });
 es.addEventListener('jobs', (e) => { jobs = JSON.parse(e.data); renderJobs(); });
 es.addEventListener('chat-action', (e) => {
   const d = JSON.parse(e.data);
@@ -1460,6 +1468,80 @@ $('#checkReel').onclick = async (e) => {
     if (r.issues?.some((i) => i.area === 'safe zone') && !safeOn) { safeOn = true; renderSafe(); }
   } finally { b.disabled = false; }
 };
+$('#studioVoice').onclick = (e) => {
+  const on = P.clips.some((c) => c.enhance) || P.music.some((m) => m.enhance);
+  quickTool(e.currentTarget, '🎙 …', 'enhance_voice', on ? { off: true } : {}, 'Studio voice failed');
+};
+// ---------- Transcript (edit by text) ----------
+let trWords = [], trTimer = null;
+function renderTranscript(words) {
+  trWords = words;
+  const lines = [];
+  let cur = null;
+  words.forEach((w, i) => {
+    const prev = words[i - 1];
+    if (!cur || /[.!?…]$/.test(prev.w) || w.start - prev.end > 0.6 || cur.length >= 14) lines.push(cur = []);
+    cur.push(i);
+  });
+  $('#trText').replaceChildren(...lines.map((ids) => h('p', {}, h('span', { class: 'tt' }, fmt(words[ids[0]].start)),
+    ...ids.flatMap((i) => [h('span', { class: 'tw', 'data-i': String(i), onclick: (e) => { if (!String(getSelection())) seek(words[i].start + 0.01); e.stopPropagation(); } }, words[i].w), ' ']))));
+}
+function markTranscript(t) {
+  const i = trWords.findIndex((w, k) => t >= w.start && t < (trWords[k + 1]?.start ?? w.end + 0.3));
+  const prev = $('#trText .tw.now');
+  if (prev && prev.dataset.i === String(i)) return;
+  prev?.classList.remove('now');
+  const el = i >= 0 && $(`#trText .tw[data-i="${i}"]`);
+  if (el) { el.classList.add('now'); if (playing) el.scrollIntoView({ block: 'nearest' }); }
+}
+async function loadTranscript(transcribe) {
+  $('#trNote').textContent = transcribe ? 'Reading the speech… (the first time a file is transcribed it takes a while)' : '';
+  const r = await tool('get_timeline_transcript', { transcribe });
+  if (r.error || r.isError) { $('#trNote').textContent = r.error || r.content; return; }
+  renderTranscript(r.words || []);
+  $('#trNote').textContent = r.words?.length ? 'Click a word to jump there. Select words and press Delete to cut them out of the video (Ctrl+Z undoes).' : String(r.content);
+}
+$('#transcriptBtn').onclick = () => {
+  const show = $('#transcriptPanel').hidden;
+  $('#transcriptPanel').hidden = !show;
+  $('#messages').hidden = show; $('#chatForm').hidden = show;
+  $('#transcriptBtn').classList.toggle('on', show);
+  if (show) loadTranscript(true);
+};
+function selectedWordRange() {
+  const sel = getSelection();
+  if (!sel.rangeCount || sel.isCollapsed) return null;
+  const ids = [...$('#trText').querySelectorAll('.tw')].filter((el) => sel.containsNode(el, true)).map((el) => Number(el.dataset.i));
+  return ids.length ? { start: trWords[ids[0]].start, end: trWords[ids[ids.length - 1]].end } : null;
+}
+async function cutSelection() {
+  const r = selectedWordRange();
+  if (!r) return toast('Select the words to cut first (drag over them).');
+  getSelection().removeAllRanges();
+  const res = await tool('cut_transcript', { ranges: [r] });
+  if (!res.error && !res.isError) addMsg('action', `✓ ${String(res.content).split('\n').slice(0, 2).join(' ')}`);
+}
+$('#trCut').onclick = cutSelection;
+$('#trText').addEventListener('keydown', (e) => { if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); e.stopPropagation(); cutSelection(); } });
+$('#trRetakes').onclick = async (e) => {
+  const b = e.currentTarget;
+  b.disabled = true;
+  try {
+    const dry = await tool('remove_retakes', { dryRun: true });
+    if (dry.error || dry.isError) return toast(dry.error || dry.content);
+    if (/^No retakes/.test(dry.content)) return toast(dry.content);
+    if (!confirm(`${dry.content}\n\nRemove them?`)) return;
+    const r = await tool('remove_retakes', {});
+    addMsg('action', r.error ? `Retakes failed: ${r.error}` : `✓ ${r.content}`);
+  } finally { b.disabled = false; }
+};
+$('#trReload').onclick = () => loadTranscript(true);
+// Edits change the timeline times: refresh the words (cached transcripts only, quick).
+function transcriptChanged() {
+  if ($('#transcriptPanel').hidden) return;
+  clearTimeout(trTimer);
+  trTimer = setTimeout(() => loadTranscript(false), 400);
+}
 $('#autoZoom').onclick = (e) => quickTool(e.currentTarget, '🔍 Zooming…', 'auto_zoom', {}, 'Auto zoom failed');
 $('#tighten').onclick = async (e) => {
   if (whisperModel === null) return toast('Removing pauses needs a Whisper model (it reads where the words are). See the README.');

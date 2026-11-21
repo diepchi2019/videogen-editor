@@ -1,3 +1,4 @@
+[hidden] { display: none !important; }
 :root {
   --bg: #0f1013; --panel: #17181d; --panel2: #1e2027; --line: #2a2d36; --text: #e8e9ee; --muted: #8b8f9c;
   --accent: #19d3c5; --accent2: #7c5cff; --video: #2f6bff; --textc: #d9a400; --music: #1fb36b; --danger: #ff5a5f;
@@ -119,6 +120,16 @@ button:disabled { opacity: .45; cursor: default; }
 .block.music span { position: relative; }
 .mk { position: absolute; top: 0; height: 100%; z-index: 2; cursor: pointer; }
 .mk.beat { width: 1px; background: var(--accent); opacity: .8; }
+.mk.chapter { border-left: 2px solid #ff9f1a; padding-left: 3px; font-size: 10px; color: #ff9f1a; white-space: nowrap; }
+#transcriptPanel { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 8px; gap: 6px; }
+#transcriptPanel .row { display: flex; gap: 6px; flex-wrap: wrap; }
+#trText { flex: 1; overflow: auto; line-height: 1.7; padding: 4px 2px; outline: none; user-select: text; }
+#trText p { margin: 0 0 8px; }
+#trText .tw { cursor: pointer; border-radius: 3px; padding: 0 1px; }
+#trText .tw:hover { background: rgba(255, 255, 255, 0.08); }
+#trText .tw.now { background: var(--accent); color: #000; }
+#trText .tt { color: var(--muted, #888); font-size: 10px; margin-right: 6px; user-select: none; }
+#progressBar { position: absolute; left: 0; z-index: 4; pointer-events: none; }
 .mk.note { border-left: 2px solid var(--textc); padding-left: 3px; font-size: 10px; color: var(--textc); white-space: nowrap; }
 .insp .note { color: var(--muted); font-size: 11px; }
 .drop-marker { position: absolute; top: 2px; bottom: 2px; width: 3px; background: var(--accent); z-index: 4; }

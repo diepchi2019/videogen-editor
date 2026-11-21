@@ -1481,8 +1481,6 @@ test('check_reel: safe zones, hook, captions, reading speed, audio, clips, forma
   M.ops.set_clip(p, { clipId: p.clips[1].id, motion: 'zoom_in' });
   M.ops.update_music(p, { musicId: p.music[0].id, duck: 0.7 });
   M.ops.set_captions(p, { words });
-  assert.match(checkReel(p, { words }).issues[0]?.text || '', /Captions at y 0\.82 sit under the username/, 'the classic preset sits low for TikTok');
-  M.ops.update_captions(p, { y: 0.72 });
   r = checkReel(p, { words });
   assert.deepEqual(r.issues, [], checkText(r));
   assert.match(checkText(r), /looks good[\s\S]*✓ 9:16/);
@@ -1521,4 +1519,92 @@ test('translate_captions: below (two languages), replace with words spread by le
   M.ops.translate_captions(p, { lines: [{ lineId: 'c1', text: '' }] });
   assert.equal(p.captions.lines[0].alt, undefined, 'empty text removes the translation');
   assert.deepEqual(M.spreadWords('a bb', 0, 1), [{ w: 'a', start: 0, end: 0.4 }, { w: 'bb', start: 0.4, end: 1 }]);
+});
+
+test('edit by text: transcript lines, phrase search, cut ranges, selections, retakes, B-roll by name', async () => {
+  const T = await import('../src/transcript.js');
+  let t = 0;
+  const W = (text, gapAfter = 0.05) => text.split(' ').map((w, i, a) => { const x = { w, start: Math.round(t * 1000) / 1000, end: Math.round((t + 0.3) * 1000) / 1000 }; t += 0.3 + (i === a.length - 1 ? gapAfter : 0.05); return x; });
+  const words = [...W('So today we', 0.6), ...W('So today we are going to the beach.', 0.4), ...W('The water is great.', 0.3), ...W('And the beach was busy.', 0.3), ...W('And the sun was hot.')];
+  const lines = T.transcriptLines(words);
+  assert.equal(lines.length, 5);
+  assert.match(T.transcriptText(words), /^\[0\.00-1\.00\] So today we\n\[1\.60-4\.35\] So today we are going to the beach\.\n/);
+  // Retakes: the first "So today we" goes; "And the beach … / And the sun …" are different sentences (2 of 5 words).
+  const rt = T.findRetakes(words);
+  assert.equal(rt.length, 1);
+  assert.equal(rt[0].text, 'So today we');
+  assert.equal(rt[0].start, 0);
+  assert.ok(Math.abs(rt[0].end - (words[3].start - 0.1)) < 0.002, 'cut until just before the second take');
+  assert.match(rt[0].kept, /^So today we are/);
+  assert.deepEqual(T.findRetakes(words, { minWords: 4 }), [], 'minWords 4: "So today we" is only 3');
+  // Phrase search and cut ranges keep 0.1s of the pauses either side.
+  const hit = T.findWords(words, 'the WATER is');
+  assert.deepEqual(hit, [{ i: 11, j: 13 }]);
+  const r = T.cutRange(words, 11, 13);
+  assert.deepEqual(r, { start: 4.45, end: 5.75 }, 'from 0.1s after the previous word; the next word follows closely, so the cut ends with the last word');
+  assert.deepEqual(T.wordsIn(words, words[5].start, words[6].end), { i: 5, j: 6 });
+  assert.equal(T.wordsIn(words, 100, 101), null);
+  assert.deepEqual(T.mergeRanges([{ start: 2, end: 3 }, { start: 0, end: 1 }, { start: 2.9, end: 4 }]), [{ start: 0, end: 1 }, { start: 2, end: 4 }]);
+  // B-roll: "beach_drone.mp4" matches "beach" (first mention), plural names work, nothing overlaps.
+  const b = T.matchBroll([{ id: 'a1', name: 'beach_drone.mp4' }, { id: 'a2', name: 'Waters.jpg' }, { id: 'a3', name: 'IMG_0001.mp4' }], words, { length: 0.5 });
+  assert.deepEqual(b.map((x) => [x.assetId, x.word]), [['a1', 'beach.'], ['a2', 'water']]);
+  assert.deepEqual(T.matchBroll([{ id: 'a1', name: 'beach.mp4' }, { id: 'a2', name: 'water.jpg' }], words).map((x) => x.assetId), ['a1'], '3s of beach would overlap the water');
+});
+
+test('color match, layouts, chapters, progress bar, studio voice and stabilize in the model and the graph', async () => {
+  const { colorMatch, pixelStats } = await import('../src/colormatch.js');
+  const { layoutPlan, cropTo } = await import('../src/layouts.js');
+  const { soundFilters, enhanceFilter } = await import('../src/render.js');
+  // Color: a dark, flat, cold clip moves toward a bright, contrasty, warm one.
+  const ref = { mean: 0.55, std: 0.25, sat: 0.3, warm: 0.1 }, dark = { mean: 0.35, std: 0.15, sat: 0.15, warm: -0.05 };
+  const m = colorMatch(ref, dark);
+  assert.deepEqual(m, { brightness: 0.5, contrast: 1.6, saturation: 1.8, temperature: 0.6 });
+  assert.deepEqual(colorMatch(ref, ref), { brightness: 0, contrast: 1, saturation: 1, temperature: 0 });
+  const st = pixelStats(Buffer.from([255, 0, 0, 0, 0, 255]));
+  assert.ok(Math.abs(st.sat - 1) < 1e-9 && Math.abs(st.warm) < 1e-9);
+  // Layouts.
+  assert.deepEqual(cropTo(16 / 9, 9 / 8), { x: 0.184, y: 0, w: 0.633, h: 1 });
+  assert.equal(cropTo(1, 1), null);
+  const tb = layoutPlan('top_bottom', 1080, 1920, 16 / 9, 9 / 16);
+  assert.deepEqual(tb.clip, { fit: 'contain', crop: { x: 0.184, y: 0, w: 0.633, h: 1 }, y: 0.25 });
+  assert.deepEqual(tb.overlay, { fit: 'free', crop: { x: 0, y: 0.25, w: 1, h: 0.5 }, x: 0.5, y: 0.75, scale: 1 });
+  const pip = layoutPlan('pip_circle', 1080, 1920, 16 / 9, 16 / 9);
+  assert.equal(pip.clip, null);
+  assert.deepEqual(pip.mask, { shape: 'circle', w: 1, h: 1, feather: 0.02 });
+  assert.ok(pip.overlay.x + pip.overlay.scale / 2 <= 0.8601 && pip.overlay.y - (pip.overlay.scale * 1080) / 1920 / 2 >= 0.08, 'clear of the app buttons and the top bar');
+  assert.throws(() => layoutPlan('nope', 1080, 1920, 1, 1), /preset must be one of/);
+
+  const p = M.emptyProject();
+  p.assets.v = { id: 'v', type: 'video', file: 'v.mp4', duration: 60, width: 1920, height: 1080, hasAudio: true };
+  p.assets.i = { id: 'i', type: 'image', file: 'i.png', width: 1080, height: 1920 };
+  M.ops.add_clip(p, { assetId: 'v', in: 0, out: 40 });
+  M.ops.add_clip(p, { assetId: 'i', duration: 3 });
+  // Chapters: 0:00 added, short ones warned, markers kind chapter, [] removes.
+  let msg = M.ops.set_chapters(p, { chapters: [{ t: 30, title: 'Part two' }, { t: 25, title: 'Part one' }] });
+  assert.match(msg, /0:00 Intro \| 0:25 Part one \| 0:30 Part two/);
+  assert.match(msg, /"Part one" is shorter/);
+  assert.deepEqual(p.markers.map((x) => [x.kind, x.t, x.label]), [['chapter', 0, 'Intro'], ['chapter', 25, 'Part one'], ['chapter', 30, 'Part two']]);
+  assert.match(M.ops.set_chapters(p, { chapters: [{ t: 5, title: 'Only' }] }), /3 or more/);
+  assert.throws(() => M.ops.set_chapters(p, { chapters: [{ t: 5 }] }), /title is required/);
+  M.ops.set_chapters(p, { chapters: [{ t: 0, title: 'Start' }, { t: 15, title: 'Middle' }, { t: 30, title: 'End' }] });
+  // Progress bar, studio voice, stabilize.
+  M.ops.set_progress_bar(p, { color: '#ff0000', height: 12 });
+  assert.match(M.summarize(p), /Progress bar: #ff0000, 12px at the bottom/);
+  M.ops.set_clip(p, { clipId: p.clips[0].id, enhanceVoice: true, stabilize: 0.6 });
+  assert.throws(() => M.ops.set_clip(p, { clipId: p.clips[1].id, stabilize: 0.5 }), /Only video clips/);
+  assert.match(M.summarize(p), /studio voice.*stabilized 0\.6/);
+  assert.equal(soundFilters(p.clips[0])[0], enhanceFilter(true));
+  assert.ok(!soundFilters({ enhance: true, denoise: 0.5 })[0].includes('afftdn'), 'denoise set: no second noise reduction');
+  const { buildCommand } = await import('../src/render.js');
+  const cmd = buildCommand(p, path.join(os.tmpdir(), 'x.mp4'), { quality: 'draft' });
+  fs.rmSync(cmd.tmpDir, { recursive: true, force: true });
+  assert.ok(cmd.graph.includes('deshake=rx=35:ry=35'), 'no analysis file yet: one-pass deshake');
+  assert.ok(cmd.graph.includes('highpass=f=80,afftdn'), 'studio voice on the clip audio');
+  assert.match(cmd.graph, /color=c=0xff0000@1:s=540x6:.*\n?.*overlay=x='-w\+w\*t\/43\.000':y=954/);
+  assert.deepEqual(cmd.chapters, ['0:00 Start', '0:15 Middle', '0:30 End']);
+  assert.ok(cmd.args.includes('-map_chapters') && cmd.args.includes('ffmetadata'));
+  M.ops.set_progress_bar(p, { enabled: false });
+  assert.equal(p.progressBar, undefined);
+  assert.equal(M.TEXT_STYLES.hook.animation, 'pop');
+  assert.equal(M.TEXT_STYLES.subscribe.boxColor, '#ff0033');
 });

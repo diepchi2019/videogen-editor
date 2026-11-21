@@ -21,6 +21,10 @@ import { srcAt, localAt } from './timing.js';
 import { pickKeywords, findPhrase, planAutoZoom } from './emphasis.js';
 import { fetchEmoji } from './emoji.js';
 import { checkReel, checkText } from './check.js';
+import { transcriptText as timelineTranscriptText, cutRange, findWords, wordsIn, mergeRanges, findRetakes, matchBroll } from './transcript.js';
+import { detectShake } from './stabilize.js';
+import { clipStats, colorMatch } from './colormatch.js';
+import { LAYOUTS, layoutPlan } from './layouts.js';
 import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
@@ -48,7 +52,7 @@ const textProps = {
 const captionStyleProps = {
   preset: s(`Caption look: ${Object.entries(CAPTION_STYLES).map(([k, v]) => `${k} (${v.mode})`).join(', ')}`, { enum: Object.keys(CAPTION_STYLES) }),
   mode: s('line = whole line; karaoke = words fill with highlightColor as spoken; word = line shown, current word highlighted; single = one big word at a time', { enum: CAPTION_MODES }),
-  size: n('Font size px'), y: n('Vertical center 0-1 (presets 0.72-0.82; keep below ~0.85 so the Reels/TikTok buttons do not cover it)'), font: s('Font family (list_fonts)'),
+  size: n('Font size px'), y: n('Vertical center 0-1 (presets 0.72-0.78; above about 0.78 the TikTok/Reels username and description cover it)'), font: s('Font family (list_fonts)'),
   color: s('Hex text color'), highlightColor: s('Hex color of the spoken word'), outline: n('Outline px'), outlineColor: s('Hex'),
   box: b('Background box'), boxColor: s('Hex'), uppercase: b('ALL CAPS'), bold: b('Bold'), maxWords: n('Max words per line (1-12)'),
 };
@@ -56,6 +60,7 @@ const captionStyleProps = {
 const soundProps = {
   voiceEffect: s('Voice effect (export only): chipmunk (high), deep (low), robot, echo, hall (big room reverb), telephone, radio, megaphone; none removes', { enum: VOICE_EFFECTS }),
   pitch: n('Pitch shift in semitones -12..12 without changing speed (0 = original; adds to chipmunk/deep)'),
+  enhanceVoice: b('Studio voice (export only): cleaner, clearer, steadier speech for phone or room recordings; false removes it'),
 };
 const overlayProps = {
   start: n('Timeline start seconds'), end: n('Timeline end seconds (alternative to duration)'), duration: n('Seconds on the timeline'),
@@ -312,6 +317,70 @@ export const TOOLS = [
       language: s('Language of the translation, e.g. English'),
     }),
   },
+  {
+    name: 'get_timeline_transcript',
+    description: 'What is said on the timeline, in TIMELINE seconds (after cuts, speed and order), line by line: "[start-end] words". Use it to edit by text: cut_transcript removes words or sentences, remove_retakes drops repeated takes. Transcribes the clips and voice items first when needed (local Whisper).',
+    input_schema: S({ from: n('Timeline seconds (default 0)'), to: n('Timeline seconds (default: end)'), transcribe: b('Transcribe what is not yet (default true)') }),
+  },
+  {
+    name: 'cut_transcript',
+    description: 'Edit by text: cut words, phrases or sentences out of the video (ripple delete, one undo step), with the pauses around them so the cut sounds natural. ' +
+      'phrases: [{text: "as I said before", at: 12.5}] cuts that phrase (every place it is said, or only the one nearest at). ranges: [{start, end}] in timeline seconds cuts the words inside (snapped to whole words).',
+    input_schema: S({
+      phrases: { type: 'array', items: { type: 'object', properties: { text: s('Words exactly as said (case and punctuation ignored)'), at: n('Only the occurrence nearest this timeline second') }, required: ['text'] } },
+      ranges: { type: 'array', items: { type: 'object', properties: { start: n('Timeline seconds'), end: n('Timeline seconds') }, required: ['start', 'end'] } },
+      dryRun: b('Only list what would be cut'),
+    }),
+  },
+  {
+    name: 'remove_retakes',
+    description: 'Remove bad takes: when a sentence is started, stopped and said again, keep only the last take (one undo step). Found from the transcript (the restart repeats the first words of the attempt after a pause). ' +
+      'Use dryRun first and read the list: if a "retake" is really two different sentences, cut the others with cut_transcript instead.',
+    input_schema: S({ dryRun: b('Only list the retakes'), minWords: n('Words that must repeat to count as a restart (default 2; 3 is safer)') }),
+  },
+  {
+    name: 'enhance_voice',
+    description: 'Studio voice on every clip with sound and every voice item (or the given ids): cleaner and clearer speech for phone or room recordings (rumble cut, light noise reduction, less boxy, more presence, softer "s", steadier level). Export only. off true removes it.',
+    input_schema: S({ ids: idsSchema('Clip, overlay or audio item ids (default: all clips with sound and voice items)'), off: b('Remove the studio voice') }),
+  },
+  {
+    name: 'stabilize_clip',
+    description: 'Smooth out camera shake in a video clip (handheld, walking, vlogs). Analyses the clip (two-pass vidstab; a few seconds per minute) and zooms in slightly to hide the moving edges. After trimming the clip, run it again for the best result (it falls back to a quicker one-pass stabilizer). Export only.',
+    input_schema: S({ clipId: s('Clip id'), amount: n('0.1 (light) .. 1 (very steady), default 0.5'), off: b('Remove the stabilization') }, ['clipId']),
+  },
+  {
+    name: 'add_broll',
+    description: 'Cover parts of the talking with B-roll (other videos or photos from the media library) as full-frame overlays with a fade, muted, while the voice keeps playing. ' +
+      'items: [{assetId, text: "the beach"}] puts the asset where that phrase is said (or at: timeline seconds), for duration seconds (default: the phrase + 1.5s, 2-6s). auto true matches unused media by file name to the words. Look at the media with look_at_asset to pick what fits.',
+    input_schema: S({
+      items: { type: 'array', items: { type: 'object', properties: { assetId: s('Video or image asset'), text: s('Phrase it illustrates'), at: n('Timeline seconds (instead of text)'), duration: n('Seconds'), in: n('Source start seconds of a video') }, required: ['assetId'] } },
+      auto: b('Match media to the words by file name'),
+    }),
+  },
+  {
+    name: 'match_color',
+    description: 'Make clips look like a reference clip (same brightness, contrast, saturation and warmth), e.g. footage from two phones or different light. Sets set_color on each clip (shows in the preview); looks and LUTs stay.',
+    input_schema: S({ referenceClipId: s('The clip that looks right'), clipIds: idsSchema('Clips to match (default: every other clip)') }, ['referenceClipId']),
+  },
+  {
+    name: 'set_layout',
+    description: 'Split screen or picture-in-picture with a second video: ' + Object.entries(LAYOUTS).map(([k, v]) => `${k} (${v})`).join('; ') + '. ' +
+      'The main clip (or all clips) is cropped into its part and the second video is added as an overlay over the same time. Crops are centered: adjust with set_clip crop / set_overlay crop.',
+    input_schema: S({
+      preset: s('Layout', { enum: Object.keys(LAYOUTS) }), assetId: s('The second video (or photo)'), clipId: s('Only over this clip (default: the whole video)'),
+      in: n('Source start seconds of the second video (default 0)'), overlayVolume: n('Volume of the second video 0-2 (default 0: muted; 1 for a two-person podcast)'),
+    }, ['preset', 'assetId']),
+  },
+  {
+    name: 'set_chapters',
+    description: 'YouTube chapters: [{t (timeline seconds), title}]. Stored as chapter markers, written into the exported MP4 and as a "0:00 Title" list next to the export for the video description. A missing 0:00 gets "Intro". YouTube needs 3+ chapters of 10s+. [] removes them. Read get_timeline_transcript to find where topics change.',
+    input_schema: S({ chapters: { type: 'array', items: { type: 'object', properties: { t: n('Timeline seconds'), title: s('Short chapter title') }, required: ['t', 'title'] } } }, ['chapters']),
+  },
+  {
+    name: 'set_progress_bar',
+    description: 'A thin bar along the top or bottom that fills up as the video plays (keeps people watching to the end). enabled false removes it.',
+    input_schema: S({ enabled: b('false removes it'), color: s('Hex color (default white)'), height: n('Pixels 2-60 (default 10)'), position: s('top or bottom (default)', { enum: ['top', 'bottom'] }) }),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -384,7 +453,7 @@ export const TOOLS = [
   },
   { name: 'delete_overlay', description: 'Remove an overlay.', input_schema: S({ overlayId: s('Overlay id') }, ['overlayId']) },
 
-  { name: 'add_text', description: 'Add a text overlay/title. x,y are the center as fractions of the frame (0.5,0.5 = center; y 0.15 = top; y 0.8 = lower third). Use style presets for quick looks.', input_schema: S(textProps, ['text', 'start', 'end']) },
+  { name: 'add_text', description: 'Add a text overlay/title. x,y are the center as fractions of the frame (0.5,0.5 = center; y 0.15 = top; y 0.75 = lower third; below about 0.78 the app text covers it in a vertical reel). Use style presets for quick looks.', input_schema: S(textProps, ['text', 'start', 'end']) },
   { name: 'update_text', description: 'Change any property of an existing text overlay.', input_schema: S({ textId: s('Text id'), ...textProps }, ['textId']) },
   { name: 'delete_text', description: 'Remove a text overlay.', input_schema: S({ textId: s('Text id') }, ['textId']) },
   { name: 'list_fonts', description: 'List installed font families usable in text and captions (user-imported fonts first).', input_schema: S({ search: s('Filter by name') }) },
@@ -417,8 +486,8 @@ export const TOOLS = [
   { name: 'analyze_audio', description: 'Analyse an audio or video asset: tempo (BPM) and beat times, loudness, and silences, all in SOURCE seconds. Use it to plan cuts on the beat, find quiet gaps, or pick a music section. Cached per file.', input_schema: S({ assetId: s('Asset id (or give musicId to analyse what an audio item uses)'), musicId: s('Audio item id: limits the result to the part it plays'), from: n('Source seconds'), to: n('Source seconds'), force: b('Re-run even if cached') }) },
   { name: 'mark_beats', description: 'Detect the beats of an audio item (music) and put them on the timeline as beat markers (replaces old beat markers). Then fit_clips_to_beats cuts on them, or use the times for effects/text.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
   { name: 'fit_clips_to_beats', description: 'Cut to the beat: trims each main-track clip\'s out point so every cut (and the end) lands on a beat marker. every = beats per clip (1 = cut on every beat, 2 = every other, 4 = once per bar). Clips whose source is too short are kept and reported. Needs beat markers (mark_beats).', input_schema: S({ every: n('Beats per clip (default 1)'), skipBeats: n('Ignore this many beat markers at the start (default 0)') }) },
-  { name: 'add_markers', description: 'Add timeline markers (notes or beats) at timeline seconds.', input_schema: S({ times: { type: 'array', items: { type: 'number' }, description: 'Timeline seconds' }, kind: s('note (default) or beat', { enum: ['note', 'beat'] }), label: s('Optional label'), replace: b('Remove existing markers of this kind first') }, ['times']) },
-  { name: 'delete_markers', description: 'Delete markers: by ids, by kind, or all.', input_schema: S({ kind: s('Only this kind', { enum: ['note', 'beat'] }), markerIds: { type: 'array', items: { type: 'string' }, description: 'Marker ids' } }) },
+  { name: 'add_markers', description: 'Add timeline markers (notes or beats) at timeline seconds.', input_schema: S({ times: { type: 'array', items: { type: 'number' }, description: 'Timeline seconds' }, kind: s('note (default), beat or chapter (set_chapters is easier for chapters)', { enum: ['note', 'beat', 'chapter'] }), label: s('Optional label'), replace: b('Remove existing markers of this kind first') }, ['times']) },
+  { name: 'delete_markers', description: 'Delete markers: by ids, by kind, or all.', input_schema: S({ kind: s('Only this kind', { enum: ['note', 'beat', 'chapter'] }), markerIds: { type: 'array', items: { type: 'string' }, description: 'Marker ids' } }) },
   { name: 'delete_music', description: 'Remove an audio item.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
   { name: 'set_canvas', description: 'Change output format.', input_schema: S({ aspect: s('Aspect ratio', { enum: Object.keys(ASPECTS) }), background: s('Hex background color for letterboxing'), fps: n('Frames per second') }) },
   { name: 'clear_timeline', description: 'Remove all clips, overlays, texts, captions and audio (keeps the media library). Only when the user clearly asks to start over.', input_schema: S({}) },
@@ -442,8 +511,8 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['check_reel', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
-const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items']);
+const READ_ONLY = new Set(['check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items', 'cut_transcript', 'remove_retakes']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
   destructiveHint: DESTRUCTIVE.has(name),
@@ -457,7 +526,25 @@ const imageBlocks = (title, frames, label) => [{ type: 'text', text: title }, ..
   { type: 'text', text: label(f) },
   { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: f.data } },
 ])];
-const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}${j.loudness ? ` loudness: ${j.loudness.note}` : ''}`;
+const fmtJob = (j) => `${j.kind} ${j.status} ${Math.round(j.progress * 100)}%${j.error ? ` error: ${j.error}` : ''}${j.status === 'done' && j.path ? ` file: ${j.path} (URL /exports/${j.file})` : ''}${j.width ? ` [${j.width}x${j.height} @${j.fps}fps, ${j.encoder}]` : ''}${j.loudness ? ` loudness: ${j.loudness.note}` : ''}${j.chapters ? ` chapters: ${j.chapters.length} (in the MP4, and a list for the description in ${path.basename(j.path).replace(/\.mp4$/i, '.chapters.txt')})` : ''}`;
+
+// Speech on the timeline (clips and voice items) as timeline words. transcribe false uses cached transcripts only.
+async function timelineSpeech(p, { transcribe: doIt = true, language } = {}) {
+  const ids = new Set([...p.clips.filter((c) => !c.reverse && !c.freeze && (c.volume ?? 1) > 0).map((c) => c.assetId), ...p.music.filter((m) => m.role === 'voice').map((m) => m.assetId)]);
+  const transcripts = {};
+  let note = '';
+  for (const id of ids) {
+    const a = p.assets[id];
+    if (!a || a.type === 'image' || (a.type === 'video' && !a.hasAudio)) continue;
+    const cached = readTranscript(a);
+    if (cached?.words && !doIt) { transcripts[id] = cached.words; continue; }
+    if (!doIt) continue;
+    try { transcripts[id] = (await transcribe(a, { language: language || 'auto' })).words; } catch (e) {
+      note = `\n(${e.message === MODEL_HELP ? 'No Whisper model: speech cannot be read' : `Could not transcribe "${a.name}": ${e.message}`})`;
+    }
+  }
+  return { words: timelineWords(p, transcripts, ['clips', 'voice']), note };
+}
 
 // Returns { content: string | Array<content block>, isError?: boolean }
 export async function executeTool(name, input = {}, source = 'claude') {
@@ -746,6 +833,151 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const np = store.duplicateProject(null, `${p.name} (${input.language || 'translated'})`, source);
         const msg = store.apply('translate_captions', { ...input, mode: 'replace' }, source);
         return { content: `Made a copy ${np.id} "${np.name}" and opened it. ${msg} The original project ${p.id} is unchanged.` };
+      }
+      case 'get_timeline_transcript': {
+        const p = store.getProject();
+        const { words, note } = await timelineSpeech(p, { transcribe: input.transcribe !== false, language: input.language });
+        if (!words.length) return { content: `No speech on the timeline.${note}` };
+        const from = Number(input.from) || 0, to = input.to === undefined ? Infinity : Number(input.to);
+        return { content: `Transcript (timeline seconds), ${words.length} words:\n${timelineTranscriptText(words, { from, to })}${note}`, words };
+      }
+      case 'cut_transcript': {
+        const p = store.getProject();
+        const { words, note } = await timelineSpeech(p, { transcribe: true });
+        if (!words.length) return { content: `No speech on the timeline to cut.${note}`, isError: true };
+        const cuts = [], missing = [];
+        for (const ph of Array.isArray(input.phrases) ? input.phrases : []) {
+          let hits = findWords(words, ph.text);
+          if (!hits.length) { missing.push(ph.text); continue; }
+          if (ph.at !== undefined) hits = [hits.reduce((x, y) => (Math.abs(words[y.i].start - ph.at) < Math.abs(words[x.i].start - ph.at) ? y : x))];
+          for (const h of hits) cuts.push({ ...cutRange(words, h.i, h.j), text: words.slice(h.i, h.j + 1).map((w) => w.w).join(' ') });
+        }
+        for (const r of Array.isArray(input.ranges) ? input.ranges : []) {
+          const h = wordsIn(words, Number(r.start), Number(r.end));
+          if (h) cuts.push({ ...cutRange(words, h.i, h.j), text: words.slice(h.i, h.j + 1).map((w) => w.w).join(' ') });
+          else missing.push(`${r.start}-${r.end}s (no words there)`);
+        }
+        const merged = mergeRanges(cuts);
+        if (!merged.length) return { content: `Nothing to cut.${missing.length ? ` Not found: ${missing.map((x) => `"${x}"`).join(', ')}. get_timeline_transcript shows what is said.` : ''}`, isError: true };
+        const list = cuts.map((c) => `${c.start.toFixed(2)}-${c.end.toFixed(2)}s "${c.text}"`).join('\n');
+        const total = merged.reduce((x, c) => x + c.end - c.start, 0);
+        if (input.dryRun) return { content: `Would cut ${total.toFixed(1)}s:\n${list}${missing.length ? `\nNot found: ${missing.join(', ')}` : ''}` };
+        store.applyBatch([...merged].reverse().map((c) => ({ name: 'delete_range', input: { start: c.start, end: c.end } })), source);
+        return { content: `Cut ${cuts.length} part(s), ${total.toFixed(1)}s (one undo step):\n${list}${missing.length ? `\nNot found: ${missing.join(', ')}` : ''}` };
+      }
+      case 'remove_retakes': {
+        const p = store.getProject();
+        const { words, note } = await timelineSpeech(p, { transcribe: true });
+        if (!words.length) return { content: `No speech on the timeline.${note}`, isError: true };
+        const minWords = input.minWords === undefined ? 2 : Math.max(2, Math.min(6, Math.round(Number(input.minWords))));
+        const takes = findRetakes(words, { minWords });
+        if (!takes.length) return { content: 'No retakes found (no sentence is started and then said again).' };
+        const list = takes.map((t) => `${t.start.toFixed(2)}-${t.end.toFixed(2)}s cut "${t.text}" -> keeps "${t.kept} …"`).join('\n');
+        if (input.dryRun) return { content: `Found ${takes.length} retake(s):\n${list}` };
+        store.applyBatch([...mergeRanges(takes)].reverse().map((c) => ({ name: 'delete_range', input: { start: c.start, end: c.end } })), source);
+        return { content: `Removed ${takes.length} retake(s), kept the last take each time (one undo step):\n${list}` };
+      }
+      case 'enhance_voice': {
+        const p = store.getProject();
+        const sound = (a) => a && (a.type === 'audio' || (a.type === 'video' && a.hasAudio));
+        let ids = Array.isArray(input.ids) && input.ids.length ? input.ids
+          : [...p.clips.filter((c) => sound(p.assets[c.assetId])).map((c) => c.id), ...p.music.filter((m) => m.role === 'voice').map((m) => m.id)];
+        const steps = [];
+        for (const id of ids) {
+          const on = !input.off;
+          if (p.clips.some((c) => c.id === id)) steps.push({ name: 'set_clip', input: { clipId: id, enhanceVoice: on } });
+          else if (p.music.some((m) => m.id === id)) steps.push({ name: 'update_music', input: { musicId: id, enhanceVoice: on } });
+          else if (p.overlays.some((o) => o.id === id)) steps.push({ name: 'set_overlay', input: { overlayId: id, enhanceVoice: on } });
+          else return { content: `No clip, overlay or audio item ${id}`, isError: true };
+        }
+        if (!steps.length) return { content: 'Nothing with sound on the timeline.', isError: true };
+        store.applyBatch(steps, source);
+        return { content: `${input.off ? 'Removed the studio voice from' : 'Studio voice on'} ${steps.length} item(s) (heard in the export, not in the preview).` };
+      }
+      case 'stabilize_clip': {
+        const p = store.getProject();
+        const c = p.clips.find((x) => x.id === input.clipId);
+        if (!c) return { content: `No clip ${input.clipId}`, isError: true };
+        if (input.off) return { content: store.apply('set_clip', { clipId: c.id, stabilize: 0 }, source) };
+        const a = p.assets[c.assetId];
+        if (a?.type !== 'video' || c.freeze) return { content: 'Only video clips can be stabilized', isError: true };
+        const amount = input.amount === undefined ? 0.5 : Number(input.amount);
+        if (!(amount >= 0.1 && amount <= 1)) return { content: 'amount must be 0.1-1', isError: true };
+        const t0 = Date.now();
+        await detectShake(a, c.in, c.out);
+        store.apply('set_clip', { clipId: c.id, stabilize: amount }, source);
+        return { content: `Stabilized ${c.id} (amount ${amount}; analysed ${(c.out - c.in).toFixed(1)}s of video in ${((Date.now() - t0) / 1000).toFixed(1)}s). It zooms in a little to hide the moving edges. Export or look_at_timeline to see it.` };
+      }
+      case 'add_broll': {
+        const p = store.getProject(), L = layout(p);
+        const { words, note } = await timelineSpeech(p, { transcribe: !!(input.auto || (input.items || []).some((x) => x.text)) });
+        const items = [], missing = [];
+        for (const it of Array.isArray(input.items) ? input.items : []) {
+          const a = p.assets[it.assetId];
+          if (!a || !['video', 'image'].includes(a.type)) { missing.push(`${it.assetId} (not a video or photo)`); continue; }
+          let start = it.at !== undefined ? Number(it.at) : null, end = null;
+          if (start === null && it.text) {
+            const h = findWords(words, it.text)[0];
+            if (!h) { missing.push(`"${it.text}" (not said)`); continue; }
+            start = words[h.i].start; end = words[h.j].end + 1.5;
+          }
+          if (start === null) { missing.push(`${it.assetId} (give text or at)`); continue; }
+          items.push({ a, start, end, duration: it.duration, in: it.in });
+        }
+        if (input.auto) {
+          const used = new Set([...p.clips.map((c) => c.assetId), ...p.overlays.map((o) => o.assetId)]);
+          const free = Object.values(p.assets).filter((a) => ['video', 'image'].includes(a.type) && !used.has(a.id) && !items.some((x) => x.a.id === a.id));
+          for (const m of matchBroll(free, words)) items.push({ a: p.assets[m.assetId], start: m.start, end: null, why: m.word });
+        }
+        if (!items.length) return { content: `No B-roll placed.${missing.length ? ` ${missing.join('; ')}.` : ''}${input.auto ? ' auto: no unused media whose file name is said.' : ''}${note}`, isError: true };
+        const steps = items.map((x) => {
+          const want = x.duration !== undefined ? Number(x.duration) : x.end ? x.end - x.start : 3;
+          const srcLeft = x.a.type === 'video' ? x.a.duration - (Number(x.in) || 0) : Infinity;
+          const duration = Math.max(0.5, Math.min(6, Math.max(2, want), srcLeft, L.videoDuration - x.start));
+          return { name: 'add_overlay', input: { assetId: x.a.id, start: Math.round(x.start * 1000) / 1000, duration: Math.round(duration * 1000) / 1000, ...(x.in !== undefined ? { in: Number(x.in) } : {}), fit: 'cover', volume: 0, animation: 'fade' } };
+        }).filter((st) => st.input.start < L.videoDuration - 0.5);
+        store.applyBatch(steps, source);
+        return { content: `Added ${steps.length} B-roll overlay(s):\n${steps.map((st, k) => `${st.input.start.toFixed(2)}s for ${st.input.duration.toFixed(1)}s: "${p.assets[st.input.assetId].name}"${items[k]?.why ? ` (said "${items[k].why}")` : ''}`).join('\n')}${missing.length ? `\nSkipped: ${missing.join('; ')}` : ''}` };
+      }
+      case 'match_color': {
+        const p = store.getProject();
+        const ref = p.clips.find((c) => c.id === input.referenceClipId);
+        if (!ref) return { content: `No clip ${input.referenceClipId}`, isError: true };
+        const ids = Array.isArray(input.clipIds) && input.clipIds.length ? input.clipIds : p.clips.filter((c) => c.id !== ref.id).map((c) => c.id);
+        const r = await clipStats(p.assets[ref.assetId], ref.in, ref.out);
+        const steps = [], lines = [];
+        for (const id of ids) {
+          const c = p.clips.find((x) => x.id === id);
+          if (!c) return { content: `No clip ${id}`, isError: true };
+          const m = colorMatch(r, await clipStats(p.assets[c.assetId], c.in, c.out));
+          steps.push({ name: 'set_color', input: { clipId: c.id, ...m } });
+          lines.push(`${c.id}: brightness ${m.brightness}, contrast ${m.contrast}, saturation ${m.saturation}, temperature ${m.temperature}`);
+        }
+        if (!steps.length) return { content: 'No other clips to match.', isError: true };
+        store.applyBatch(steps, source);
+        return { content: `Matched ${steps.length} clip(s) to ${ref.id}:\n${lines.join('\n')}\nCheck with look_at_timeline; fine-tune with set_color.` };
+      }
+      case 'set_layout': {
+        const p = store.getProject(), L = layout(p);
+        const second = p.assets[input.assetId];
+        if (!second || !['video', 'image'].includes(second.type)) return { content: `assetId must be a video or photo in the media library`, isError: true };
+        const clips = input.clipId ? L.clips.filter((c) => c.id === input.clipId) : L.clips;
+        if (!clips.length) return { content: input.clipId ? `No clip ${input.clipId}` : 'The timeline is empty.', isError: true };
+        const W = p.settings.width, H = p.settings.height;
+        const mainA = p.assets[clips[0].assetId];
+        const plan = layoutPlan(input.preset, W, H, mainA.width / mainA.height, second.width / second.height);
+        const start = clips[0].start, end = clips[clips.length - 1].end;
+        const steps = [];
+        if (plan.clip) for (const c of clips) {
+          const a = p.assets[c.assetId], cp = layoutPlan(input.preset, W, H, a.width / a.height, second.width / second.height).clip;
+          steps.push({ name: 'set_clip', input: { clipId: c.id, fit: cp.fit, crop: cp.crop || { x: 0, y: 0, w: 1, h: 1 }, x: cp.x ?? 0.5, y: cp.y ?? 0.5 } });
+        }
+        const srcIn = Number(input.in) || 0;
+        const dur = second.type === 'video' ? Math.min(end - start, second.duration - srcIn) : end - start;
+        steps.push({ name: 'add_overlay', input: { assetId: second.id, start, duration: Math.round(dur * 1000) / 1000, in: srcIn, ...plan.overlay, crop: plan.overlay.crop || undefined, volume: Number(input.overlayVolume) || 0, track: 1 } });
+        if (plan.mask) steps.push({ name: 'set_mask', input: { overlayId: `$${steps.length}`, ...plan.mask } });
+        store.applyBatch(steps, source);
+        return { content: `Layout ${input.preset}: ${plan.clip ? `${clips.length} clip(s) placed in their part, ` : ''}"${second.name}" added from ${start.toFixed(2)}s for ${dur.toFixed(1)}s${dur < end - start - 0.1 ? ' (it is shorter than the clips)' : ''}. Check with look_at_timeline; move crops with set_clip / set_overlay crop.` };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

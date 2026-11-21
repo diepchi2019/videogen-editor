@@ -444,6 +444,52 @@ try {
       `translate_captions copy: ${tc.content.split('.')[0]}`);
     const bad = await toolErr('translate_captions', { mode: 'copy', lines: [{ lineId: 'cap_nope', text: 'x' }] });
     ok(/cap_nope/.test(bad || '') && (await tool('list_projects')).content.split('(Vietnamese)').length === 2, 'translate_captions copy with a bad line id makes no copy');
+    // Edit by text and the rest of the editing set, on a fresh project: the talk says its two sentences 4 times.
+    // Two takes of the same speech with a pause between them (Whisper hears both).
+    const twoTakes = path.join(data, 'takes.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=25', '-i', path.join(fx, 'speech.mp3'), '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-filter_complex',
+      '[1:a]aformat=sample_rates=48000:channel_layouts=stereo,asplit=2[s0][s1];[2:a]atrim=duration=1.2[p];[s0][p][s1]concat=n=3:v=0:a=1[a]', '-map', '0:v', '-map', '[a]', '-shortest', '-pix_fmt', 'yuv420p', '-c:a', 'aac', twoTakes]);
+    const tf2 = new FormData();
+    tf2.append('files', new Blob([fs.readFileSync(twoTakes)]), 'takes.mp4');
+    const takes = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: tf2 })).json()).added[0];
+    await tool('create_project', { name: 'Text edit', aspect: '16:9' });
+    await tool('add_clip', { assetId: takes.id });
+    await tool('add_clip', { assetId: vid.id });
+    let te = (await tool('get_timeline')).project;
+    const [talkClip, vidClip] = te.clips;
+    const tr0 = await tool('get_timeline_transcript', {});
+    ok(/^Transcript \(timeline seconds\)/.test(tr0.content) && tr0.words.length >= 18 && /Welcome/.test(tr0.content), `get_timeline_transcript: ${tr0.words.length} words`);
+    const rtDry = await tool('remove_retakes', { dryRun: true });
+    const d0 = (await tool('get_timeline')).layout.duration;
+    const rt = await tool('remove_retakes', {});
+    const tr1 = await tool('get_timeline_transcript', { transcribe: false });
+    ok(/^Found [1-9]/.test(rtDry.content) && /^Removed [1-9]/.test(rt.content) && tr1.words.length < tr0.words.length && (await tool('get_timeline')).layout.duration < d0 - 3,
+      `remove_retakes: ${rt.content.split('\n')[0]} (${tr0.words.length} -> ${tr1.words.length} words)`);
+    const ct = await tool('cut_transcript', { phrases: [{ text: 'with captions' }] });
+    const tr2 = await tool('get_timeline_transcript', { transcribe: false });
+    ok(/^Cut 1 part/.test(ct.content) && !/with captions/i.test(tr2.content.replace(/\n/g, ' ')), `cut_transcript: ${ct.content.split('\n')[0]}`);
+    ok(/Not found/.test(String(await toolErr('cut_transcript', { phrases: [{ text: 'purple elephants' }] }))), 'cut_transcript reports phrases that are not said');
+    const ev = await tool('enhance_voice', {});
+    const st = await tool('stabilize_clip', { clipId: vidClip.id, amount: 0.6 });
+    const mc = await tool('match_color', { referenceClipId: talkClip.id, clipIds: [vidClip.id] });
+    ok(/Studio voice on [1-9]/.test(ev.content) && /^Stabilized/.test(st.content) && /^Matched 1 clip/.test(mc.content), `enhance_voice, stabilize_clip, match_color (${st.content.split(';')[1]?.trim()})`);
+    const ly = await tool('set_layout', { preset: 'side_by_side', assetId: vidNoA.id, clipId: talkClip.id });
+    const br = await tool('add_broll', { items: [{ assetId: img.id, text: 'island' }] });
+    const ch = await tool('set_chapters', { chapters: [{ t: 0, title: 'Welcome' }, { t: 3, title: 'The plan' }, { t: 6, title: 'Captions' }] });
+    await tool('set_progress_bar', { color: '#ff3366' });
+    te = (await tool('get_timeline')).project;
+    ok(/^Layout side_by_side/.test(ly.content) && /^Added 1 B-roll/.test(br.content) && te.overlays.length === 2 && te.clips[0].transform?.x === 0.25 && te.markers.filter((m) => m.kind === 'chapter').length === 3 && te.progressBar,
+      `set_layout, add_broll, set_chapters, set_progress_bar (${ch.content.split('.')[0]})`);
+    const s2 = (await tool('get_timeline')).content;
+    ok(/studio voice/.test(s2) && /stabilized 0\.6/.test(s2) && /Progress bar: #ff3366/.test(s2), 'summary shows studio voice, stabilize, progress bar');
+    const tx = await tool('export_video', { quality: 'draft', wait: true });
+    const tOut = /done 100% file: (.+?\.mp4)/.exec(tx.content)?.[1];
+    const nCh = execFileSync('ffprobe', ['-v', 'error', '-show_chapters', '-of', 'csv=p=0', tOut]).toString().trim().split('\n').filter(Boolean).length;
+    ok(tOut && nCh === 3 && fs.existsSync(tOut.replace(/\.mp4$/, '.chapters.txt')) && /chapters: 3 /.test(tx.content), `export with stabilize + studio voice + layout + B-roll + progress bar: ${nCh} MP4 chapters and the description text`);
+    const pbPix = [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(Number(probe(tOut, 'format=duration')) - 0.2), '-i', tOut, '-frames:v', '1', '-vf', 'crop=8:2:400:ih-3,scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
+    ok(pbPix[0] > 200 && pbPix[1] < 110 && pbPix[2] > 60, `progress bar drawn at the end (pixel ${pbPix.join('/')})`);
+    const tl = await tool('look_at_timeline', { times: [1.5] });
+    tl.content.filter((x) => x.type === 'image').forEach((x) => fs.writeFileSync(path.join(framesDir, 'layout.jpg'), Buffer.from(x.source.data, 'base64')));
   } else console.log('skip - remove silences (no whisper model)');
   await tool('open_project', { projectId: firstId });
 
@@ -452,7 +498,7 @@ try {
   await mcp.connect(new StdioClientTransport({ command: 'node', args: [path.join(root, 'mcp.js')], env: { ...process.env, VIDEOGEN_URL: BASE } }));
   const { tools } = await mcp.listTools();
   const names = tools.map((t) => t.name);
-  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
+  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
   ok(tools.find((t) => t.name === 'get_timeline').annotations?.readOnlyHint === true && tools.find((t) => t.name === 'delete_project').annotations?.destructiveHint === true, 'MCP tool annotations');
   const { resources } = await mcp.listResources();
   const res = await mcp.readResource({ uri: 'videogen://project/json' });
@@ -464,7 +510,7 @@ try {
   const { prompts } = await mcp.listPrompts();
   const pr = await mcp.getPrompt({ name: 'reel_from_template', arguments: { template: 'Smoke template' } });
   const sp = await mcp.getPrompt({ name: 'shorts_from_video', arguments: { count: '2', length: '20-40' } });
-  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical,translate_reel,shorts_from_video' && /create_from_template/.test(pr.messages[0].content.text) &&
+  ok(prompts.map((x) => x.name).join() === 'make_reel,reel_from_template,save_my_style,reframe_to_vertical,edit_talking_video,hook_and_chapters,translate_reel,shorts_from_video' && /create_from_template/.test(pr.messages[0].content.text) &&
     /minDuration 20, maxDuration 40, count 8/.test(sp.messages[0].content.text), 'MCP prompts');
 
   console.log(`\nAll good. Output: ${outPath}\nTimeline frames: ${framesDir}`);

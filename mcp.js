@@ -84,7 +84,7 @@ const PROMPTS = [
 1. get_timeline, then look_at_asset on the videos to find the best moments.
 2. ${a.style ? `apply_style "${a.style}" first` : 'list_styles and apply_style the one that fits best'} so new clips, titles, captions and music follow it.
 3. Build the edit with batch_edit: strongest moment first, punchy cuts, a title in the first 2 seconds. If there is music, mark_beats and fit_clips_to_beats.
-4. If anyone speaks: remove_silences (tightens the pauses and drops um/uh), add_captions, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
+4. If anyone speaks: remove_retakes, remove_silences (tightens the pauses and drops um/uh), enhance_voice, add_captions, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
 5. check_reel and fix what it finds, look_at_timeline to check framing and text, then export_video with quality draft and wait true. Report the file path.`,
   },
   {
@@ -109,6 +109,26 @@ const PROMPTS = [
 2. auto_reframe (no clipId) follows faces automatically${a.subject ? `; if ${a.subject} is not a person's face, skip it for the clips where it would follow the wrong thing` : ''}. For clips it reports without a face (or where the subject is not a face): look_at_asset with grid true over the clip's source in-out range (about one frame per second, up to 12), and read the subject's center as x (and y) fractions of the frame from the grid lines (every 10%, yellow at the middle).
 3. reframe_clip with those points in source seconds (points[].source). Use more points while the subject moves fast, fewer when it is still; if the subject stays put, one point is enough.
 4. look_at_timeline at a few times per clip to check the subject is in frame, adjust points that miss, then tell me what you changed.`,
+  },
+  {
+    name: 'edit_talking_video', description: 'Full talking-head edit: bad takes, pauses, studio voice, captions with key words, zooms, B-roll, chapters, check',
+    arguments: [{ name: 'style', description: 'Caption preset (classic, karaoke, highlight, single, boxed)' }, { name: 'chapters', description: 'yes to add YouTube chapters' }],
+    text: (a) => `Edit the talking video in the open VideoGen project like a pro editor.
+1. get_timeline_transcript. remove_retakes with dryRun true; check each one is really the same sentence said again, then remove_retakes (or cut_transcript the real ones).
+2. Read the transcript again and cut_transcript anything off-topic, false starts the tool missed, or "as I said" repeats. Then remove_silences.
+3. enhance_voice. If the camera shakes, stabilize_clip. If clips look different, match_color to the best-looking clip.
+4. add_captions${a.style ? ` with preset ${a.style}` : ''}, emphasize_captions on the few words that carry the message (an emoji on one or two), then auto_zoom.
+5. If the media library has fitting videos or photos, add_broll where they illustrate what is said (look_at_asset first).
+6. A hook title in the first 2 seconds: add_text with style hook.${a.chapters === 'yes' ? ' set_chapters where the topic changes.' : ''}
+7. check_reel and fix what it finds, look_at_timeline at a few times, then export_video with quality draft and wait true. Tell me what you changed.`,
+  },
+  {
+    name: 'hook_and_chapters', description: 'Write a hook title for the first seconds and YouTube chapters from what is said',
+    arguments: [],
+    text: () => `For the open VideoGen project: get_timeline_transcript, then
+1. Write a short hook (max 7 words) that makes people stay: the promise or the surprising bit of the video. add_text with style hook from 0 to 2.5s.
+2. Find where the topic changes and set_chapters with short titles (first at 0:00, 3 or more, each 10s or longer if the video allows).
+3. Tell me the hook and the chapter list (it is also written next to the export for the YouTube description).`,
   },
   {
     name: 'translate_reel', description: 'Translate the captions (and titles) of the open project into another language, keeping the timing',

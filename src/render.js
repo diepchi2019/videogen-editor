@@ -6,6 +6,8 @@ import { layout, overlayDuration, uid, spillOf, reframeTrack } from './model.js'
 import { DATA_DIR, EXPORT_DIR, MEDIA_DIR } from './store.js';
 import { buildAss, captionEmoji, emojiBox } from './ass.js';
 import { emojiFile } from './emoji.js';
+import { stabFile } from './stabilize.js';
+import { chapterTime } from './model.js';
 import { defaultFont, stageFonts } from './fonts.js';
 import { createJob, finishJob, getJob, listJobs } from './jobs.js';
 import { run } from './media.js';
@@ -377,10 +379,23 @@ export function pitchFilter(st) {
   const k = 2 ** (st / 12);
   return `asetrate=${Math.round(48000 * k)},aresample=48000,${atempoChain(1 / k)}`;
 }
-// Denoise, voice effect and pitch for an item, in that order (input is 48 kHz stereo).
+// Studio voice: cut rumble, gentle noise reduction (left out when denoise is set), less boxiness, more
+// presence, softer "s" sounds, steadier level.
+export function enhanceFilter(withNoise = true) {
+  return ['highpass=f=80', withNoise ? 'afftdn=nr=10:nf=-45:tn=1' : null, 'equalizer=f=220:t=q:w=1:g=-2', 'equalizer=f=3200:t=q:w=1.4:g=3',
+    'deesser=i=0.45:m=0.5:f=0.5', 'acompressor=threshold=0.1:ratio=3:attack=8:release=160:makeup=1.6', 'alimiter=limit=0.95'].filter(Boolean).join(',');
+}
+// Studio voice, denoise, voice effect and pitch for an item, in that order (input is 48 kHz stereo).
 export function soundFilters(x) {
   const v = VOICE_FX[x.voice] || {};
-  return [denoiseFilter(x.denoise), pitchFilter((x.pitch || 0) + (v.pitch || 0)), v.af].filter(Boolean);
+  return [x.enhance ? enhanceFilter(!x.denoise) : null, denoiseFilter(x.denoise), pitchFilter((x.pitch || 0) + (v.pitch || 0)), v.af].filter(Boolean);
+}
+// Stabilize: vidstab with the pass-1 file for this exact source range, else the one-pass deshake.
+export function stabilizeFilter(c, a) {
+  const trf = stabFile(a, c);
+  const amt = c.stabilize;
+  if (trf) return `vidstabtransform=input=${q(trf)}:smoothing=${Math.round(6 + amt * 34)}:optzoom=1:zoomspeed=0.2:interpol=bicubic,unsharp=5:5:0.5:3:3:0.3`;
+  return `deshake=rx=${Math.round(16 + amt * 32)}:ry=${Math.round(16 + amt * 32)}:edge=mirror`;
 }
 // Blend mode -> ffmpeg blend filter mode.
 const BLEND_FF = { screen: 'screen', multiply: 'multiply', overlay: 'overlay', softlight: 'softlight', lighten: 'lighten', darken: 'darken', add: 'addition', difference: 'difference' };
@@ -417,6 +432,7 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     // Timing: freeze = hold the first frame; reverse (at most REVERSE_MAX s, frames kept in memory, so
     // limited to the canvas size first); then constant speed or a speed ramp.
     const timing = [];
+    if (c.stabilize && !c.freeze && a.type === 'video') timing.push(stabilizeFilter(c, a));
     if (c.freeze) timing.push('trim=end_frame=1', 'setpts=PTS-STARTPTS', `tpad=stop_mode=clone:stop_duration=${f3(dur + 1)}`);
     else {
       // Smooth slow motion interpolates the in-between frames (only where the clip is slowed).
@@ -629,6 +645,13 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
       vPrev = `vem${i}`;
     });
   }
+  // Progress bar: a full-width strip that slides in from the left as the video plays.
+  if (project.progressBar) {
+    const pb = project.progressBar, bh = even(pb.height * (W / project.settings.width));
+    filters.push(`color=c=${hex(pb.color)}:s=${W}x${bh}:r=${fps}:d=${f3(total)}[pbar]`);
+    filters.push(`[${vPrev}][pbar]overlay=x='-w+w*t/${f3(total)}':y=${pb.position === 'top' ? 0 : H - bh}:eof_action=pass[vpb]`);
+    vPrev = 'vpb';
+  }
 
   // 5. Audio items (music, sfx, voice) mixed under the clip audio.
   project.music.forEach((m, i) => {
@@ -681,10 +704,20 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
       enc = detectGpuEncoder() || (encoder === 'auto' ? 'libx264' : null);
       if (!enc) { fs.rmSync(tmpDir, { recursive: true, force: true }); throw new Error('No working GPU encoder on this machine (tried NVENC, Quick Sync, AMF). Use encoder cpu or auto.'); }
     } else if (encoder && encoder !== 'cpu') enc = encoder;
-    args.push(...filterGraphArgs(graphFile), '-map', `[${vPrev}]`, '-map', `[${aFinal}]`,
+    // Chapters (chapter markers) as MP4 chapters.
+    const chapters = (project.markers || []).filter((m) => m.kind === 'chapter' && m.t < total);
+    const chapArgs = [];
+    if (chapters.length) {
+      const meta = path.join(tmpDir, 'chapters.txt');
+      const esc = (x) => String(x).replace(/([=;#\\\n])/g, '\\$1');
+      fs.writeFileSync(meta, ';FFMETADATA1\n' + chapters.map((m, i) => `[CHAPTER]\nTIMEBASE=1/1000\nSTART=${Math.round(m.t * 1000)}\nEND=${Math.round((chapters[i + 1]?.t ?? total) * 1000)}\ntitle=${esc(m.label || `Chapter ${i + 1}`)}\n`).join(''));
+      args.push('-f', 'ffmetadata', '-i', meta);
+      chapArgs.push('-map_chapters', String(input++));
+    }
+    args.push(...filterGraphArgs(graphFile), '-map', `[${vPrev}]`, '-map', `[${aFinal}]`, ...chapArgs,
       '-t', f3(total), ...encoderArgs(enc, { draft: quality === 'draft', bitrate }),
       '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', outFile);
-    return { args, total, tmpDir, graph: filters.join(';\n'), encoder: enc, width: W, height: H, fps };
+    return { args, total, tmpDir, graph: filters.join(';\n'), encoder: enc, width: W, height: H, fps, chapters: chapters.map((m) => `${chapterTime(m.t)} ${m.label || ''}`.trim()) };
   }
   return { args, total, tmpDir, graph: filters.join(';\n') };
 }
@@ -749,6 +782,10 @@ export function startExport(project, opts = {}) {
   p.on('close', (code) => {
     fs.rmSync(cmd.tmpDir, { recursive: true, force: true });
     if (code !== 0) return finishJob(job, tail.split('\n').filter(Boolean).slice(-6).join('\n'));
+    if (cmd.chapters?.length) {
+      job.chapters = cmd.chapters;
+      try { fs.writeFileSync(job.path.replace(/\.mp4$/i, '.chapters.txt'), cmd.chapters.join('\n') + '\n'); } catch { /* the video is still fine */ }
+    }
     if (loud === null) return finishJob(job, null);
     job.stage = 'loudness';
     normalizeLoudness(job.path, loud)

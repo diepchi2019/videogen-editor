@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 63 CapCut features listed, VideoGen has 55 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights, auto zoom, the reel checker and caption translation). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
+Of the 70 CapCut features listed, VideoGen has 62 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights, auto zoom, the reel checker, caption translation, edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters and the progress bar). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -57,6 +57,13 @@ Of the 63 CapCut features listed, VideoGen has 55 and 2 more in part (updated No
 | Audio | Ducking music under speech | Yes | Have (sidechain compression keyed by clip audio + voice; export only) | P1 |
 | Audio | Noise reduction, voice effects | Yes | Have (noise reduction, 8 voice effects and pitch shift on clips, overlays and audio items; export only) | P2 |
 | Clip | Auto zoom on talking heads (jump-cut framing, punch-ins) | Yes | Have (auto_zoom and 🔍 Auto zoom: every other jump cut framed tighter, punch-ins on highlighted or loudest words) | P1 |
+| Audio | Edit by text (transcript), remove retakes | Yes (text-based editing) | Have (📝 Transcript panel: click to jump, select + Delete to cut; ↺ Remove retakes; get_timeline_transcript, cut_transcript, remove_retakes) | P1 |
+| Audio | Studio voice (enhance speech) | Yes | Have (enhance_voice / 🎙 Studio voice: rumble cut, noise reduction, EQ, de-esser, compression; export only) | P1 |
+| Clip | Stabilization | Yes | Have (stabilize_clip / 〰 Stabilize: two-pass vidstab, one-pass deshake after trims) | P2 |
+| Visual | Color match between clips | Yes | Have (match_color / 🎨 Match others to this, as set_color values) | P2 |
+| Timeline | Split screen and picture-in-picture layouts | Yes | Have (set_layout: top/bottom, side by side, circle or box picture-in-picture) | P2 |
+| Media | B-roll over speech | Yes | Have (add_broll: at a phrase or time; auto by file name; Claude picks by looking at the media) | P2 |
+| Export | Chapters, progress bar, hook and subscribe styles | Partial | Have (set_chapters: MP4 chapters + description list; set_progress_bar; text styles hook and subscribe) | P2 |
 | Audio | Remove silences and filler words | Yes | Have (remove_silences and the ✂ Remove pauses button: cuts the quiet stretches between Whisper words and um/uh/ờ/ừm, one undo step, captions ripple) | P1 |
 | Audio | Royalty-free music library | Yes | Missing | P2 |
 | AI | Background removal (no green screen) | Yes | Missing | P2 |
@@ -125,7 +132,7 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe (done Nov 21, 2026: local face detector, `auto_reframe`), text to speech (done Nov 21, 2026: local Piper voices, `add_voiceover`), connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Reel checker with safe zones and caption translation done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
+Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Reel checker with safe zones and caption translation done Nov 21, 2026. Edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, progress bar, hook/subscribe styles done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
 
 ### Auto-captions setup (added Nov 5, 2026)
 

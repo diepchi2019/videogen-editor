@@ -50,6 +50,7 @@
           <div id="texts"></div>
           <div id="stageEmpty">Add clips to start</div>
           <div id="safeZones" hidden></div>
+          <div id="progressBar" hidden></div>
         </div>
       </div>
       <div id="transport">
@@ -64,7 +65,17 @@
     </section>
 
     <section id="chat" class="panel">
-      <div class="panel-title">Chat with Claude <button id="chatReset" class="small ghost" title="Start a new conversation">New</button></div>
+      <div class="panel-title">Chat with Claude <button id="chatReset" class="small ghost" title="Start a new conversation">New</button>
+        <button id="transcriptBtn" class="small toggle" title="Edit by text: the transcript of the timeline. Click a word to jump there; select words and press Delete (or ✂ Cut) to remove them from the video.">📝 Transcript</button></div>
+      <div id="transcriptPanel" hidden>
+        <div class="row">
+          <button id="trCut" class="small" title="Remove the selected words from the video (Delete)">✂ Cut selection</button>
+          <button id="trRetakes" class="small" title="Find sentences that were started and said again, and keep only the last take">↺ Remove retakes</button>
+          <button id="trReload" class="small ghost" title="Transcribe again / refresh">⟳</button>
+        </div>
+        <div id="trNote" class="note"></div>
+        <div id="trText" tabindex="0"></div>
+      </div>
       <div id="messages">
         <div class="msg assistant">Hi! Import some clips, then tell me what to do. For example:<br>
           <em>"Put all clips in order, trim each to 3 seconds, add fade transitions"</em><br>
@@ -126,6 +137,7 @@
           </select>
         </span>
         <button id="tighten" class="small" title="Cut the pauses and filler words (um, uh, ờ…) out of clips with speech, as jump cuts. One undo step.">✂ Remove pauses</button>
+        <button id="studioVoice" class="small" title="Studio voice: cleaner, clearer speech on every clip with sound and every voiceover (export only). Click again to turn it off.">🎙 Studio voice</button>
         <button id="autoZoom" class="small" title="Zoom like a talking-head edit: frame every other jump cut tighter and punch in on emphasized words (or the loudest ones). One undo step; click again to redo it.">🔍 Auto zoom</button>
         <button id="cutRange" class="small" title="Remove the range marked with I / O and close the gap (Shift+Del)" disabled>⌫ Cut range</button>
         <button id="snap" class="small toggle" title="Snap to the playhead, clip edges, markers and other items while dragging">🧲 Snap</button>

@@ -67,18 +67,27 @@ export const TEXT_STYLES = {
   boxed: { box: true, boxColor: '#000000', outline: 0, shadow: 0 },
   highlight: { color: '#ffde00', bold: true, outline: 7, outlineColor: '#000000', box: false, animation: 'pop' },
   neon: { color: '#ffffff', outline: 5, outlineColor: '#ff2bd6', blur: 3, box: false, shadow: 0 },
-  subtitle: { size: 54, y: 0.82, outline: 3, outlineColor: '#000000', box: false, shadow: 0 },
+  subtitle: { size: 54, y: 0.75, outline: 3, outlineColor: '#000000', box: false, shadow: 0 },
   sticker: { color: '#111111', box: true, boxColor: '#ffffff', bold: true, outline: 0, shadow: 0 },
+  hook: { size: 88, y: 0.2, color: '#ffffff', bold: true, box: true, boxColor: '#000000', outline: 0, shadow: 0, animation: 'pop' },
+  subscribe: { size: 56, y: 0.68, color: '#ffffff', bold: true, box: true, boxColor: '#ff0033', outline: 0, shadow: 0, animation: 'pop', animationOut: 'fade' },
 };
+
+export const MARKER_KINDS = ['note', 'beat', 'chapter'];
+// 0:00 / 1:05 / 1:02:03 as YouTube writes chapter times.
+export function chapterTime(t) {
+  const s = Math.floor(t + 1e-6), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`;
+}
 
 // One emoji (pictograph, optionally with joiners and modifiers).
 export const EMOJI_RE = /^(?=.*\p{Extended_Pictographic})(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\u200d|\ufe0f)+$/u;
 
 // Caption style presets (see set_captions).
 export const CAPTION_STYLES = {
-  classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.82 },
-  boxed: { mode: 'line', size: 60, color: '#ffffff', box: true, boxColor: '#000000', outline: 0, maxWords: 6, y: 0.82 },
-  karaoke: { mode: 'karaoke', size: 72, color: '#ffffff', highlightColor: '#ffde00', outline: 5, maxWords: 5, y: 0.8 },
+  classic: { mode: 'line', size: 64, color: '#ffffff', outline: 4, uppercase: false, maxWords: 6, y: 0.75 },
+  boxed: { mode: 'line', size: 60, color: '#ffffff', box: true, boxColor: '#000000', outline: 0, maxWords: 6, y: 0.75 },
+  karaoke: { mode: 'karaoke', size: 72, color: '#ffffff', highlightColor: '#ffde00', outline: 5, maxWords: 5, y: 0.75 },
   highlight: { mode: 'word', size: 80, color: '#ffffff', highlightColor: '#00e5ff', outline: 6, uppercase: true, maxWords: 3, y: 0.78 },
   single: { mode: 'single', size: 120, color: '#ffffff', highlightColor: '#ffffff', outline: 8, uppercase: true, maxWords: 1, y: 0.72 },
 };
@@ -244,7 +253,7 @@ function describeTiming(c) {
 }
 const describeGroup = (x) => (x.group ? `, group ${x.group}` : '');
 // Audio processing: noise reduction, voice effect, pitch.
-const describeSound = (x) => `${x.denoise ? `, denoise ${x.denoise}` : ''}${x.voice ? `, voice ${x.voice}` : ''}${x.pitch ? `, pitch ${x.pitch > 0 ? '+' : ''}${x.pitch} semitones` : ''}`;
+const describeSound = (x) => `${x.enhance ? ', studio voice' : ''}${x.denoise ? `, denoise ${x.denoise}` : ''}${x.voice ? `, voice ${x.voice}` : ''}${x.pitch ? `, pitch ${x.pitch > 0 ? '+' : ''}${x.pitch} semitones` : ''}`;
 function describeMask(m) {
   if (!m) return '';
   const where = m.shape === 'linear' || m.shape === 'mirror' ? `line through (${m.x},${m.y}) at ${m.angle}°${m.shape === 'mirror' ? ` band ${m.h}` : ''}` : `center (${m.x},${m.y}) size ${m.w}x${m.h}${m.round ? ` round ${m.round}` : ''}`;
@@ -263,7 +272,7 @@ export function summarize(p, extras = {}) {
     `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), ${describeTiming(c)}, volume ${c.volume}${describeSound(c)}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
-    describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
+    (c.stabilize ? `, stabilized ${c.stabilize}` : '') + describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
     (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : '') + describeReframe(c, c.start) +
     (c.autoZoom ? `, auto zoom (framing x${c.autoZoom.scale}${c.autoZoom.punches ? `, ${c.autoZoom.punches} punch-in${c.autoZoom.punches > 1 ? 's' : ''}` : ''})` : ''));
@@ -307,6 +316,7 @@ export function summarize(p, extras = {}) {
     `Overlays (picture-in-picture, logos, B-roll on top of the video track; higher track = on top):\n${overlays.join('\n') || '(none)'}`,
     `Text overlays:\n${texts.join('\n') || '(none)'}`,
     `Captions:\n${captions}`,
+    ...(p.progressBar ? [`Progress bar: ${p.progressBar.color}, ${p.progressBar.height}px at the ${p.progressBar.position}`] : []),
     `Audio tracks (music, sound effects, voice):\n${music.join('\n') || '(none)'}`,
     ...(markers.length ? [`Markers (timeline seconds):\n${markerText}`] : []),
   ].join('\n\n');
@@ -587,6 +597,8 @@ function applySound(x, input) {
   if (v === 'none') delete x.voice; else if (v) x.voice = v;
   const ps = num(input.pitch, 'pitch', -12, 12);
   if (ps !== undefined) { if (Math.round(ps * 10) === 0) delete x.pitch; else x.pitch = Math.round(ps * 10) / 10; }
+  const en = bool(input.enhanceVoice);
+  if (en === true) x.enhance = true; else if (en === false) delete x.enhance;
 }
 
 function captionStyle(base, input) {
@@ -1025,6 +1037,11 @@ export const ops = {
     if (s !== undefined) { if (c.freeze) fail('A freeze frame has no speed; change its length with trim_clip (out = in + seconds).'); c.speed = s; delete c.ramp; }
     const v = num(volume, 'volume', 0, 2); if (v !== undefined) c.volume = v;
     applySound(c, input);
+    const stb = num(input.stabilize, 'stabilize', 0, 1);
+    if (stb !== undefined) {
+      if (stb > 0 && (p.assets[c.assetId]?.type !== 'video' || c.freeze)) fail('Only video clips can be stabilized');
+      if (stb === 0) delete c.stabilize; else c.stabilize = r3(stb);
+    }
     const rv = bool(input.reverse);
     if (rv === true) {
       if (p.assets[c.assetId]?.type !== 'video' || c.freeze) fail('Only video clips can be reversed');
@@ -1410,7 +1427,7 @@ export const ops = {
 
   add_markers(p, { times, kind, label, replace }) {
     if (!Array.isArray(times) || !times.length) fail('times must be a non-empty array of timeline seconds');
-    const k = oneOf(kind, ['beat', 'note'], 'kind') ?? 'note';
+    const k = oneOf(kind, MARKER_KINDS, 'kind') ?? 'note';
     p.markers ||= [];
     if (bool(replace)) p.markers = p.markers.filter((m) => m.kind !== k);
     for (const [i, t] of times.entries()) {
@@ -1624,6 +1641,34 @@ export const ops = {
       if (scale !== 1 || pts.length) c.autoZoom = { scale, ...(pts.length ? { punches: pts.length / 4 } : {}) };
     }
     return `Auto zoom: ${framed} clip(s) framed tighter (x${clips.find((e) => (e.scale ?? 1) !== 1)?.scale ?? amt}) to hide jump cuts, ${punched} punch-in(s) on emphasis.`;
+  },
+
+  // YouTube chapters as chapter markers (replaces the old ones). YouTube needs the first at 0:00, at least 3,
+  // each 10s or longer; a missing 0:00 gets an "Intro" chapter.
+  set_chapters(p, { chapters }) {
+    if (!Array.isArray(chapters)) fail('chapters must be [{t (timeline seconds), title}]; [] removes them');
+    const L = layout(p);
+    const list = chapters.map((c, i) => ({ t: r3(num(c?.t ?? c?.time, `chapters[${i}].t`, 0, L.duration) ?? fail(`chapters[${i}].t is required`)), title: String(c.title ?? '').trim().slice(0, 80) || fail(`chapters[${i}].title is required`) }))
+      .sort((a, b) => a.t - b.t);
+    p.markers = (p.markers || []).filter((m) => m.kind !== 'chapter');
+    if (!list.length) return 'Removed the chapters.';
+    if (list[0].t > 0.05) list.unshift({ t: 0, title: 'Intro' });
+    for (const c of list) p.markers.push({ id: uid('mk'), t: c.t, kind: 'chapter', label: c.title });
+    p.markers.sort((a, b) => a.t - b.t);
+    const short = list.filter((c, i) => (list[i + 1]?.t ?? L.duration) - c.t < 10);
+    const warn = list.length < 3 ? ' YouTube shows chapters only when there are 3 or more.' : short.length ? ` YouTube needs each chapter to be 10s or longer: ${short.map((c) => `"${c.title}"`).join(', ')} ${short.length > 1 ? 'are' : 'is'} shorter.` : '';
+    return `Chapters: ${list.map((c) => `${chapterTime(c.t)} ${c.title}`).join(' | ')}. They go into the exported MP4 and a description text next to it.${warn}`;
+  },
+
+  // A thin bar that grows from left to right over the whole video (shows how much is left).
+  set_progress_bar(p, input) {
+    if (bool(input.enabled) === false) { delete p.progressBar; return 'Removed the progress bar.'; }
+    const pb = { color: '#ffffff', height: 10, position: 'bottom', ...(p.progressBar || {}) };
+    const c = color(input.color, 'color'); if (c) pb.color = c;
+    const h = num(input.height, 'height', 2, 60); if (h !== undefined) pb.height = Math.round(h);
+    const pos = oneOf(input.position, ['top', 'bottom'], 'position'); if (pos) pb.position = pos;
+    p.progressBar = pb;
+    return `Progress bar: ${pb.color}, ${pb.height}px at the ${pb.position}.`;
   },
 
   update_captions(p, input) {
