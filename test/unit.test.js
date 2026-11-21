@@ -1302,3 +1302,44 @@ test('settings: env > file > default, secrets never exposed, all-or-nothing patc
     for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v; else delete process.env[k];
   }
 });
+
+test('faces: YuNet decoding, NMS, subject tracking (gaps, two people, cuts), smoothing and simplification', async () => {
+  const F = await import('../src/faces.js');
+  // decodeYunet: one confident prior at stride 32, cell (row 2, col 3), offset (0.5, 0.5), size exp(1)*32.
+  const size = 640, mk = (st, k) => new Float32Array((size / st) ** 2 * k);
+  const out = {};
+  for (const st of [8, 16, 32]) { out[`cls_${st}`] = mk(st, 1); out[`obj_${st}`] = mk(st, 1); out[`bbox_${st}`] = mk(st, 4); }
+  const i = 2 * 20 + 3;
+  out.cls_32[i] = 0.9; out.obj_32[i] = 0.9; out.bbox_32.set([0.5, 0.5, 1, 1], i * 4);
+  const f = F.decodeYunet(out, size);
+  assert.equal(f.length, 1);
+  assert.ok(Math.abs(f[0].cx - 3.5 * 32) < 1e-6 && Math.abs(f[0].cy - 2.5 * 32) < 1e-6 && Math.abs(f[0].w - Math.E * 32) < 1e-4);
+  assert.ok(Math.abs(f[0].score - 0.9) < 1e-6);
+  // NMS keeps the best of overlapping boxes.
+  const kept = F.nms([{ cx: 10, cy: 10, w: 10, h: 10, score: 0.7 }, { cx: 11, cy: 10, w: 10, h: 10, score: 0.9 }, { cx: 50, cy: 50, w: 10, h: 10, score: 0.8 }], 0.3);
+  assert.deepEqual(kept.map((k) => k.score), [0.9, 0.8]);
+  // Tracking: a steady pan, a missing frame held, then a second, bigger face that only wins after ~1s.
+  const face = (cx, w = 0.1) => ({ cx, cy: 0.4, w, h: w, score: 0.9 });
+  const samples = [];
+  for (let k = 0; k <= 16; k++) samples.push({ t: k / 4, faces: k === 5 ? [] : [face(0.2 + k * 0.02)] });
+  const pan = F.subjectPath(samples);
+  assert.equal(pan.found, 0.94);
+  assert.deepEqual([pan.points[0].x, pan.points.at(-1).x], [0.2, 0.52]);
+  assert.ok(pan.points.length <= 3, `a straight pan simplifies to few points: ${pan.points.length}`);
+  const two = [];
+  for (let k = 0; k < 20; k++) two.push({ t: k / 4, faces: k < 8 ? [face(0.3)] : [face(0.3), face(0.8, 0.2)] });
+  const tr = F.subjectPath(two, { smooth: 0.5 });
+  const xAt = (pts, t) => pts.reduce((b, p) => (p.source <= t ? p : b), pts[0]).x;
+  assert.equal(xAt(tr.points, 2), 0.3);                                // the new face has not won yet
+  assert.ok(tr.points.at(-1).x > 0.75, 'after ~1s the clearly bigger face takes over');
+  // A shot change: the path jumps there instead of panning across it.
+  const cut = [];
+  for (let k = 0; k < 16; k++) cut.push({ t: k / 4, faces: [face(k < 8 ? 0.25 : 0.75)] });
+  const cp = F.subjectPath(cut, { cuts: [2] });
+  assert.deepEqual(cp.points.map((p) => [p.source, p.x]), [[0, 0.25], [1.75, 0.25], [1.98, 0.25], [2, 0.75], [3.75, 0.75]]);
+  assert.deepEqual(F.subjectPath([{ t: 0, faces: [] }]), { points: [], found: 0 });
+  // Smoothing ignores a one-frame spike and keeps the ends of a ramp in place.
+  const sm = F.smoothSeries([0, 0.1, 0.9, 0.3, 0.4, 0.5], 1);
+  assert.ok(sm[2] < 0.5 && sm[0] === 0 && sm[5] === 0.5);
+  assert.deepEqual(F.simplify([[0, 0, 0], [1, 0.5, 0], [2, 1, 0]], 0.02), [[0, 0, 0], [2, 1, 0]]);
+});

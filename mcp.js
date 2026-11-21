@@ -106,7 +106,7 @@ const PROMPTS = [
     arguments: [{ name: 'aspect', description: 'Target canvas, default 9:16' }, { name: 'subject', description: 'Who or what to follow (default: the main subject of each shot)' }],
     text: (a) => `Reframe the open VideoGen project for ${a.aspect || '9:16'}${a.subject ? `, following ${a.subject}` : ''}.
 1. get_timeline. If the canvas is not ${a.aspect || '9:16'}, set_canvas aspect ${a.aspect || '9:16'}.
-2. For each main-track clip whose source is wider than the canvas: look_at_asset with grid true over the clip's source in-out range (about one frame per second, up to 12), and read the subject's center as x (and y) fractions of the frame from the grid lines (every 10%, yellow at the middle).
+2. auto_reframe (no clipId) follows faces automatically${a.subject ? `; if ${a.subject} is not a person's face, skip it for the clips where it would follow the wrong thing` : ''}. For clips it reports without a face (or where the subject is not a face): look_at_asset with grid true over the clip's source in-out range (about one frame per second, up to 12), and read the subject's center as x (and y) fractions of the frame from the grid lines (every 10%, yellow at the middle).
 3. reframe_clip with those points in source seconds (points[].source). Use more points while the subject moves fast, fewer when it is still; if the subject stays put, one point is enough.
 4. look_at_timeline at a few times per clip to check the subject is in frame, adjust points that miss, then tell me what you changed.`,
   },
@@ -121,7 +121,7 @@ const PROMPTS = [
 2. find_moments on it with minDuration ${mn || 15}, maxDuration ${mx || 60}, count ${Math.max(8, 2 * (Number(a.count) || 3))}${a.topic ? `, query "${a.topic}"` : ''}.
 3. Read the excerpts and pick the ${a.count || 3} best that stand alone: a hook in the first seconds, one complete thought, a payoff at the end. Use get_transcript to move in/out to a better sentence if needed.
 4. For each pick: make_short with a short punchy title${a.style ? ` and styleId "${a.style}"` : ''}, open false except for the last one.
-5. For the open short: look_at_timeline; if the speaker is off-center, reframe_clip (look_at_asset with grid true to read positions). Do the same for the others with open_project.
+5. make_short follows the speaker's face automatically. For the open short: look_at_timeline; if the framing is wrong (no face found, or the wrong person), auto_reframe with a different smoothness or reframe_clip with points read from look_at_asset grid frames. Do the same for the others with open_project.
 6. Tell me the project names, their source ranges and why you picked each.`;
     },
   },

@@ -345,6 +345,23 @@ try {
   const ttsAfter = await (await fetch(`${BASE}/api/tts`)).json();
   ok(ttsAfter.elevenlabs.hasKey && ttsAfter.elevenlabs.keySource === 'saved', 'the Voice panel sees the key saved in Settings');
   await setPost({ 'tts.elevenlabs.apiKey': '', 'claude.model': '', 'text.defaultFont': '' });
+  // Auto reframe with the face detector: a face slides across a 16:9 shot; the crop path must follow it.
+  if (fs.existsSync(path.join(root, 'models', 'face', 'face_detection_yunet_2023mar.onnx'))) {
+    const fv = path.join(data, 'facemove.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x4a6070:s=1280x720:d=4:r=25', '-loop', '1', '-i', path.join(fx, 'face.jpg'),
+      '-filter_complex', "[1]scale=-2:400[f];[0][f]overlay=x='100+200*t':y=160:shortest=1,format=yuv420p", '-t', '4', fv]);
+    const ff = new FormData();
+    ff.append('files', new Blob([fs.readFileSync(fv)]), 'facemove.mp4');
+    const fA = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: ff })).json()).added[0];
+    await tool('create_project', { name: 'Auto reframe', aspect: '9:16' });
+    await tool('add_clip', { assetId: fA.id });
+    const ar = await tool('auto_reframe', {});
+    const rp = (await tool('get_timeline')).project.clips[0].reframe?.points || [];
+    // Face centre in the source: (100 + 200t + 144) / 1280 -> 0.19 at 0s, 0.66 at 3s.
+    ok(/follows the face \(in 100% of frames/.test(ar.content) && rp.length >= 2 && Math.abs(rp[0].x - 0.19) < 0.04 && Math.abs(rp.at(-1).x - (244 + 200 * rp.at(-1).at) / 1280) < 0.04,
+      `auto_reframe follows the face: ${rp.map((q) => `${q.at}s x${q.x}`).join(', ')}`);
+    await tool('open_project', { projectId: firstId });
+  } else console.log('skip - auto reframe (no face model in models/face/)');
   // Long video to shorts: speech four times with pauses over three shots, then find_moments + make_short.
   const longV = path.join(data, 'talk.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:d=10:r=25',

@@ -1020,6 +1020,12 @@ function renderInspector() {
       animSelect(c, 'animIn', 'Anim in'), animSelect(c, 'animOut', 'Anim out'),
       ...colorFields({ clipId: c.id }, c.color),
       c.effects?.length ? h('span', { class: 'note', title: 'The preview approximates effects; export and look_at_timeline show the real look' }, `✦ ${c.effects.map((e) => e.type).join(', ')}`) : null,
+      a.type !== 'audio' ? h('button', { class: 'small', title: 'Find the face in this clip and make the crop follow it (local face detector)', onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = '⌖ Finding faces…';
+        const r = await tool('auto_reframe', { clipId: c.id });
+        if (!r.isError && !r.error) addMsg('assistant', String(r.content).split('\n').slice(1, 2).join(' ').replace(/^#\d+ \S+: /, 'Auto reframe: '));
+        e.target.disabled = false; e.target.textContent = '⌖ Auto reframe';
+      } }, '⌖ Auto reframe') : null,
       c.reframe ? h('span', { class: 'note', title: 'The crop follows the subject (set by reframe_clip: ask Claude to reframe this clip)' },
         `⌖ reframe: ${c.reframe.points.length} point${c.reframe.points.length > 1 ? 's' : ''}${c.reframe.zoom ? `, ${c.reframe.zoom}x` : ''}`,
         h('button', { class: 'small ghost', title: 'Remove the reframe', onclick: () => tool('reframe_clip', { clipId: c.id, points: [] }) }, '✕')) : null,

@@ -15,6 +15,7 @@ import { transcribe, readTranscript, hasTranscript, transcriptText, MODEL_HELP }
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
 import { listLuts, resolveLut } from './luts.js';
 import { loudness, sceneChanges, findMoments, momentsText } from './moments.js';
+import { faceSamples, subjectPath, faceModelPath, FACE_HELP } from './faces.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
 
@@ -154,6 +155,7 @@ export const TOOLS = [
       fit: s('How the source fills the canvas (default cover, or the fit of the style)', { enum: FITS }),
       captions: s('Caption preset, or none (default: the captions of the style, else classic)', { enum: [...Object.keys(CAPTION_STYLES), 'none'] }),
       title: s('Optional title text shown for the first 3 seconds'), styleId: s('Optional reel style to apply (list_styles)'),
+      reframe: s('auto (default): the crop follows the speaker\'s face (local face detector); center: plain centered crop', { enum: ['auto', 'center'] }),
       open: b('Switch to the new project (default true)'), language: s('Speech language code or auto'),
     }, ['assetId', 'in', 'out']),
   },
@@ -282,6 +284,17 @@ export const TOOLS = [
       easing: s('linear (default, steady camera follow) or ease (move, then settle)', { enum: ['linear', 'ease'] }),
       zoom: n('Crop tighter than a plain cover fit, 1-4 (default 1). Lets the frame follow the subject on both axes, or punch in on a same-shape source'),
     }, ['clipId', 'points']),
+  },
+  {
+    name: 'auto_reframe',
+    description: 'Automatic reframe with a local face detector: finds the main face over each clip\'s source range and makes the crop follow it (smoothly within a shot, jumping at shot changes), then applies reframe_clip. ' +
+      'Use it when horizontal footage goes into a vertical reel (or the other way). Without clipId it does every main-track clip whose shape differs from the canvas, as one undo step. ' +
+      'Clips where no face is found are left as they are and reported: for those (products, animals, scenery) use reframe_clip with points you read from look_at_asset grid frames.',
+    input_schema: S({
+      clipId: s('Clip id (default: every clip whose shape differs from the canvas)'),
+      zoom: n('Crop tighter than a plain cover fit, 1-4 (default 1); with zoom the frame also follows the face up/down'),
+      smoothness: n('0.5 (follows quickly) .. 3 (very steady camera), default 1'),
+    }),
   },
   { name: 'add_overlay', description: 'Put a video or image ON TOP of the main video track at a timeline time: picture-in-picture, logo/watermark, B-roll cutaway (fit cover), reaction cam. Overlays do not shift other clips.', input_schema: S({ assetId: s('Asset id'), ...overlayProps }, ['assetId']) },
   { name: 'set_overlay', description: 'Change an overlay (timing, position, size, opacity, crop, volume, blend mode, chroma key for green screen, audio noise reduction...).', input_schema: S({ overlayId: s('Overlay id'), ...overlayProps }, ['overlayId']) },
@@ -507,6 +520,33 @@ export async function executeTool(name, input = {}, source = 'claude') {
         }
         return { content: out.join('\n') };
       }
+      case 'auto_reframe': {
+        const p = store.getProject(), L = layout(p);
+        if (!faceModelPath()) return { content: FACE_HELP, isError: true };
+        const smooth = input.smoothness === undefined ? 1 : Number(input.smoothness);
+        if (!(smooth >= 0.5 && smooth <= 3)) return { content: 'smoothness must be 0.5-3', isError: true };
+        const W = p.settings.width, H = p.settings.height;
+        const differs = (c) => { const a = p.assets[c.assetId]; return a.width && Math.abs(a.width / a.height - W / H) > 0.02; };
+        let targets = L.clips.filter((c) => p.assets[c.assetId]?.type !== 'audio');
+        if (input.clipId) {
+          targets = targets.filter((c) => c.id === input.clipId);
+          if (!targets.length) return { content: `No clip ${input.clipId}. Clips: ${L.clips.map((c) => c.id).join(', ')}`, isError: true };
+        } else targets = targets.filter((c) => differs(c) || Number(input.zoom) > 1);
+        if (!targets.length) return { content: 'Every clip already has the shape of the canvas: nothing to reframe. Pass clipId with zoom (e.g. 1.5) to punch in and follow a face.', isError: true };
+        const steps = [], report = [];
+        for (const c of targets) {
+          const a = p.assets[c.assetId];
+          const from = c.in, to = a.type === 'image' || c.freeze ? c.in : Math.min(c.out, a.duration);
+          const samples = await faceSamples(a, from, to);
+          const cuts = a.type === 'video' ? (await sceneChanges(a)).times.filter((t) => t > from && t < to) : [];
+          const track = subjectPath(samples, { cuts, smooth });
+          if (!track.points.length) { report.push(`#${c.index + 1} ${c.id}: no face found, left as it was`); continue; }
+          steps.push({ name: 'reframe_clip', input: { clipId: c.id, points: track.points, ...(input.zoom !== undefined ? { zoom: input.zoom } : {}) } });
+          report.push(`#${c.index + 1} ${c.id}: follows the face (in ${Math.round(track.found * 100)}% of frames, ${track.points.length} points${cuts.length ? `, ${cuts.length} shot change${cuts.length > 1 ? 's' : ''}` : ''})`);
+        }
+        if (steps.length) store.applyBatch(steps, source);
+        return { content: `Auto reframe${steps.length ? '' : ': nothing changed'}:\n${report.join('\n')}${steps.length ? '\nCheck with look_at_timeline.' : ''}` };
+      }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];
         if (!a) return { content: `No asset ${input.assetId}`, isError: true };
@@ -541,6 +581,16 @@ export async function executeTool(name, input = {}, source = 'claude') {
             note = ' No captions: no whisper model installed.';
           }
         }
+        // Auto reframe on the face before the project is built (detection is async; build must not be).
+        let facePath = null;
+        if (input.reframe !== 'center' && faceModelPath()) {
+          try {
+            const samples = await faceSamples(a, tin, Math.min(tout, a.duration));
+            const cuts = (await sceneChanges(a)).times.filter((t) => t > tin && t < tout);
+            facePath = subjectPath(samples, { cuts });
+            if (!facePath.points.length) note += ' No face found, so the crop is centered.';
+          } catch (e) { note += ` Auto reframe skipped: ${e.message}`; }
+        }
         const fmtS = (x) => `${Math.floor(x / 60)}m${String(Math.round(x % 60)).padStart(2, '0')}`;
         const msgs = [];
         const open = input.open !== false && input.open !== 'false';
@@ -552,6 +602,7 @@ export async function executeTool(name, input = {}, source = 'claude') {
             if (input.styleId) msgs.push(ops.apply_style(np, { styleId: input.styleId }));
             const fit = input.fit || (input.styleId && np.style?.clips?.fit) || 'cover';
             ops.set_clip(np, { clipId, fit });
+            if (fit === 'cover' && facePath?.points.length) { ops.reframe_clip(np, { clipId, points: facePath.points }); msgs.push(`The crop follows the face (found in ${Math.round(facePath.found * 100)}% of frames).`); }
             if (input.title) ops.add_text(np, { text: String(input.title), start: 0, end: Math.min(3, tout - tin) });
             if (words) {
               const tw = timelineWords(np, { [a.id]: words }, ['clips']);
@@ -563,7 +614,7 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const L = layout(p);
         return {
           content: `${open ? 'Created and opened' : 'Created (not opened)'} project ${p.id} "${p.name}": source ${tin}-${tout}s of "${a.name}" as a ${L.duration.toFixed(1)}s ${p.settings.aspect} short, fit ${p.clips.find((c) => c.assetId === a.id)?.fit}.` +
-            `${msgs.length ? ` ${msgs.join(' ')}` : ''}${note}${open ? ' Check it with look_at_timeline; if the subject is off-center, use reframe_clip.' : ''}`,
+            `${msgs.length ? ` ${msgs.join(' ')}` : ''}${note}${open ? ' Check it with look_at_timeline.' : ''}`,
           projectId: p.id,
         };
       }
