@@ -8,7 +8,7 @@ import { layout, uid } from './src/model.js';
 import { probe, makeThumb, needsProxy, proxyPath, startProxy, run } from './src/media.js';
 import { waveform } from './src/audio.js';
 import { TOOLS, executeTool, toolAnnotations } from './src/tools.js';
-import { invalidateFonts, readFamily } from './src/fonts.js';
+import { invalidateFonts, readFamily, fontFile, defaultFont, emRatio } from './src/fonts.js';
 import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
 import { presetLists } from './src/presets.js';
@@ -31,7 +31,18 @@ app.get('/preview/:file', (req, res) => {
   res.sendFile(fs.existsSync(proxy) ? proxy : path.join(store.MEDIA_DIR, f), (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
-const state = () => ({ ...store.withLayout(), jobs: listJobs(), projects: store.listProjects(), luts: listLuts(), whisperModel: modelPath() ? path.basename(modelPath()) : null, ...presetLists() });
+// Font files for the preview, so texts use the same font as the export (?face=regular|bold|italic|bolditalic).
+app.get('/api/font/:family', (req, res) => {
+  const f = fontFile(req.params.family, String(req.query.face || 'regular'));
+  if (!f) return res.status(404).end();
+  if (req.query.metrics !== undefined) {
+    const faces = ['regular', 'bold', 'italic', 'bolditalic'].filter((x) => fontFile(req.params.family, x));
+    return res.json({ emRatio: emRatio(f) || 0.88, faces });
+  }
+  res.set('Cache-Control', 'max-age=86400').sendFile(f, (e) => { if (e && !res.headersSent) res.status(404).end(); });
+});
+
+const state = () => ({ ...store.withLayout(), defaultFont: defaultFont(), jobs: listJobs(), projects: store.listProjects(), luts: listLuts(), whisperModel: modelPath() ? path.basename(modelPath()) : null, ...presetLists() });
 const wrap = (fn) => async (req, res) => {
   try { res.json(await fn(req, res)); } catch (e) { res.status(400).json({ error: e.message }); }
 };

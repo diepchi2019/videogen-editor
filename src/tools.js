@@ -189,7 +189,7 @@ export const TOOLS = [
     description: `Add a video effect to a main-track clip for a time range: ${EFFECTS.join(', ')}. ` +
       'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative; ' +
       'pixelate = big pixels (intensity = block size); mirror = left half mirrored to the right; kaleidoscope = top-left quarter mirrored 4 ways; film_grain = moving grain; strobe = white flicker (rate = flashes per second); comic = colored edge drawing. ' +
-      'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. Export and look_at_timeline only (not shown in the browser preview).',
+      'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. The browser preview approximates it; check the real look with look_at_timeline.',
     input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse / strobe: cycles per second (shake default 8, zoom_pulse 2, strobe 8)') }, ['clipId', 'type']),
   },
   { name: 'delete_effect', description: 'Remove an effect (ids are listed with each clip in get_timeline).', input_schema: S({ effectId: s('Effect id') }, ['effectId']) },

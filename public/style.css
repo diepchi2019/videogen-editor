@@ -122,3 +122,8 @@ button:disabled { opacity: .45; cursor: default; }
 
 #dropOverlay { position: fixed; inset: 0; background: rgba(25, 211, 197, .15); border: 3px dashed var(--accent); display: none; align-items: center; justify-content: center; font-size: 24px; font-weight: 700; z-index: 100; pointer-events: none; }
 body.dragging #dropOverlay { display: flex; }
+/* Preview layer internals: Ken Burns / effects wrapper and effect overlays (public/preview.js). */
+.layer .inner { position: absolute; inset: 0; overflow: hidden; }
+.layer .fx-vig, .layer .fx-canvas, .layer .fx-leak, .layer .fx-grain { position: absolute; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; }
+.layer .fx-leak { mix-blend-mode: screen; }
+.layer .fx-grain { mix-blend-mode: overlay; background-size: 160px 160px; }

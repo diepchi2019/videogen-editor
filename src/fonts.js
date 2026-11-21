@@ -109,6 +109,41 @@ export function defaultFont() {
   return resolveFont(def) || def;
 }
 
+// The file of a family for one face (regular, bold, italic, bolditalic), for the browser preview.
+// Face is guessed from file names: "Bold"/"Italic" in the name, or Windows-style suffixes (arialbd,
+// ariali, arialbi, calibrib, georgiaz) when the file without the suffix is also in the family. TTC is
+// skipped (browsers can't load collections).
+const SUFFIX_FACE = [['bd', 'bold'], ['bi', 'bolditalic'], ['z', 'bolditalic'], ['b', 'bold'], ['i', 'italic']];
+export function fontFile(family, face = 'regular') {
+  const e = fontIndex().get(String(family).trim().toLowerCase());
+  if (!e) return null;
+  const files = e.files.filter((f) => /\.(ttf|otf)$/i.test(f));
+  const names = new Set(files.map((f) => path.basename(f).toLowerCase()));
+  const faceOf = (f) => {
+    const n = path.basename(f).toLowerCase(), stem = n.replace(/\.(ttf|otf)$/, ''), ext = n.slice(stem.length);
+    const bold = /bold|black|heavy/.test(stem), italic = /italic|oblique/.test(stem);
+    if (bold || italic) return bold && italic ? 'bolditalic' : bold ? 'bold' : 'italic';
+    const hit = SUFFIX_FACE.find(([suf]) => stem.endsWith(suf) && names.has(stem.slice(0, -suf.length) + ext));
+    return hit ? hit[1] : 'regular';
+  };
+  return files.find((f) => faceOf(f) === face) || (face === 'regular' ? files[0] : null) || null;
+}
+
+// libass sizes text so that ascender - descender (hhea) equals the font size; CSS sizes the em.
+// Returns unitsPerEm / (ascender - descender), the CSS font-size per ASS font-size unit.
+export function emRatio(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const off = readAt(fd, 0, 12), n = off.readUInt16BE(4), dir = readAt(fd, 12, n * 16);
+    const table = (tag) => { for (let i = 0; i < n; i++) if (dir.toString('latin1', i * 16, i * 16 + 4) === tag) return dir.readUInt32BE(i * 16 + 8); return -1; };
+    const head = table('head'), hhea = table('hhea');
+    if (head < 0 || hhea < 0) return null;
+    const upm = readAt(fd, head + 18, 2).readUInt16BE(0), hh = readAt(fd, hhea + 4, 4);
+    const span = hh.readInt16BE(0) - hh.readInt16BE(2);
+    return span > 0 ? upm / span : null;
+  } catch { return null; } finally { fs.closeSync(fd); }
+}
+
 // Copy every file of the given families into dir (for the ass filter's fontsdir).
 export function stageFonts(families, dir) {
   fs.mkdirSync(dir, { recursive: true });

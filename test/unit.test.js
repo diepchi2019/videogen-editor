@@ -1040,3 +1040,89 @@ test('maskExpr: linear angles keep the documented side', async () => {
   assert.equal(evalAt(rect, 50, 50), 1); assert.equal(evalAt(rect, 31, 31), 0);         // rounded corner cut off
   assert.equal(evalAt(rect, 50, 31), 1);
 });
+
+test('preview helpers: Ken Burns, crop, vignette, effects and text match the export math', async () => {
+  const pv = await import('../public/preview.js');
+  // Ken Burns: same curves as motionFilter (zoom over the clip, pans anchor the view window).
+  assert.equal(pv.kenBurns(null, 0, 1), null);
+  assert.deepEqual(pv.kenBurns({ preset: 'zoom_in', intensity: 0.2 }, 0, 4), { z: 1, ox: 0.5, oy: 0.5 });
+  assert.deepEqual(pv.kenBurns({ preset: 'zoom_in', intensity: 0.2 }, 4, 4), { z: 1.2, ox: 0.5, oy: 0.5 });
+  assert.deepEqual(pv.kenBurns({ preset: 'pan_left', intensity: 0.2 }, 0, 4), { z: 1.2, ox: 1, oy: 0.5 });
+  assert.equal(pv.kenBurns({ preset: 'pan_down', intensity: 0.2 }, 2, 4).oy, 0.5);
+  assert.equal(pv.zoomAbout(1), '');
+  assert.match(pv.zoomAbout(1.2, 1, 0.5), /^translate\(50\.000%, 0\.000%\) scale\(1\.20000\) translate\(-50\.000%, 0\.000%\)$/);
+  // Crop -> object-view-box inset (top right bottom left).
+  assert.equal(pv.cropBox({ x: 0.25, y: 0, w: 0.5, h: 1 }), 'inset(0.000% 25.000% 0.000% 25.000%)');
+  assert.equal(pv.cropBox(undefined), '');
+  // Vignette darkens toward the corners like ffmpeg's cos^4 falloff.
+  const vg = pv.vignetteCss(1);
+  assert.match(vg, /^radial-gradient\(circle farthest-corner/);
+  const alphas = [...vg.matchAll(/rgba\(0,0,0,([\d.]+)\)/g)].map((m) => +m[1]);
+  assert.equal(alphas[0], 0); assert.ok(alphas.every((a, i) => i === 0 || a >= alphas[i - 1]));
+  assert.ok(Math.abs(alphas.at(-1) - (1 - Math.cos(0.85) ** 4)) < 0.001);
+  assert.equal(pv.vignetteCss(0), '');
+  // Effects only inside their range; each type maps to its preview part.
+  const c = { effects: [
+    { type: 'blur', from: 0, to: 1, intensity: 0.5 }, { type: 'pixelate', from: 1, to: 2, intensity: 0.5 },
+    { type: 'rgb_split', from: 2, to: 3, intensity: 1 }, { type: 'light_leak', from: 3, to: 4, intensity: 1 },
+    { type: 'film_grain', from: 4, to: 5, intensity: 1 }, { type: 'kaleidoscope', from: 5, to: 6 }, { type: 'invert', from: 6, to: 7 },
+    { type: 'zoom_pulse', from: 7, to: 8, intensity: 1, rate: 1 }, { type: 'shake', from: 8, to: 9, intensity: 1, rate: 8 },
+  ] };
+  const at = (t) => pv.effectsAt(c, t, 1080, 1920, 0.5);
+  assert.equal(at(0.5).filter, 'blur(5.50px)');                      // (2 + 18 * 0.5) * k
+  assert.deepEqual(at(1.5).canvas, { type: 'pixelate', block: 11 });  // round(4 + 36 * 0.5) * k
+  assert.equal(at(2.5).rgb, 11);                                      // round(1080 * 0.02) * k
+  assert.equal(at(3.5).leak.opacity, 0.7);
+  assert.ok(at(4.5).grain > 0.8);
+  assert.equal(at(5.5).canvas.type, 'kaleidoscope');
+  assert.equal(at(6.5).filter, 'invert(1)');
+  assert.match(at(7.5).transform, /^scale\(1\.1800\)$/);              // peak of |sin|^3 at the half period
+  assert.match(at(8.3).transform, /^translate\(/);
+  assert.deepEqual(at(9.5), { transform: '', filter: '', rgb: 0, comic: false, leak: null, grain: 0, canvas: null });
+  // Text look: outline drawn as a stroke under the fill (2x the ASS border), box padding, em ratio.
+  const look = pv.textLook({ size: 100, outline: 6, outlineColor: '#ff0000', shadow: 4, font: 'Arial', bold: false, italic: true }, 0.5, 0.9);
+  assert.equal(look.fontSize, '45.00px'); assert.equal(look.lineHeight, '50.00px');
+  assert.equal(look.webkitTextStroke, '6.00px rgba(255,0,0,1)');
+  assert.equal(look.fontWeight, '400'); assert.equal(look.fontStyle, 'italic');
+  assert.match(look.textShadow, /^2\.00px 2\.00px 0 rgba\(0,0,0,0\.6\)$/);
+  const boxed = pv.textLook({ size: 100, box: true, boxColor: '#2244ff' }, 0.5);
+  assert.equal(boxed.background, 'rgba(34,68,255,0.6)'); assert.equal(boxed.padding, '17.50px'); assert.equal(boxed.webkitTextStroke, '0');
+  assert.match(pv.textLook({ size: 72 }, 1).webkitTextStroke, /^8\.00px rgba\(0,0,0,0\.7\)$/); // old projects: automatic outline
+  // Text animations: same durations as textEvents.
+  const tx = { text: 'hello', start: 1, end: 3, animation: 'zoom', animationOut: 'slideup' };
+  assert.deepEqual(pv.textAnim(tx, 1), { op: 0, dx: 0, dy: 0, sc: 1.35, chars: null });
+  assert.deepEqual(pv.textAnim(tx, 2), { op: 1, dx: 0, dy: 0, sc: 1, chars: null });
+  assert.deepEqual(pv.textAnim(tx, 3), { op: 0, dx: 0, dy: -80, sc: 1, chars: null });
+  const tw = pv.textAnim({ text: 'abcdef', start: 0, end: 1, animation: 'typewriter' }, 0.1);
+  assert.equal(tw.chars, 2);                                           // 6 chars in 1s: 0.06s each (capped)
+});
+
+test('fonts: face files from Windows-style names, em ratio from hhea', async () => {
+  const { fontFile, emRatio, invalidateFonts } = await import('../src/fonts.js');
+  const dir = path.join(process.env.VIDEOGEN_DATA, 'fonts');
+  fs.mkdirSync(dir, { recursive: true });
+  // A minimal sfnt with name (family "Test Sans"), head (unitsPerEm 2048) and hhea (1854 / -434).
+  const sfnt = () => {
+    const fam = Buffer.from('Test Sans', 'utf16le').swap16();
+    const name = Buffer.alloc(6 + 12 + fam.length);
+    name.writeUInt16BE(0, 0); name.writeUInt16BE(1, 2); name.writeUInt16BE(18, 4);
+    [3, 1, 0x409, 1, fam.length, 0].forEach((v, i) => name.writeUInt16BE(v, 6 + i * 2));
+    fam.copy(name, 18);
+    const head = Buffer.alloc(54); head.writeUInt16BE(2048, 18);
+    const hhea = Buffer.alloc(36); hhea.writeInt16BE(1854, 4); hhea.writeInt16BE(-434, 6);
+    const tables = [['head', head], ['hhea', hhea], ['name', name]];
+    const hdr = Buffer.alloc(12 + tables.length * 16);
+    hdr.writeUInt32BE(0x00010000, 0); hdr.writeUInt16BE(tables.length, 4);
+    let off = hdr.length;
+    tables.forEach(([tag, b], i) => { hdr.write(tag, 12 + i * 16, 'latin1'); hdr.writeUInt32BE(off, 12 + i * 16 + 8); hdr.writeUInt32BE(b.length, 12 + i * 16 + 12); off += b.length; });
+    return Buffer.concat([hdr, ...tables.map(([, b]) => b)]);
+  };
+  for (const f of ['tsans.ttf', 'tsansbd.ttf', 'tsansi.ttf', 'tsansz.ttf']) fs.writeFileSync(path.join(dir, f), sfnt());
+  invalidateFonts();
+  assert.equal(path.basename(fontFile('Test Sans')), 'tsans.ttf');
+  assert.equal(path.basename(fontFile('test sans', 'bold')), 'tsansbd.ttf');
+  assert.equal(path.basename(fontFile('Test Sans', 'italic')), 'tsansi.ttf');
+  assert.equal(path.basename(fontFile('Test Sans', 'bolditalic')), 'tsansz.ttf');
+  assert.equal(fontFile('No Such Font'), null);
+  assert.ok(Math.abs(emRatio(fontFile('Test Sans')) - 2048 / 2288) < 1e-9);
+});

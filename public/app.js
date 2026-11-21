@@ -1,5 +1,6 @@
 // VideoGen editor UI (vanilla JS). The server owns the project; every edit is a tool call.
 import { srcAt, speedAt, avgRate, RAMP_PRESETS, reframeTrack, coverPosition } from '/lib/timing.js';
+import { kenBurns, zoomAbout, cropBox, vignetteCss, effectsAt, leakCss, GRAIN_URL, drawEffect, textLook, textAnim } from '/preview.js';
 const $ = (s, el = document) => el.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -26,6 +27,7 @@ let clipboard = null;     // ids copied with Ctrl+C
 let range = null;         // { in, out } timeline seconds marked with I / O, removed with Shift+Delete
 let luts = [];
 let whisperModel;          // file name of the whisper model the server uses, null when none is installed
+let defaultFont = 'Arial'; // the font texts use in the export when they set none (from /api/state)
 let captioning = false;
 let rec = null;           // voiceover recording in progress
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } } };
@@ -54,6 +56,7 @@ function setState(s) {
   if (s.projects) projects = s.projects;
   if (s.luts) luts = s.luts;
   if ('whisperModel' in s) whisperModel = s.whisperModel;
+  if (s.defaultFont) defaultFont = s.defaultFont;
   else if (switched) fetch('/api/state').then((r) => r.json()).then((j) => { projects = j.projects || projects; renderProjects(); });
   if (sel && !findSel()) sel = null;
   const alive = new Set([...P.clips, ...P.texts, ...P.overlays, ...P.music].map((x) => x.id));
@@ -279,13 +282,90 @@ function fitStage() {
 window.addEventListener('resize', () => P && (fitStage(), renderFrame(true)));
 
 // ---------- Preview playback ----------
-const layers = [...document.querySelectorAll('.layer')].map((el) => {
+// Each layer: .inner (Ken Burns + effects for the whole clip) holding the blurred background, the media,
+// a vignette, a canvas for pixel effects (pixelate, mirror, kaleidoscope), a light leak and grain.
+// The layer itself carries the transition styles.
+const svgNS = 'http://www.w3.org/2000/svg';
+const fxDefs = document.createElementNS(svgNS, 'svg');
+fxDefs.setAttribute('width', '0'); fxDefs.setAttribute('height', '0');
+fxDefs.style.position = 'absolute';
+document.body.append(fxDefs);
+const layers = [...document.querySelectorAll('.layer')].map((el, i) => {
   const bg = h('video', { class: 'bgblur', muted: true, playsinline: true, preload: 'auto' });
   bg.muted = true;
-  el.prepend(bg);
-  return { el, video: $('video:not(.bgblur)', el), img: $('img', el), bg, clipId: null };
+  const video = $('video', el), img = $('img', el);
+  const inner = h('div', { class: 'inner' });
+  const vig = h('div', { class: 'fx-vig' }), canvas = h('canvas', { class: 'fx-canvas' }), leak = h('div', { class: 'fx-leak' }), grain = h('div', { class: 'fx-grain' });
+  grain.style.backgroundImage = GRAIN_URL;
+  inner.append(bg, video, img, vig, canvas, leak, grain);
+  el.append(inner);
+  // RGB split: red moved left, blue right (dx set per frame); comic: colored edges.
+  fxDefs.insertAdjacentHTML('beforeend', `<filter id="vg-rgb-${i}" color-interpolation-filters="sRGB" x="0" y="0" width="100%" height="100%">
+    <feColorMatrix in="SourceGraphic" values="1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0" result="r"/><feOffset in="r" dx="0" result="ro"/>
+    <feColorMatrix in="SourceGraphic" values="0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 1 0" result="g"/>
+    <feColorMatrix in="SourceGraphic" values="0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 1 0" result="b"/><feOffset in="b" dx="0" result="bo"/>
+    <feBlend mode="screen" in="ro" in2="g" result="rg"/><feBlend mode="screen" in="rg" in2="bo"/></filter>
+    <filter id="vg-comic-${i}" color-interpolation-filters="sRGB"><feConvolveMatrix order="3" kernelMatrix="-1 -1 -1 -1 8 -1 -1 -1 -1" preserveAlpha="true" result="e"/>
+    <feComponentTransfer in="SourceGraphic" result="d"><feFuncR type="linear" slope="0.5"/><feFuncG type="linear" slope="0.5"/><feFuncB type="linear" slope="0.5"/></feComponentTransfer>
+    <feBlend mode="screen" in="e" in2="d"/></filter>`);
+  const offs = fxDefs.querySelectorAll(`#vg-rgb-${i} feOffset`);
+  // While paused, canvas effects need the decoded frame: draw again once a seek or load lands.
+  for (const ev of ['seeked', 'loadeddata']) video.addEventListener(ev, () => { if (!playing && P) renderFrame(); });
+  img.addEventListener('load', () => { if (!playing && P) renderFrame(); });
+  return { el, inner, video, img, bg, vig, canvas, leak, grain, rgbOffsets: offs, src: document.createElement('canvas'), scratch: document.createElement('canvas'), clipId: null };
 });
 const musicEls = new Map();
+
+// Vignette, Ken Burns and effects of a clip on its layer. g: how the media is placed (for canvas effects).
+function renderClipFx(ly, c, a, lt, g) {
+  const W = P.settings.width, H = P.settings.height, k = $('#stage').clientWidth / W, li = layers.indexOf(ly);
+  const kb = kenBurns(c.motion, lt, c.duration), fx = effectsAt(c, lt, W, H, k);
+  // Render order: placement, Ken Burns, then effects, so the effect transform is the outer one.
+  ly.inner.style.transform = [fx.transform, kb ? zoomAbout(kb.z, kb.ox, kb.oy) : ''].filter(Boolean).join(' ');
+  ly.rgbOffsets[0].setAttribute('dx', String(-fx.rgb)); ly.rgbOffsets[1].setAttribute('dx', String(fx.rgb));
+  ly.inner.style.filter = [fx.rgb ? `url(#vg-rgb-${li})` : '', fx.comic ? `url(#vg-comic-${li})` : '', fx.filter].filter(Boolean).join(' ');
+  const vig = vignetteCss(c.color?.vignette);
+  ly.vig.style.display = vig ? 'block' : 'none'; ly.vig.style.background = vig;
+  ly.leak.style.display = fx.leak ? 'block' : 'none';
+  if (fx.leak) { ly.leak.style.background = leakCss(fx.leak.phase); ly.leak.style.opacity = String(fx.leak.opacity); }
+  ly.grain.style.display = fx.grain ? 'block' : 'none';
+  if (fx.grain) { ly.grain.style.opacity = String(Math.min(1, fx.grain)); ly.grain.style.backgroundPosition = `${Math.floor(Math.random() * 160)}px ${Math.floor(Math.random() * 160)}px`; }
+  ly.canvas.style.display = fx.canvas && paintClipFrame(ly, a, g) ? 'block' : 'none';
+  if (ly.canvas.style.display === 'block') {
+    ly.canvas.width = ly.src.width; ly.canvas.height = ly.src.height;
+    drawEffect(ly.canvas.getContext('2d'), ly.src, fx.canvas, ly.scratch);
+  }
+}
+// The finished clip frame (fit, crop, position, rotation, color) on ly.src, for canvas effects. Same
+// placement as the CSS on the media element; reframe zoom is left out. False until the media has a frame.
+function paintClipFrame(ly, a, g) {
+  const st = $('#stage'), w = st.clientWidth, hgt = st.clientHeight;
+  const m = a.type === 'image' ? ly.img : ly.video;
+  const nw = m.videoWidth || m.naturalWidth, nh = m.videoHeight || m.naturalHeight;
+  if (!nw || !nh || (m.tagName === 'VIDEO' && m.readyState < 2)) return false;
+  const cv = ly.src;
+  cv.width = w; cv.height = hgt;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = P.settings.background; ctx.fillRect(0, 0, w, hgt);
+  const cr = g.crop || { x: 0, y: 0, w: 1, h: 1 };
+  const sx = cr.x * nw, sy = cr.y * nh, sw = cr.w * nw, sh = cr.h * nh;
+  const place = (cover) => {
+    const sc = cover ? Math.max(w / sw, hgt / sh) : Math.min(w / sw, hgt / sh), dw = sw * sc, dh = sh * sc;
+    const [px, py] = g.pos.split(' ').map((v) => parseFloat(v) / 100);
+    return [(w - dw) * px, (hgt - dh) * py, dw, dh];
+  };
+  if (g.fit === 'blur') { ctx.filter = 'blur(14px) brightness(.85)'; ctx.drawImage(m, sx, sy, sw, sh, ...place(true)); }
+  ctx.save();
+  ctx.globalAlpha = g.op;
+  ctx.translate(w / 2 + (g.x - 0.5) * w, hgt / 2 + (g.y - 0.5) * hgt);
+  ctx.rotate((g.rotate * Math.PI) / 180);
+  ctx.scale(g.s * (g.flipH ? -1 : 1), g.s * (g.flipV ? -1 : 1));
+  ctx.translate(-w / 2, -hgt / 2);
+  ctx.filter = g.filter || 'none';
+  ctx.drawImage(m, sx, sy, sw, sh, ...place(g.fit === 'cover'));
+  ctx.restore();
+  return true;
+}
 
 function syncVideo(v, src, t, rate, vol, play) {
   if (v.getAttribute('src') !== src) { v.src = src; v.currentTime = t; }
@@ -321,7 +401,7 @@ function renderFrame(force) {
     const s = kfVal(c, 'scale', lt, T.scale ?? 1) * an.s, x = kfVal(c, 'x', lt, T.x ?? 0.5) + an.tx, y = kfVal(c, 'y', lt, T.y ?? 0.5) + an.ty;
     const rf = reframeCss(c, a, lt, fit);
     const mediaStyle = {
-      objectPosition: rf.pos,
+      objectPosition: rf.pos, objectViewBox: cropBox(T.crop),
       transform: `translate(${(x - 0.5) * 100}%, ${(y - 0.5) * 100}%) ${rf.zoom}rotate(${T.rotate || 0}deg) scale(${s * (T.flipH ? -1 : 1)}, ${s * (T.flipV ? -1 : 1)})`,
       opacity: String(an.op), filter: colorCss(c.color),
     };
@@ -344,6 +424,7 @@ function renderFrame(force) {
       if (fit === 'blur') { ly.bg.style.display = 'block'; syncVideo(ly.bg, src, st, rate, null, playing && !still); }
       else { ly.bg.style.display = 'none'; ly.bg.pause(); }
     }
+    renderClipFx(ly, c, a, lt, { fit, pos: rf.pos, x, y, s, rotate: T.rotate || 0, flipH: T.flipH, flipV: T.flipV, op: an.op, crop: T.crop, filter: mediaStyle.filter });
   });
   for (const ly of layers) if (!used.has(ly)) { ly.el.style.display = 'none'; ly.video.pause(); ly.bg.pause(); }
 
@@ -454,12 +535,36 @@ function renderOverlays(t) {
       left: full ? '50%' : `${kfVal(o, 'x', lt, o.x) * 100}%`, top: full ? '50%' : `${kfVal(o, 'y', lt, o.y) * 100}%`,
       width: full ? '100%' : `${kfVal(o, 'scale', lt, o.scale) * 100}%`, height: full ? '100%' : 'auto',
       transform: `translate(-50%, -50%) rotate(${kfVal(o, 'rotate', lt, o.rotate || 0)}deg) scale(${(o.flipH ? -1 : 1) * popScale(o, lt)}, ${(o.flipV ? -1 : 1) * popScale(o, lt)})`,
-      filter: colorCss(o.color),
-      ...maskCss(o.mask, full ? P.settings.width / P.settings.height : (a.width || 1) / (a.height || 1)),
+      filter: colorCss(o.color), objectViewBox: cropBox(o.crop),
+      ...maskCss(o.mask, full ? P.settings.width / P.settings.height : ((a.width || 1) * (o.crop?.w ?? 1)) / ((a.height || 1) * (o.crop?.h ?? 1))),
     });
   });
   for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
 }
+
+// Fonts for the preview: the same files the export uses (GET /api/font/:family), plus the family's
+// em ratio so sizes match libass (which sizes ascent + descent, not the em).
+const fontState = new Map();
+function fontInfo(fam) {
+  let f = fontState.get(fam);
+  if (f) return f;
+  f = { em: 0.88 };
+  fontState.set(fam, f);
+  const u = `/api/font/${encodeURIComponent(fam)}`;
+  // Unknown families 404: the CSS fallback fonts are used. Missing faces (e.g. no bold file) are synthesized.
+  fetch(`${u}?metrics`).then((r) => (r.ok ? r.json() : null)).then((j) => {
+    if (!j) return;
+    f.em = j.emRatio;
+    const FACES = { regular: ['400', 'normal'], bold: ['700', 'normal'], italic: ['400', 'italic'], bolditalic: ['700', 'italic'] };
+    for (const face of j.faces) {
+      const ff = new FontFace(fam, `url(${u}?face=${face})`, { weight: FACES[face][0], style: FACES[face][1] });
+      ff.load().then(() => { document.fonts.add(ff); renderTexts(time); }).catch(() => {});
+    }
+    renderTexts(time);
+  }).catch(() => {});
+  return f;
+}
+const FALLBACK_FONTS = '"DejaVu Sans", Verdana, system-ui, sans-serif';
 
 function renderCaption(t, k) {
   const c = P.captions;
@@ -470,15 +575,10 @@ function renderCaption(t, k) {
   const up = (w) => (st.uppercase ? w.toUpperCase() : w);
   const cur = l.words.findIndex((w, i) => t >= w.start && (i + 1 >= l.words.length || t < l.words[i + 1].start));
   const words = st.mode === 'single' ? (cur >= 0 ? [l.words[cur]] : []) : l.words;
-  const size = st.size * k;
-  return h('div', {
-    class: 'ov-caption',
-    style: {
-      top: `${st.y * 100}%`, fontSize: `${size}px`, color: st.color,
-      background: st.box ? hexA(st.boxColor || '#000000', 0.6) : 'transparent', padding: st.box ? `${size * 0.3}px` : '0',
-      textShadow: st.box ? 'none' : `0 0 ${Math.max(2, (st.outline || 4) * k * 2)}px ${st.outlineColor || '#000'}, 0 0 2px #000`,
-    },
-  }, ...words.map((w, i) => {
+  // Same style as captionTags in src/ass.js: outline 4 by default, no shadow.
+  const fam = st.font || defaultFont;
+  const look = textLook({ ...st, font: fam, outline: st.box ? undefined : (st.outline ?? 4), shadow: 0 }, k, fontInfo(fam).em, FALLBACK_FONTS);
+  return h('div', { class: 'ov-caption', style: { ...look, top: `${st.y * 100}%` } }, ...words.map((w, i) => {
     const lit = st.mode === 'karaoke' ? t >= w.start : st.mode === 'word' ? l.words.indexOf(w) === cur : st.mode === 'single';
     return h('span', { style: { color: lit ? st.highlightColor : st.color } }, up(w.w) + (i < words.length - 1 ? ' ' : ''));
   }));
@@ -489,21 +589,20 @@ function renderTexts(t) {
   const k = st.clientWidth / P.settings.width;
   const box = $('#texts');
   box.replaceChildren(...P.texts.filter((x) => t >= x.start && t < x.end).map((x) => {
-    const dt = x.animation === 'pop' ? 0.15 : 0.35;
-    const prog = Math.min(1, Math.max(0, (t - x.start) / dt));
-    const anim = x.animation || 'none';
-    const dy = anim === 'slideup' ? (1 - prog) * 80 : anim === 'pop' ? (1 - prog) * 20 : 0;
-    const size = x.size * k;
+    const fam = x.font || defaultFont;
+    const an = textAnim(x, t);
+    const text = x.text.replace(/\\n/g, '\n');
+    // Typewriter: the hidden characters keep their space so the line does not move.
+    const kids = an.chars === null ? [text] : [[...text].slice(0, an.chars).join(''),
+      h('span', { style: { color: 'transparent', webkitTextStroke: '0', textShadow: 'none' } }, [...text].slice(an.chars).join(''))];
     const el = h('div', {
       class: `ov-text${isSel(x.id) ? ' selected' : ''}`,
       style: {
-        left: `${x.x * 100}%`, top: `calc(${x.y * 100}% + ${dy * k}px)`, fontSize: `${size}px`, color: x.color,
-        opacity: anim === 'none' ? 1 : prog,
-        background: x.box ? hexA(x.boxColor || '#000000', 0.6) : 'transparent',
-        padding: x.box ? `${size * 0.35}px` : '0',
-        textShadow: x.box ? 'none' : `0 0 ${Math.max(2, size / 14)}px #000, 0 0 2px #000`,
+        ...textLook({ ...x, font: fam }, k, fontInfo(fam).em, FALLBACK_FONTS),
+        left: `${x.x * 100}%`, top: `${x.y * 100}%`, opacity: String(an.op),
+        transform: `translate(-50%, -50%) translate(${(an.dx * k).toFixed(2)}px, ${(an.dy * k).toFixed(2)}px) scale(${an.sc.toFixed(4)})`,
       },
-    }, x.text.replace(/\\n/g, '\n'));
+    }, ...kids);
     el.addEventListener('pointerdown', (e) => dragTextOnStage(e, x));
     return el;
   }));
@@ -894,7 +993,7 @@ function renderInspector() {
       c.index > 0 && c.transition?.type !== 'none' ? field('Dur', c.transition.duration, (v) => tool('set_transition', { clipId: c.id, type: c.transition.type, duration: v }), { min: 0.1, max: 5 }) : null,
       animSelect(c, 'animIn', 'Anim in'), animSelect(c, 'animOut', 'Anim out'),
       ...colorFields({ clipId: c.id }, c.color),
-      c.effects?.length ? h('span', { class: 'note', title: 'Effects show in export and look_at_timeline' }, `✦ ${c.effects.map((e) => e.type).join(', ')}`) : null,
+      c.effects?.length ? h('span', { class: 'note', title: 'The preview approximates effects; export and look_at_timeline show the real look' }, `✦ ${c.effects.map((e) => e.type).join(', ')}`) : null,
       c.reframe ? h('span', { class: 'note', title: 'The crop follows the subject (set by reframe_clip: ask Claude to reframe this clip)' },
         `⌖ reframe: ${c.reframe.points.length} point${c.reframe.points.length > 1 ? 's' : ''}${c.reframe.zoom ? `, ${c.reframe.zoom}x` : ''}`,
         h('button', { class: 'small ghost', title: 'Remove the reframe', onclick: () => tool('reframe_clip', { clipId: c.id, points: [] }) }, '✕')) : null,
