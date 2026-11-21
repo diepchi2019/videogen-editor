@@ -27,6 +27,7 @@ let clipboard = null;     // ids copied with Ctrl+C
 let range = null;         // { in, out } timeline seconds marked with I / O, removed with Shift+Delete
 let luts = [];
 let whisperModel;          // file name of the whisper model the server uses, null when none is installed
+let voices = [];           // installed text-to-speech voices [{id, language}] (from /api/state)
 let defaultFont = 'Arial'; // the font texts use in the export when they set none (from /api/state)
 let captioning = false;
 let rec = null;           // voiceover recording in progress
@@ -56,6 +57,7 @@ function setState(s) {
   if (s.projects) projects = s.projects;
   if (s.luts) luts = s.luts;
   if ('whisperModel' in s) whisperModel = s.whisperModel;
+  if (s.voices) voices = s.voices;
   if (s.defaultFont) defaultFont = s.defaultFont;
   else if (switched) fetch('/api/state').then((r) => r.json()).then((j) => { projects = j.projects || projects; renderProjects(); });
   if (sel && !findSel()) sel = null;
@@ -1231,6 +1233,135 @@ $('#addText').onclick = async () => {
 };
 $('#freeze').onclick = () => tool('freeze_frame', { at: +time.toFixed(3) });
 $('#record').onclick = toggleRecord;
+// Text to speech: a small panel under the Voice button; the voiceover goes on at the playhead.
+// Engine, ElevenLabs key, model and voice are saved on the server (GET/POST /api/tts); the key is write-only.
+let tts = null;
+const exprTouched = { v: false };
+async function loadTts() {
+  tts = await (await fetch('/api/tts?voices')).json();
+  renderTts();
+}
+function renderTts() {
+  if (!tts) return;
+  const eng = $('#ttsEngine').value = tts.engine;
+  const el = tts.elevenlabs;
+  $('#ttsEleven').hidden = eng !== 'elevenlabs';
+  $('#ttsKeyState').textContent = el.hasKey ? `API key ${el.keyHint}${el.keySource === 'env' ? ' (from ELEVENLABS_API_KEY)' : ''}` : 'No API key yet';
+  $('#ttsKeyEdit').textContent = el.hasKey ? '⚙ Change key' : '⚙ Add key';
+  const models = tts.elevenlabsModels || [];
+  $('#ttsModel').replaceChildren(...(models.length ? models : [{ id: el.model, name: el.model }]).map((m) => h('option', { value: m.id, selected: m.id === el.model }, `${m.name}${m.vi ? ' · Vietnamese' : ''}`)));
+  const sel = $('#ttsVoice');
+  if (eng === 'elevenlabs') {
+    const vs = tts.elevenlabsVoices || [];
+    sel.replaceChildren(...vs.map((v) => h('option', { value: v.id, selected: v.id === el.voice || (!el.voice && v === vs[0]) },
+      `${v.name}${v.labels?.gender ? ` · ${[v.labels.gender, v.labels.accent].filter(Boolean).join(', ')}` : ''}`)));
+  } else {
+    sel.replaceChildren(h('option', { value: '' }, 'Auto voice'), ...tts.piper.voices.map((v) => h('option', { value: v.id }, v.id)));
+  }
+  $('#ttsNote').textContent = eng === 'elevenlabs'
+    ? (!el.hasKey ? 'Add your ElevenLabs API key in ⚙ Settings (elevenlabs.io → Developers → API keys). It stays on this PC.' : tts.elevenlabsError || 'Billed per character by ElevenLabs. With eleven_v3 you can add tags like [excited] or [whispers] in the text.')
+    : !tts.piper.installed ? 'Piper is not installed: see README (Text to speech).' : !tts.piper.voices.length ? 'No Piper voices installed: see README.' : '';
+}
+async function saveTts(body) {
+  const r = await (await fetch('/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  if (r.error) { $('#ttsNote').textContent = r.error; return false; }
+  await loadTts();
+  return true;
+}
+$('#ttsOpen').onclick = () => {
+  const box = $('#ttsBox');
+  box.hidden = !box.hidden;
+  if (box.hidden) return;
+  loadTts();
+  $('#ttsText').focus();
+};
+$('#ttsEngine').onchange = (e) => saveTts({ engine: e.target.value });
+$('#ttsModel').onchange = (e) => saveTts({ elevenlabsModel: e.target.value });
+$('#ttsVoice').onchange = (e) => { if ($('#ttsEngine').value === 'elevenlabs') saveTts({ elevenlabsVoice: e.target.value }); };
+$('#ttsExpr').oninput = () => { exprTouched.v = true; };
+$('#ttsKeyEdit').onclick = () => openSettings('tts.elevenlabs.apiKey');
+
+// ---------- ⚙ Settings (src/settings.js via /api/settings) ----------
+// Each field saves on change; API keys are write-only (only "set …abcd" comes back). A setting that an
+// environment variable provides is shown read-only, since the variable wins.
+const SETTING_GROUPS = [
+  ['In-app chat (Claude)', ['claude.apiKey', 'claude.model']],
+  ['Text to speech', ['tts.engine', 'tts.elevenlabs.apiKey', 'tts.piperCommand']],
+  ['Captions', ['captions.whisperModel']],
+  ['Text', ['text.defaultFont']],
+];
+const SETTING_HELP = {
+  'claude.apiKey': 'console.anthropic.com → API keys. Not needed when you edit from Claude Code (MCP).',
+  'tts.elevenlabs.apiKey': 'elevenlabs.io → Developers → API keys. Pick the model and voice in the 🗣 Voice panel.',
+  'tts.piperCommand': 'Path to a piper executable. Leave empty to use "python -m piper" (pip install piper-tts).',
+  'captions.whisperModel': 'Models in models/. Auto picks the most accurate one found.',
+  'text.defaultFont': 'Used by texts and captions that do not set a font.',
+};
+async function openSettings(focusKey) {
+  $('#settingsDlg').hidden = false;
+  $('#settingsNote').textContent = '';
+  await renderSettings((await (await fetch('/api/settings')).json()));
+  if (focusKey) $(`#settingsBody [data-key="${focusKey}"] input`)?.focus();
+}
+const closeSettings = () => { $('#settingsDlg').hidden = true; if (!$('#ttsBox').hidden) loadTts(); };
+async function saveSetting(key, value) {
+  $('#settingsNote').textContent = /apiKey/.test(key) && value ? 'Checking the key…' : 'Saving…';
+  const r = await (await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: value }) })).json();
+  if (r.error) { $('#settingsNote').textContent = r.error; return false; }
+  $('#settingsNote').textContent = r.notes?.length ? r.notes.join(' ') : '✓ Saved';
+  renderSettings(r);
+  if (key === 'claude.apiKey') fetch('/api/state').then((x) => x.json()).then(setState);
+  return true;
+}
+function renderSettings({ settings: S, choices: C }) {
+  const field = (key) => {
+    const s = S[key];
+    const envNote = s.source === 'env' ? h('span', { class: 'note env' }, `from ${s.env} (environment variable wins)`) : null;
+    let input;
+    if (s.secret) {
+      const pw = h('input', { type: 'password', autocomplete: 'off', placeholder: s.set ? 'Paste a new key to replace it' : 'Paste API key', disabled: s.source === 'env' });
+      input = h('span', { class: 'secret' },
+        h('span', { class: `keystate ${s.set ? 'on' : ''}` }, s.set ? `✓ set ${s.hint}` : 'not set'),
+        s.source === 'env' ? null : pw,
+        s.source === 'env' ? null : h('button', { class: 'small', onclick: async () => { if (pw.value.trim() && await saveSetting(key, pw.value.trim())) pw.value = ''; } }, 'Save'),
+        s.set && s.source === 'file' ? h('button', { class: 'small danger', title: 'Remove the saved key', onclick: () => saveSetting(key, '') }, 'Remove') : null);
+      pw.addEventListener('keydown', (e) => { if (e.key === 'Enter') e.target.nextElementSibling?.click(); });
+    } else {
+      const opts = s.choices || (key === 'captions.whisperModel' ? ['', ...C.whisperModels] : key === 'claude.model' ? C.claudeModels : null);
+      if (opts && key !== 'claude.model') {
+        input = h('select', { disabled: s.source === 'env', onchange: (e) => saveSetting(key, e.target.value) },
+          ...opts.map((o) => h('option', { value: o, selected: (s.value || '') === o }, o || 'Auto')),
+          s.value && !opts.includes(s.value) ? h('option', { value: s.value, selected: true }, s.value) : null);
+      } else {
+        const list = key === 'claude.model' ? 'dl-claude' : key === 'text.defaultFont' ? 'dl-fonts' : null;
+        input = h('input', { type: 'text', value: s.value || '', placeholder: key === 'text.defaultFont' ? 'Auto (Arial…)' : 'Auto', list, disabled: s.source === 'env', onchange: (e) => saveSetting(key, e.target.value) });
+      }
+    }
+    return h('div', { class: 'srow', 'data-key': key }, h('label', {}, s.label), h('div', { class: 'sval' }, input, envNote, SETTING_HELP[key] ? h('span', { class: 'note' }, SETTING_HELP[key]) : null));
+  };
+  $('#settingsBody').replaceChildren(
+    h('datalist', { id: 'dl-claude' }, ...C.claudeModels.map((m) => h('option', { value: m }))),
+    h('datalist', { id: 'dl-fonts' }, ...C.fonts.map((f) => h('option', { value: f }))),
+    ...SETTING_GROUPS.map(([title, keys]) => h('section', {}, h('h4', {}, title), ...keys.map(field))));
+}
+$('#settingsOpen').onclick = () => openSettings();
+$('#settingsClose').onclick = closeSettings;
+$('#settingsDlg').addEventListener('pointerdown', (e) => { if (e.target.id === 'settingsDlg') closeSettings(); });
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#settingsDlg').hidden) closeSettings(); });
+$('#ttsAdd').onclick = async () => {
+  const text = $('#ttsText').value.trim();
+  if (!text) return $('#ttsText').focus();
+  const b = $('#ttsAdd'), eng = $('#ttsEngine').value;
+  b.disabled = true; $('#ttsNote').textContent = 'Speaking…';
+  const r = await tool('add_voiceover', {
+    text, start: +time.toFixed(3), engine: eng, ...($('#ttsVoice').value ? { voice: $('#ttsVoice').value } : {}),
+    speed: +$('#ttsSpeed').value || 1, ...(exprTouched.v ? { expressiveness: +$('#ttsExpr').value } : {}),
+  });
+  b.disabled = false;
+  const m = /: ([\d.]+)s of speech, voice (.+?) \((ElevenLabs [^,]+, \d+ characters|Piper)\)/.exec(String(r.content));
+  $('#ttsNote').textContent = r.isError || r.error ? '' : m ? `✓ Added ${m[1]}s with ${m[2]} (${m[3]})` : '✓ Added';
+  if (!r.isError && !r.error) $('#ttsText').value = '';
+};
 // Auto-captions: preset + language are remembered; the button runs add_captions (which transcribes as needed).
 const CAPTION_PRESETS = ['classic', 'boxed', 'karaoke', 'highlight', 'single'];
 $('#capPreset').replaceChildren(...CAPTION_PRESETS.map((p) => h('option', { value: p }, p[0].toUpperCase() + p.slice(1))));

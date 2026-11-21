@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { FONTS_DIR } from './store.js';
+import { get, onSettingsChange } from './settings.js';
 
 const EXT = /\.(ttf|otf|ttc)$/i;
 const home = os.homedir();
@@ -98,15 +99,18 @@ export function listFonts(search) {
     .sort((a, b) => (b.user - a.user) || a.family.localeCompare(b.family));
 }
 
-// Default family: VIDEOGEN_FONT (a file path) or the first common sans font found.
+// Default family: the ⚙ Settings font (or VIDEOGEN_FONT): a family name or a font file path; else the first
+// common sans font found.
 let def;
+onSettingsChange((keys) => { if (keys.includes('text.defaultFont')) def = undefined; });
+const fontFileSetting = () => { const v = get('text.defaultFont'); return v && /\.(ttf|otf|ttc)$/i.test(v) && fs.existsSync(v) ? v : null; };
 export function defaultFont() {
   if (def !== undefined) return def;
-  const envFile = process.env.VIDEOGEN_FONT;
-  const fromEnv = envFile && fs.existsSync(envFile) ? readFamily(envFile) : null;
-  def = fromEnv || ['Arial', 'DejaVu Sans', 'Helvetica', 'Liberation Sans', 'Noto Sans', 'Roboto'].find((f) => resolveFont(f)) ||
+  const v = get('text.defaultFont'), f = fontFileSetting();
+  const chosen = f ? readFamily(f) : v ? resolveFont(v) : null;
+  def = chosen || ['Arial', 'DejaVu Sans', 'Helvetica', 'Liberation Sans', 'Noto Sans', 'Roboto'].find((x) => resolveFont(x)) ||
     listFonts()[0]?.family || 'Sans';
-  return resolveFont(def) || def;
+  return f ? def : resolveFont(def) || def;
 }
 
 // The file of a family for one face (regular, bold, italic, bolditalic), for the browser preview.
@@ -148,8 +152,8 @@ export function emRatio(file) {
 export function stageFonts(families, dir) {
   fs.mkdirSync(dir, { recursive: true });
   const idx = fontIndex();
-  const envFile = process.env.VIDEOGEN_FONT;
-  if (envFile && fs.existsSync(envFile)) fs.copyFileSync(envFile, path.join(dir, path.basename(envFile)));
+  const envFile = fontFileSetting();
+  if (envFile) fs.copyFileSync(envFile, path.join(dir, path.basename(envFile)));
   for (const fam of new Set(families)) {
     const e = idx.get(String(fam).toLowerCase());
     if (!e) continue;

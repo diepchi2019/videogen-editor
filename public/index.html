@@ -24,8 +24,16 @@
       <button id="exportCover" title="Save the frame at the playhead as a full-size cover image (JPEG)">Cover</button>
       <button id="exportDraft" title="Fast 540p preview render">Draft render</button>
       <button id="exportFinal" class="primary">Export MP4</button>
+      <button id="settingsOpen" title="Settings: API keys, models, voices, fonts">⚙</button>
     </div>
   </header>
+  <div id="settingsDlg" class="dlg" hidden>
+    <div class="dlg-card">
+      <div class="dlg-head"><b>Settings</b><span class="note">Saved on this PC in data/settings.json. Keys are never shown again or sent to Claude.</span><button id="settingsClose" class="small ghost" title="Close (Esc)">✕</button></div>
+      <div id="settingsBody"></div>
+      <div id="settingsNote" class="note"></div>
+    </div>
+  </div>
 
   <main>
     <section id="media" class="panel">
@@ -75,6 +83,34 @@
         <button id="addText" class="small" title="Add text at playhead">T Add text</button>
         <button id="freeze" class="small" title="Hold the frame at the playhead for 2s (F)">❄ Freeze</button>
         <button id="record" class="small" title="Record a voiceover from the microphone while the video plays from the playhead">🎙 Record</button>
+        <span class="ttsgroup">
+          <button id="ttsOpen" class="small" title="Text to speech: type a script and add it as a voiceover at the playhead (local Piper voices)">🗣 Voice</button>
+          <div id="ttsBox" hidden>
+            <div class="row">
+              <label title="Piper runs on this PC for free; ElevenLabs is much more expressive and is billed per character">Engine
+                <select id="ttsEngine"><option value="piper">Piper (local, free)</option><option value="elevenlabs">ElevenLabs (API)</option></select></label>
+            </div>
+            <div id="ttsEleven" class="eleven" hidden>
+              <div class="row" id="ttsKeyRow">
+                <span id="ttsKeyState" class="note"></span>
+                <button id="ttsKeyEdit" class="small" title="API keys are managed in ⚙ Settings">⚙ Key…</button>
+              </div>
+              <div class="row">
+                <select id="ttsModel" title="ElevenLabs model (eleven_v3 is the most expressive and understands tags like [excited])"></select>
+              </div>
+            </div>
+            <textarea id="ttsText" rows="4" placeholder="Type what the voice should say…"></textarea>
+            <div class="row">
+              <select id="ttsVoice" title="Voice"></select>
+              <label title="Speaking speed">Speed <input id="ttsSpeed" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
+            </div>
+            <div class="row">
+              <label class="grow" title="Calm and steady (left) to lively and emotional (right)">Expressive <input id="ttsExpr" type="range" min="0" max="1" step="0.05" value="0.5" /></label>
+              <button id="ttsAdd" class="small primary">Add at playhead</button>
+            </div>
+            <div id="ttsNote" class="note"></div>
+          </div>
+        </span>
         <span class="capgroup" title="Auto-captions from speech (local Whisper): transcribes the clips, overlays and voice items, then replaces any existing captions">
           <button id="captions" class="small">CC Captions</button>
           <select id="capPreset" title="Caption look"></select>

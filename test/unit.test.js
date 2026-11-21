@@ -1180,3 +1180,125 @@ test('createProject open:false saves without switching', () => {
   assert.equal(store.getProject().id, before);
   assert.ok(store.listProjects().some((x) => x.id === p.id && x.name === 'Background short'));
 });
+
+test('tts: voices from models/piper, picking by id, language or text', async () => {
+  const tts = await import('../src/tts.js');
+  const dir = path.join(process.env.VIDEOGEN_DATA, 'models', 'piper');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'zz_ZZ-test-low.onnx'), 'x');
+  fs.writeFileSync(path.join(dir, 'zz_ZZ-test-low.onnx.json'), JSON.stringify({ language: { code: 'zz_ZZ', name_english: 'Testish' }, audio: { quality: 'low' }, speaker_id_map: { anna: 0, ben: 1 } }));
+  fs.writeFileSync(path.join(dir, 'no-config.onnx'), 'x');   // a voice without its .json is skipped
+  const zz = tts.listVoices().find((v) => v.id === 'zz_ZZ-test-low');
+  assert.deepEqual({ ...zz, file: path.basename(zz.file) }, { id: 'zz_ZZ-test-low', file: 'zz_ZZ-test-low.onnx', language: 'zz_ZZ', languageName: 'Testish', quality: 'low', speakers: ['anna', 'ben'] });
+  assert.ok(!tts.listVoices().some((v) => v.id === 'no-config'));
+  const voices = [
+    { id: 'en_US-lessac-medium', language: 'en_US' }, { id: 'en_GB-alba-medium', language: 'en_GB' }, { id: 'vi_VN-vais1000-medium', language: 'vi_VN' },
+  ];
+  assert.equal(tts.pickVoice(voices, { text: 'Hello there' }).id, 'en_US-lessac-medium');
+  assert.equal(tts.pickVoice(voices, { text: 'Chào mừng các bạn' }).id, 'vi_VN-vais1000-medium');
+  assert.equal(tts.pickVoice(voices, { voice: 'en_GB-alba-medium' }).id, 'en_GB-alba-medium');
+  assert.equal(tts.pickVoice(voices, { voice: 'en-GB' }).id, 'en_GB-alba-medium');
+  assert.equal(tts.pickVoice(voices, { voice: 'vi' }).id, 'vi_VN-vais1000-medium');
+  assert.equal(tts.pickVoice(voices, { voice: 'fr' }), null);
+  assert.equal(tts.pickVoice([], { text: 'x' }), null);
+  await assert.rejects(() => tts.synthesize({ text: '  ' }), /text is required/);
+});
+
+test('tts engines: expressiveness mapping, ElevenLabs voice picking, settings never expose the key', async () => {
+  const tts = await import('../src/tts.js');
+  // v3 only takes three stability steps; older models get stability + style.
+  assert.deepEqual(tts.elevenVoiceSettings('eleven_v3', 0.9), { stability: 0 });
+  assert.deepEqual(tts.elevenVoiceSettings('eleven_v3', 0.5), { stability: 0.5 });
+  assert.deepEqual(tts.elevenVoiceSettings('eleven_v3', 0), { stability: 1 });
+  assert.deepEqual(tts.elevenVoiceSettings('eleven_multilingual_v2', 1), { stability: 0.2, similarity_boost: 0.75, style: 0.7, use_speaker_boost: true });
+  assert.equal(tts.elevenVoiceSettings('eleven_v3', undefined), undefined);
+  assert.deepEqual(tts.piperNoise(0), ['--noise-scale', '0.35', '--noise-w-scale', '0.45']);
+  assert.deepEqual(tts.piperNoise(1), ['--noise-scale', '1.05', '--noise-w-scale', '1.25']);
+  assert.deepEqual(tts.piperNoise(undefined), []);
+  const vs = [{ id: 'abc', name: 'Custom', category: 'cloned' }, { id: 'r1', name: 'Rachel', category: 'premade' }];
+  assert.equal(tts.pickElevenVoice(vs).id, 'r1');                       // default: first premade
+  assert.equal(tts.pickElevenVoice(vs, 'rachel').id, 'r1');
+  assert.equal(tts.pickElevenVoice(vs, 'ABC').id, 'abc');
+  assert.equal(tts.pickElevenVoice(vs, 'Cus').id, 'abc');
+  assert.equal(tts.pickElevenVoice(vs, 'nobody'), null);
+  // Settings: engine/model/voice saved; a malformed key is refused before any network call; '' removes the key.
+  const prev = process.env.ELEVENLABS_API_KEY;
+  delete process.env.ELEVENLABS_API_KEY;
+  try {
+    await assert.rejects(() => tts.saveTtsSettings({ elevenlabsKey: 'short' }), /does not look like/);
+    await assert.rejects(() => tts.saveTtsSettings({ engine: 'openai' }), /engine must be one of/);
+    const st = await tts.saveTtsSettings({ engine: 'elevenlabs', elevenlabsModel: 'eleven_multilingual_v2', elevenlabsVoice: 'Rachel' });
+    assert.deepEqual(st.elevenlabs, { hasKey: false, keySource: null, keyHint: null, model: 'eleven_multilingual_v2', voice: 'Rachel' });
+    assert.equal(st.engine, 'elevenlabs');
+    process.env.ELEVENLABS_API_KEY = 'sk_from_env_1234wxyz';
+    const env = tts.ttsSettings();
+    assert.deepEqual([env.elevenlabs.hasKey, env.elevenlabs.keySource, env.elevenlabs.keyHint], [true, 'env', '…wxyz']);
+    assert.ok(!JSON.stringify(env).includes('sk_from_env'));
+    delete process.env.ELEVENLABS_API_KEY;
+    await assert.rejects(() => tts.synthesize({ text: 'hi' }), /No ElevenLabs API key/);   // default engine is elevenlabs now, no key
+    await tts.saveTtsSettings({ engine: 'piper', elevenlabsModel: '', elevenlabsVoice: '' });
+    assert.equal(tts.ttsSettings().elevenlabs.model, tts.EL_DEFAULT_MODEL);
+  } finally { if (prev !== undefined) process.env.ELEVENLABS_API_KEY = prev; }
+});
+
+test('settings: env > file > default, secrets never exposed, all-or-nothing patches, tts.json moves in, hand edits reload', async () => {
+  const S = await import('../src/settings.js');
+  const file = path.join(process.env.VIDEOGEN_DATA, 'settings.json');
+  const saved = { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, CLAUDE_MODEL: process.env.CLAUDE_MODEL };
+  delete process.env.ANTHROPIC_API_KEY; delete process.env.CLAUDE_MODEL;
+  try {
+    // The old TTS-only file is merged in once and removed.
+    fs.rmSync(file, { force: true });
+    fs.writeFileSync(path.join(process.env.VIDEOGEN_DATA, 'tts.json'), JSON.stringify({ engine: 'elevenlabs', elevenlabs: { apiKey: 'old-el-key-0123456789', voice: 'Rachel' } }));
+    S.reloadSettings();
+    assert.equal(S.get('tts.engine'), 'elevenlabs');
+    assert.equal(S.get('tts.elevenlabs.voice'), 'Rachel');
+    assert.ok(!fs.existsSync(path.join(process.env.VIDEOGEN_DATA, 'tts.json')));
+    // Defaults, file values, then the environment on top.
+    assert.equal(S.get('claude.model'), 'claude-sonnet-5-5');
+    assert.equal(S.source('claude.model'), 'default');
+    const seen = [];
+    const off = S.onSettingsChange((keys) => seen.push(...keys));
+    S.setSettings({ 'claude.model': 'claude-opus-5-5', 'claude.apiKey': 'sk-ant-file-key-abcd' });
+    assert.deepEqual(seen, ['claude.model', 'claude.apiKey']);
+    assert.equal(S.get('claude.model'), 'claude-opus-5-5'); assert.equal(S.source('claude.model'), 'file');
+    process.env.CLAUDE_MODEL = 'claude-haiku-5-5';
+    assert.equal(S.get('claude.model'), 'claude-haiku-5-5'); assert.equal(S.source('claude.model'), 'env');
+    delete process.env.CLAUDE_MODEL;
+    // Secrets: only set + last 4 characters leave this module.
+    const pub = S.publicSettings();
+    assert.deepEqual(pub['claude.apiKey'], { label: pub['claude.apiKey'].label, source: 'file', env: 'ANTHROPIC_API_KEY', secret: true, set: true, hint: '…abcd' });
+    assert.ok(!JSON.stringify(pub).includes('sk-ant-file') && !JSON.stringify(pub).includes('old-el-key'));
+    assert.deepEqual(pub['tts.engine'].choices, ['piper', 'elevenlabs']);
+    // A bad value anywhere in a patch changes nothing.
+    assert.throws(() => S.setSettings({ 'claude.model': 'claude-sonnet-5-5', 'tts.engine': 'openai' }), /tts.engine must be one of/);
+    assert.equal(S.get('claude.model'), 'claude-opus-5-5');
+    assert.throws(() => S.setSettings({ 'claude.apiKey': 'bad key' }), /does not look like/);
+    assert.throws(() => S.setSettings({ 'no.such': 1 }), /Unknown setting/);
+    // '' clears back to the default; the file is plain JSON with nested sections.
+    S.setSettings({ 'claude.model': '' });
+    assert.equal(S.source('claude.model'), 'default');
+    const disk = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(disk.claude.apiKey, 'sk-ant-file-key-abcd');
+    assert.equal(disk.tts.elevenlabs.voice, 'Rachel');
+    // Editing the file by hand is picked up (with change events) without a restart.
+    seen.length = 0;
+    disk.text = { defaultFont: 'Georgia' };
+    fs.writeFileSync(file, JSON.stringify(disk));
+    const t = new Date(Date.now() + 5000); fs.utimesSync(file, t, t);
+    assert.equal(S.get('text.defaultFont'), 'Georgia');
+    assert.ok(seen.includes('text.defaultFont'));
+    off();
+    // Whisper model: a file name is looked up in models/; a missing one means no model (not a silent fallback).
+    const { modelPath } = await import('../src/transcribe.js');
+    fs.mkdirSync(path.join(process.env.VIDEOGEN_DATA, 'models'), { recursive: true });
+    fs.writeFileSync(path.join(process.env.VIDEOGEN_DATA, 'models', 'ggml-tiny.bin'), 'x');
+    S.setSettings({ 'captions.whisperModel': 'ggml-tiny.bin' });
+    assert.equal(modelPath(), path.join(process.env.VIDEOGEN_DATA, 'models', 'ggml-tiny.bin'));
+    S.setSettings({ 'captions.whisperModel': 'ggml-missing.bin' });
+    assert.equal(modelPath(), null);
+    S.setSettings({ 'captions.whisperModel': '', 'claude.apiKey': '', 'text.defaultFont': '', 'tts.engine': '', 'tts.elevenlabs.apiKey': '', 'tts.elevenlabs.voice': '' });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v; else delete process.env[k];
+  }
+});

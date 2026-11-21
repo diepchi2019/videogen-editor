@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 57 CapCut features listed, VideoGen has 47 and 3 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects and long video to short clips). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI features, text to speech, emoji stickers and P2 extras.
+Of the 57 CapCut features listed, VideoGen has 48 and 3 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips and text to speech). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -46,7 +46,7 @@ Of the 57 CapCut features listed, VideoGen has 47 and 3 more in part (updated No
 | Text | Auto-captions from speech | Yes | Have (local Whisper, cached per file) | P0 |
 | Text | Word-by-word karaoke captions | Yes | Have (karaoke, word highlight, single word, line) | P0 |
 | Text | Stickers, emoji, GIFs | Yes | Partial (transparent PNG and animated GIF stickers as overlays: GIFs loop, pop-in animation; no emoji or sticker library) | P2 |
-| Text | Text to speech | Yes | Missing | P1 |
+| Text | Text to speech | Yes | Have (local Piper voices, free, auto-picked by language; or ElevenLabs with your API key for expressive voices and [excited]-style tags; Expressive slider; added as a voice track, so ducking, voice effects and captions apply; 🗣 Voice panel; no lipsync) | P1 |
 | Audio | Music track with fades | Yes | Have | P0 |
 | Audio | Multiple audio tracks, sound effects | Yes | Have (music / sfx / voice roles, numbered tracks) | P0 |
 | Audio | Waveform on timeline | Yes | Have (audio items and clips with sound) | P1 |
@@ -75,7 +75,7 @@ Of the 57 CapCut features listed, VideoGen has 47 and 3 more in part (updated No
 
 ## MCP server features
 
-The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 73 tools (74 with import_media) and 5 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
+The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 75 tools (76 with import_media) and 5 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
 
 | Feature | What it lets Claude do | VideoGen | Priority |
 | --- | --- | --- | --- |
@@ -116,10 +116,10 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
      - **Extras (P2) — done Nov 21, 2026:** chroma key (`chromakey`), opacity and blend modes (`blend`) and noise reduction (`afftdn`) on Nov 20; on Nov 21 shape and split masks on overlays (`set_mask`), voice effects (chipmunk, deep, robot, echo, hall, telephone, radio, megaphone) and pitch shift, looping GIF and transparent image stickers with a pop-in animation, smooth slow motion (`minterpolate` blend or motion), and 6 more effects (pixelate, mirror, kaleidoscope, film grain, strobe, comic). Left: emoji stickers (libass can't draw color emoji) and a built-in sticker library.
      - **Preview gaps — done Nov 21, 2026:** effects (CSS filters and transforms, SVG filters for RGB split and comic, a canvas for pixelate / mirror / kaleidoscope, light leak and grain layers), Ken Burns, crop, vignette, and text in the export's own font files and sizes with outline, shadow, glow, box and every in / out animation including typewriter. Still export-only: LUTs, chroma key, removed regions, audio processing and smooth slow motion.
      - **Claude does the AI part:** a basic auto reframe (done Nov 20, 2026: `reframe_clip` + `look_at_asset` grid + `reframe_to_vertical` prompt), and long video to short clips (done Nov 21, 2026: `find_moments` lists candidate moments from transcript, loudness and scene changes for Claude to pick from, `make_short` turns each into a captioned 9:16 project, `shorts_from_video` prompt).
-3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe, text to speech, connect the AI video pipeline (generate clips and drop them on the timeline).
+3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe, text to speech (done Nov 21, 2026: local Piper voices, `add_voiceover`), connect the AI video pipeline (generate clips and drop them on the timeline).
 4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
 
-Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Then the rest of Phase 3 (text to speech, auto reframe with a detector, AI pipeline).
+Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Then the rest of Phase 3 (auto reframe with a detector, AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
 
 ### Auto-captions setup (added Nov 5, 2026)
 

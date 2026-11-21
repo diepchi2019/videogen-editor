@@ -5,6 +5,7 @@ import path from 'node:path';
 import { run } from './media.js';
 import { decodeMono } from './audio.js';
 import { ANALYSIS_DIR, MEDIA_DIR, DATA_DIR } from './store.js';
+import { get } from './settings.js';
 
 const q = (s) => `'${String(s).replace(/\\/g, '/').replace(/'/g, "'\\''").replace(/:/g, '\\:')}'`;
 
@@ -13,9 +14,18 @@ export const MODEL_FILES = ['ggml-large-v3-turbo-q5_0.bin', 'ggml-large-v3-turbo
 export const MODEL_HELP = 'No whisper model found. Download one into models/, e.g. ' +
   'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin (most accurate) or ggml-base.bin (fastest), ' +
   'or set VIDEOGEN_WHISPER_MODEL to a model file.';
+export const modelDirs = () => [path.resolve('models'), path.join(DATA_DIR, 'models')];
+// Whisper models found in models/ or data/models/ (file names, most accurate first).
+export const installedModels = () => MODEL_FILES.filter((f) => modelDirs().some((d) => fs.existsSync(path.join(d, f))));
+// The chosen model (⚙ Settings or VIDEOGEN_WHISPER_MODEL: a path or a file name in models/), else the most accurate found.
 export function modelPath() {
-  if (process.env.VIDEOGEN_WHISPER_MODEL) return fs.existsSync(process.env.VIDEOGEN_WHISPER_MODEL) ? process.env.VIDEOGEN_WHISPER_MODEL : null;
-  const dirs = [path.resolve('models'), path.join(DATA_DIR, 'models')];
+  const chosen = get('captions.whisperModel');
+  if (chosen) {
+    if (fs.existsSync(chosen)) return chosen;
+    for (const d of modelDirs()) if (fs.existsSync(path.join(d, chosen))) return path.join(d, chosen);
+    return null;
+  }
+  const dirs = modelDirs();
   for (const f of MODEL_FILES) for (const d of dirs) if (fs.existsSync(path.join(d, f))) return path.join(d, f);
   return null;
 }

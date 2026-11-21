@@ -13,7 +13,11 @@ import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
 import { presetLists } from './src/presets.js';
 import { importLut, listLuts } from './src/luts.js';
-import { modelPath } from './src/transcribe.js';
+import { modelPath, installedModels } from './src/transcribe.js';
+import { listVoices, ttsSettings, saveTtsSettings, elevenVoices, elevenModels, verifyElevenKey } from './src/tts.js';
+import { publicSettings, setSettings, get as getSetting } from './src/settings.js';
+import { listFonts } from './src/fonts.js';
+import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -42,7 +46,7 @@ app.get('/api/font/:family', (req, res) => {
   res.set('Cache-Control', 'max-age=86400').sendFile(f, (e) => { if (e && !res.headersSent) res.status(404).end(); });
 });
 
-const state = () => ({ ...store.withLayout(), defaultFont: defaultFont(), jobs: listJobs(), projects: store.listProjects(), luts: listLuts(), whisperModel: modelPath() ? path.basename(modelPath()) : null, ...presetLists() });
+const state = () => ({ ...store.withLayout(), defaultFont: defaultFont(), chatReady: !!getSetting('claude.apiKey'), jobs: listJobs(), projects: store.listProjects(), luts: listLuts(), whisperModel: modelPath() ? path.basename(modelPath()) : null, voices: listVoices().map((v) => ({ id: v.id, language: v.language })), ...presetLists() });
 const wrap = (fn) => async (req, res) => {
   try { res.json(await fn(req, res)); } catch (e) { res.status(400).json({ error: e.message }); }
 };
@@ -60,6 +64,40 @@ store.onChange((p, source) => broadcast('project', { project: p, layout: layout(
 setInterval(() => { if (listJobs().some((j) => j.status === 'running' || Date.now() - (j.finishedAt || 0) < 3000)) broadcast('jobs', listJobs()); }, 700);
 
 app.get('/api/state', wrap(state));
+
+// Text-to-speech settings for the Voice panel. The API key is write-only: it is never sent back.
+app.get('/api/tts', wrap(async (req) => {
+  const st = ttsSettings();
+  if (req.query.voices === undefined || !st.elevenlabs.hasKey) return st;
+  try {
+    const [voices, models] = await Promise.all([elevenVoices(), elevenModels().catch(() => [])]);
+    return { ...st, elevenlabsVoices: voices.map((v) => ({ id: v.id, name: v.name, labels: v.labels })), elevenlabsModels: models.map((m) => ({ id: m.id, name: m.name, vi: m.languages.some((l) => l.id === 'vi') })) };
+  } catch (e) { return { ...st, elevenlabsError: e.message }; }
+}));
+app.post('/api/tts', wrap(async (req) => saveTtsSettings(req.body || {})));
+
+// ⚙ Settings: every setting in one place (src/settings.js). Keys are write-only; a new key is checked first.
+const CLAUDE_MODELS = ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5', 'claude-fable-5-2'];
+const settingsView = () => ({
+  settings: publicSettings(),
+  choices: { whisperModels: installedModels(), claudeModels: CLAUDE_MODELS, fonts: listFonts().map((f) => f.family) },
+});
+app.get('/api/settings', wrap(settingsView));
+app.post('/api/settings', wrap(async (req) => {
+  const patch = req.body || {};
+  const notes = [];
+  if (patch['tts.elevenlabs.apiKey']) await verifyElevenKey(patch['tts.elevenlabs.apiKey']);
+  if (patch['claude.apiKey']) {
+    // A wrong key is refused; if Anthropic cannot be reached the key is kept and checked on the first message.
+    try { await new Anthropic({ apiKey: String(patch['claude.apiKey']).trim() }).models.list({ limit: 1 }); } catch (e) {
+      if (e?.status === 401 || e?.status === 403) throw new Error('Anthropic refused that API key (401). Check it at console.anthropic.com.');
+      notes.push(`Saved, but the key could not be checked now (${e?.message || e}).`);
+    }
+  }
+  setSettings(patch);
+  return { ...settingsView(), notes };
+}));
+
 
 const upload = multer({
   storage: multer.diskStorage({

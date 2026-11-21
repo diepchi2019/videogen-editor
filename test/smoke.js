@@ -7,12 +7,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { startMockElevenLabs } from './mock-elevenlabs.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const fx = path.join(root, 'test', 'fixtures');
 const data = fs.mkdtempSync(path.join(os.tmpdir(), 'videogen-test-'));
 const PORT = 3999, BASE = `http://localhost:${PORT}`;
-const srv = spawn('node', ['server.js'], { cwd: root, env: { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data }, stdio: 'inherit' });
+// A fake ElevenLabs API stands in for the real one (no key, no cost).
+const mockEl = await startMockElevenLabs(3201);
+const srvEnv = { ...process.env, PORT: String(PORT), VIDEOGEN_DATA: data, ELEVENLABS_BASE_URL: `http://localhost:${mockEl.port}` };
+delete srvEnv.ELEVENLABS_API_KEY;
+const srv = spawn('node', ['server.js'], { cwd: root, env: srvEnv, stdio: 'inherit' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const ok = (c, m) => { if (!c) throw new Error(`FAIL: ${m}`); console.log(`ok - ${m}`); };
 const hasWhisper = fs.existsSync(process.env.VIDEOGEN_WHISPER_MODEL || path.join(root, 'models', 'ggml-base.bin'));
@@ -293,6 +298,53 @@ try {
   const centre = (t) => [...execFileSync('ffmpeg', ['-v', 'error', '-ss', String(t), '-i', rPath, '-frames:v', '1', '-vf', 'crop=20:20:(iw-20)/2:(ih-20)/2,scale=1:1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'])];
   const hits = [0.3, 1.5, 2.5, 3.7].map(centre);
   ok(rPath && hits.every(([r, , b]) => r > 150 && b < 100), `reframe keeps the moving subject centered (centre pixels ${hits.map((x) => x.join('/')).join(' ')})`);
+  // Text to speech (Piper): the voiceover goes on a voice track and Whisper hears the same words.
+  const voices = await tool('list_voices');
+  if (/Text-to-speech voices/.test(voices.content)) {
+    const vo = await tool('add_voiceover', { text: 'Welcome to the island. The quick brown fox jumps.', start: 0.2 });
+    ok(/Added voice voice_\w+ .*s of speech, voice /.test(vo.content), vo.content.split(':')[0]);
+    if (hasWhisper) {
+      const voAsset = Object.values((await tool('get_timeline')).project.assets).find((x) => x.tts);
+      const heard = (await tool('get_transcript', { assetId: voAsset.id })).content;
+      ok(/island/i.test(heard) && /fox/i.test(heard), `Whisper hears the voiceover: ${heard.split('\n')[1]}`);
+    }
+  } else console.log('skip - text to speech (no Piper or no voices)');
+  // ElevenLabs engine against the fake API: a bad key is refused, the key is never sent back, delivery settings
+  // reach the API, and asking again for the same voiceover makes no new (billed) request.
+  const ttsPost = async (body) => (await fetch(`${BASE}/api/tts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const bad = await ttsPost({ elevenlabsKey: 'wrong-key-0123456789abcdef' });
+  ok(/Invalid API key/.test(bad.error || ''), `bad ElevenLabs key refused: ${bad.error}`);
+  const KEY = 'test-key-0123456789abcd';
+  const saved = await ttsPost({ elevenlabsKey: KEY, engine: 'elevenlabs', elevenlabsVoice: 'vRachel01' });
+  const ttsView = await (await fetch(`${BASE}/api/tts?voices`)).text();
+  ok(saved.elevenlabs?.hasKey && saved.elevenlabs.keyHint === '…abcd' && !ttsView.includes(KEY) && !JSON.stringify(await (await fetch(`${BASE}/api/state`)).json()).includes(KEY) &&
+    /"name":"Rachel"/.test(ttsView) && /"id":"eleven_v3","name":"Eleven v3","vi":true/.test(ttsView) && !/eleven_english_sts_v2/.test(ttsView), 'ElevenLabs key saved, never sent back; voices and TTS models listed');
+  const elText = '[excited] We made it to the island!';
+  const ev = await tool('add_voiceover', { text: elText, start: 1, expressiveness: 0.9 });
+  const calls1 = await (await fetch(`http://localhost:${mockEl.port}/mock/requests`)).json();
+  ok(/ElevenLabs eleven_v3, 35 characters/.test(ev.content) && calls1.length === 1 && calls1[0].voice === 'vRachel01' && calls1[0].body.model_id === 'eleven_v3' &&
+    calls1[0].body.voice_settings?.stability === 0 && calls1[0].body.text === elText && /output_format=mp3_44100_128/.test(calls1[0].query), `ElevenLabs voiceover: ${ev.content.split(': ').pop()}`);
+  await tool('add_voiceover', { text: elText, start: 4, expressiveness: 0.9 });
+  const ev2 = await tool('add_voiceover', { text: 'Xin chào', engine: 'elevenlabs', voice: 'Minh', model: 'eleven_multilingual_v2', expressiveness: 0.2, speed: 1.2 });
+  const calls2 = await (await fetch(`http://localhost:${mockEl.port}/mock/requests`)).json();
+  ok(calls2.length === 2 && calls2[1].voice === 'vMinh0002' && calls2[1].body.voice_settings.stability === 0.68 && calls2[1].body.voice_settings.style === 0.14 && /voice Minh/.test(ev2.content),
+    'same ElevenLabs voiceover reused (no second request); voice by name, model and expressiveness passed');
+  const lv = await tool('list_voices');
+  ok(/Default engine: elevenlabs/.test(lv.content) && /eleven_v3 \(2 languages, Vietnamese\)/.test(lv.content) && /Rachel \(female, american, young\)/.test(lv.content), 'list_voices shows the ElevenLabs account');
+  await ttsPost({ engine: 'piper', elevenlabsKey: '' });
+  const off = await tool('add_voiceover', { text: 'no key now', engine: 'elevenlabs' }).catch((e) => e.message);
+  ok(/No ElevenLabs API key/.test(off), 'removing the key stops ElevenLabs with a clear message');
+  // ⚙ Settings: one place for every setting; keys are checked, saved and never sent back.
+  const setPost = async (body) => (await fetch(`${BASE}/api/settings`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const badSet = await setPost({ 'tts.elevenlabs.apiKey': 'wrong-key-0123456789abcdef' });
+  const goodSet = await setPost({ 'tts.elevenlabs.apiKey': KEY, 'claude.model': 'claude-opus-5-5', 'text.defaultFont': 'Arial' });
+  const setView = await (await fetch(`${BASE}/api/settings`)).text();
+  ok(/Invalid API key/.test(badSet.error || '') && goodSet.settings['tts.elevenlabs.apiKey'].set && goodSet.settings['tts.elevenlabs.apiKey'].hint === '…abcd' &&
+    goodSet.settings['claude.model'].value === 'claude-opus-5-5' && !setView.includes(KEY) && JSON.parse(setView).choices.claudeModels.includes('claude-sonnet-5-5'),
+    '/api/settings checks and saves keys without sending them back');
+  const ttsAfter = await (await fetch(`${BASE}/api/tts`)).json();
+  ok(ttsAfter.elevenlabs.hasKey && ttsAfter.elevenlabs.keySource === 'saved', 'the Voice panel sees the key saved in Settings');
+  await setPost({ 'tts.elevenlabs.apiKey': '', 'claude.model': '', 'text.defaultFont': '' });
   // Long video to shorts: speech four times with pauses over three shots, then find_moments + make_short.
   const longV = path.join(data, 'talk.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'color=c=blue:s=640x360:d=10:r=25', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:d=10:r=25',
@@ -338,4 +390,5 @@ try {
 } finally {
   await mcp?.close().catch(() => {});
   srv.kill();
+  mockEl.server.close();
 }

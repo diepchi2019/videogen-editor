@@ -2,7 +2,7 @@
 import {
   TRANSITIONS, ASPECTS, FITS, MOTIONS, TEXT_ANIM_IN, TEXT_ANIM_OUT, TEXT_STYLES, AUDIO_ROLES, OVERLAY_FITS, OVERLAY_ANIMS, BLEND_MODES,
   CAPTION_MODES, CAPTION_STYLES, REGION_MODES, MASK_SHAPES, VOICE_EFFECTS, SMOOTH_MODES, CLIP_ANIMS, FILTERS, EFFECTS, KEYFRAME_PROPS, STYLE_PARTS, RAMP_PRESETS, REVERSE_MAX, summarize, timelineWords, layout, env, ops,
-  styleFromProject, describeStyle, normalizeStyle, makeTemplate, describeTemplate, fillTemplate,
+  styleFromProject, describeStyle, normalizeStyle, uid, makeTemplate, describeTemplate, fillTemplate,
 } from './model.js';
 import { listStyles, loadStyle, saveStyle, deleteStyle, listTemplates, loadTemplate, saveTemplate, deleteTemplate } from './presets.js';
 import * as store from './store.js';
@@ -15,6 +15,7 @@ import { transcribe, readTranscript, hasTranscript, transcriptText, MODEL_HELP }
 import { listFonts, resolveFont, defaultFont } from './fonts.js';
 import { listLuts, resolveLut } from './luts.js';
 import { loudness, sceneChanges, findMoments, momentsText } from './moments.js';
+import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
 
 env.resolveFont = resolveFont;
@@ -311,6 +312,23 @@ export const TOOLS = [
 
   { name: 'add_music', description: 'Add an audio item: music (default), sfx (sound effect) or voice (voiceover). Mixed under the clip audio. Each role gets its own track by default (music 1, voice 2, sfx 3).', input_schema: S({ assetId: s('Asset id (audio, or a video with audio)'), role: s('music, sfx or voice', { enum: AUDIO_ROLES }), track: n('Audio track 1-20'), start: n('Timeline start seconds (default 0)'), in: n('Source start s'), out: n('Source end s'), volume: n('0-2 (music default 0.6, others 1)'), fadeIn: n('Seconds'), fadeOut: n('Seconds (music default 1)'), duck: n('0-1: automatically lower this audio while someone speaks (clip audio and voice items). 0 = off, 0.6 = typical'), denoise: n('Noise reduction 0-1, for voiceovers recorded with hiss or room noise (0 = off)'), ...soundProps }, ['assetId']) },
   { name: 'update_music', description: 'Change an audio item (music, sfx or voice). duck 0-1 lowers it under speech (0 = off; export only, not in the browser preview).', input_schema: S({ musicId: s('Audio item id'), role: s('Role', { enum: AUDIO_ROLES }), track: n('Track'), start: n('s'), in: n('s'), out: n('s'), volume: n('0-2'), fadeIn: n('s'), fadeOut: n('s'), duck: n('0-1 ducking under speech, 0 = off'), denoise: n('Noise reduction 0-1, 0 = off'), ...soundProps }, ['musicId']) },
+  {
+    name: 'add_voiceover',
+    description: 'Text to speech: speak a script and put it on the timeline as a voice item (role voice), so music with duck lowers under it and add_captions captions it. ' +
+      'Engines: piper (local, free, plainer voices) and elevenlabs (much more expressive, paid per character, needs the API key the user saved in the editor). Default: the engine chosen in the editor (list_voices shows it). ' +
+      'Piper picks the voice from the language of the text. With ElevenLabs eleven_v3 you can steer delivery with audio tags in the text, e.g. "[excited] We made it! [laughs]" or "[whispers] look over there". ' +
+      'Write numbers and abbreviations the way they should be said. The same text, engine, voice and settings reuse the earlier audio (no new cost).',
+    input_schema: S({
+      text: s('What to say. Sentences get a short pause between them'), start: n('Timeline seconds (default 0)'),
+      engine: s('piper or elevenlabs (default: the editor setting)', { enum: ENGINES }),
+      voice: s('Piper: voice id or language code like en or vi (default: from the text). ElevenLabs: voice name or id from list_voices (default: the saved voice)'),
+      expressiveness: n('0 calm and steady .. 1 lively and emotional (default: the engine\'s normal delivery)'),
+      model: s('ElevenLabs model id (default: the saved model, eleven_v3)'), speed: n('0.5-2, 1 = normal (1.1 is a bit faster)'),
+      speaker: s('Speaker name or number, for voices with several speakers'), pause: n('Seconds of silence between sentences (default 0.25)'),
+      volume: n('0-2 (default 1)'), track: n('Audio track (default 2)'), ...soundProps,
+    }, ['text']),
+  },
+  { name: 'list_voices', description: 'List the installed text-to-speech voices (Piper) for add_voiceover, and how to add more.', input_schema: S({}) },
   { name: 'analyze_audio', description: 'Analyse an audio or video asset: tempo (BPM) and beat times, loudness, and silences, all in SOURCE seconds. Use it to plan cuts on the beat, find quiet gaps, or pick a music section. Cached per file.', input_schema: S({ assetId: s('Asset id (or give musicId to analyse what an audio item uses)'), musicId: s('Audio item id: limits the result to the part it plays'), from: n('Source seconds'), to: n('Source seconds'), force: b('Re-run even if cached') }) },
   { name: 'mark_beats', description: 'Detect the beats of an audio item (music) and put them on the timeline as beat markers (replaces old beat markers). Then fit_clips_to_beats cuts on them, or use the times for effects/text.', input_schema: S({ musicId: s('Audio item id') }, ['musicId']) },
   { name: 'fit_clips_to_beats', description: 'Cut to the beat: trims each main-track clip\'s out point so every cut (and the end) lands on a beat marker. every = beats per clip (1 = cut on every beat, 2 = every other, 4 = once per bar). Clips whose source is too short are kept and reported. Needs beat markers (mark_beats).', input_schema: S({ every: n('Beats per clip (default 1)'), skipBeats: n('Ignore this many beat markers at the start (default 0)') }) },
@@ -338,7 +356,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['get_timeline', 'find_moments', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -448,6 +466,46 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const fonts = listFonts(input.search);
         if (!fonts.length) return { content: `No fonts match "${input.search}".` };
         return { content: `Default: ${defaultFont()}. ${fonts.length} families${fonts.some((f) => f.user) ? ' (imported first)' : ''}:\n${fonts.slice(0, 400).map((f) => f.family + (f.user ? ' [imported]' : '')).join(', ')}` };
+      }
+      case 'add_voiceover': {
+        const speed = input.speed === undefined ? 1 : Number(input.speed);
+        if (!(speed >= 0.5 && speed <= 2)) return { content: 'speed must be 0.5-2', isError: true };
+        const pause = input.pause === undefined ? 0.25 : Number(input.pause);
+        if (!(pause >= 0 && pause <= 3)) return { content: 'pause must be 0-3 seconds', isError: true };
+        const ex = input.expressiveness === undefined ? undefined : Number(input.expressiveness);
+        if (ex !== undefined && !(ex >= 0 && ex <= 1)) return { content: 'expressiveness must be 0-1', isError: true };
+        const r = await synthesize({ engine: input.engine, text: input.text, voice: input.voice, speed, speaker: input.speaker, pause, expressiveness: ex, model: input.model });
+        let a = Object.values(store.getProject().assets).find((x) => x.file === r.file);
+        if (!a) {
+          const meta = await probe(r.path);
+          const words = String(input.text).trim().replace(/\s+/g, ' ');
+          a = { id: uid('aud'), name: `voice - ${words.length > 40 ? `${words.slice(0, 40)}…` : words}`, file: r.file, ...meta, tts: { engine: r.engine, voice: r.voice.name, ...(r.model ? { model: r.model } : {}), text: String(input.text) } };
+          store.addAsset(a);
+        }
+        const { text: _t, voice: _v, speed: _s, speaker: _k, pause: _p, engine: _e, expressiveness: _x, model: _m, ...rest } = input;
+        const msg = store.apply('add_music', { ...rest, assetId: a.id, role: 'voice', start: input.start ?? 0 }, source);
+        return { content: `${msg}: ${a.duration.toFixed(2)}s of speech, voice ${r.voice.name}${r.engine === 'elevenlabs' ? ` (ElevenLabs ${r.model}, ${r.chars} characters)` : ' (Piper)'}${speed !== 1 ? ` at ${speed}x` : ''}. add_captions will caption it.` };
+      }
+      case 'list_voices': {
+        const st = ttsSettings(), vs = listVoices(), runner = piperCommand();
+        const out = [`Default engine: ${st.engine} (the user changes it in the editor's 🗣 Voice panel).`, '', 'Piper (local, free):'];
+        if (!runner) out.push(`- not installed. ${PIPER_HELP}`);
+        else if (!vs.length) out.push(`- installed but no voices. ${PIPER_HELP}`);
+        else {
+          out.push(...vs.map((v) => `- ${v.id}: ${v.languageName || v.language} (${v.language}), quality ${v.quality}${v.speakers.length > 1 ? `, speakers: ${v.speakers.slice(0, 20).join(', ')}${v.speakers.length > 20 ? ', …' : ''}` : ''}`));
+          out.push('  More: https://huggingface.co/rhasspy/piper-voices, "python -m piper.download_voices <id> --download-dir models/piper".');
+        }
+        out.push('', 'ElevenLabs (expressive, paid per character):');
+        if (!st.elevenlabs.hasKey) out.push('- no API key yet: the user saves it in the 🗣 Voice panel (pick ElevenLabs) or sets ELEVENLABS_API_KEY. Never ask for the key in chat.');
+        else {
+          try {
+            const [voices, models] = await Promise.all([elevenVoices(), elevenModels().catch(() => [])]);
+            out.push(`- model ${st.elevenlabs.model} (saved default), voice ${st.elevenlabs.voice || '(first premade voice)'}`);
+            if (models.length) out.push(`- models: ${models.map((m) => `${m.id} (${m.languages.length} languages${m.languages.some((l) => l.id === 'vi') ? ', Vietnamese' : ''})`).join('; ')}`);
+            out.push(`- voices: ${voices.slice(0, 60).map((v) => `${v.name}${v.labels.gender ? ` (${[v.labels.gender, v.labels.accent, v.labels.age].filter(Boolean).join(', ')})` : ''}`).join('; ')}${voices.length > 60 ? '; …' : ''}`);
+          } catch (e) { out.push(`- key saved but the account could not be read: ${e.message}`); }
+        }
+        return { content: out.join('\n') };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

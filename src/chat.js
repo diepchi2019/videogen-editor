@@ -3,9 +3,10 @@ import Anthropic from '@anthropic-ai/sdk';
 import { TOOLS, executeTool, transcribedSet } from './tools.js';
 import { summarize } from './model.js';
 import * as store from './store.js';
+import { get } from './settings.js';
 
-const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5-5';
-let client;
+// Key and model come from ⚙ Settings (or ANTHROPIC_API_KEY / CLAUDE_MODEL); a new key takes effect on the next message.
+let client, clientKey;
 let history = []; // Anthropic message format, kept server-side
 
 const SYSTEM = `You are the editing assistant inside VideoGen, a CapCut-style video editor.
@@ -33,15 +34,14 @@ function trimHistory() {
 }
 
 export async function chat(userText, { onEvent } = {}) {
-  if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not set. Start the server with ANTHROPIC_API_KEY=sk-ant-... or use the MCP server from Claude Code instead.');
-  }
-  client ||= new Anthropic();
+  const key = get('claude.apiKey');
+  if (!key) throw new Error('No Anthropic API key: add it in ⚙ Settings (or set ANTHROPIC_API_KEY), or edit from Claude Code through the MCP server instead (no key needed).');
+  if (!client || clientKey !== key) { client = new Anthropic({ apiKey: key }); clientKey = key; }
   history.push({ role: 'user', content: userText });
   const actions = [];
   for (let step = 0; step < 15; step++) {
     const res = await client.messages.create({
-      model: MODEL,
+      model: get('claude.model'),
       max_tokens: 4096,
       system: [{ type: 'text', text: SYSTEM }, { type: 'text', text: `Current project state:\n${summarize(store.getProject(), { transcribed: transcribedSet(store.getProject()) })}` }],
       tools: TOOLS,

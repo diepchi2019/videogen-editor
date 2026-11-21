@@ -32,16 +32,41 @@ Captions run locally with Whisper, built into ffmpeg (the gyan.dev "full" Window
 curl -L -o models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
 ```
 
-When several models are present, the most accurate one is used (turbo, then small, then base). To force one, set `VIDEOGEN_WHISPER_MODEL` to its path. Then click **CC Captions** in the timeline toolbar, or ask Claude to "add captions". Transcripts are cached per file, so restyling or redoing captions is instant. Long pauses are cut out before transcribing, so the first word after a pause gets the right time and no words are made up in quiet parts.
+When several models are present, the most accurate one is used (turbo, then small, then base). To force one, pick it in **⚙ Settings** (or set `VIDEOGEN_WHISPER_MODEL` to its path). Then click **CC Captions** in the timeline toolbar, or ask Claude to "add captions". Transcripts are cached per file, so restyling or redoing captions is instant. Long pauses are cut out before transcribing, so the first word after a pause gets the right time and no words are made up in quiet parts.
+
+### Text to speech: install Piper and a voice
+
+Voiceovers from a script run locally with [Piper](https://github.com/OHF-Voice/piper1-gpl) (free, private, a few seconds per paragraph on a laptop CPU). Install it with Python and download voices into `models/piper/`:
+
+```bash
+pip install piper-tts
+python -m piper.download_voices en_US-lessac-medium vi_VN-vais1000-medium --download-dir models/piper
+```
+
+Other voices and languages: [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices). Then click **🗣 Voice** in the timeline toolbar, or ask Claude for a voiceover. The voice follows the language of the text; the take goes on a voice track, so music with ducking lowers under it and captions pick it up. To use a standalone piper executable instead of Python, enter its path in **⚙ Settings**.
+
+**More expressive voices with ElevenLabs (optional, paid).** Paste your API key (elevenlabs.io → Developers → API keys) in **⚙ Settings**, then set *Engine* to ElevenLabs in the 🗣 Voice panel and pick a model (`eleven_v3` is the most expressive; the list marks the ones that speak Vietnamese) and a voice from your account. With `eleven_v3` you can steer the delivery with tags in the text, like `[excited]`, `[whispers]` or `[laughs]`. The *Expressive* slider works for both engines (calm ↔ lively). ElevenLabs bills per character; the same text, voice and settings are reused instead of being requested again. OpenAI is not offered: its speech endpoint models shut down on 6 January 2027.
+
+## Settings
+
+Everything you configure lives in one place: **⚙ Settings** in the top bar, saved to `data/settings.json` on this PC (git ignores `data/`).
+
+| Setting | What it does |
+| --- | --- |
+| Anthropic API key, Claude model | The in-app chat panel. Not needed when you edit from Claude Code. |
+| Text-to-speech engine, ElevenLabs API key, Piper executable | Voiceovers (pick the ElevenLabs model and voice in the 🗣 Voice panel). |
+| Whisper model | Which speech model captions use (Auto = the most accurate one in `models/`). |
+| Default text font | The font of texts and captions that do not choose one. |
+
+API keys are checked when you save them and are write-only: the page only shows "set …abcd", and they are never sent to the browser or to Claude. Changes apply immediately. You can also edit the file by hand while the editor runs.
+
+Environment variables still work and win over the file (the page shows when one does): `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `ELEVENLABS_API_KEY`, `VIDEOGEN_PIPER`, `VIDEOGEN_WHISPER_MODEL`, `VIDEOGEN_FONT`. Only `PORT` and `VIDEOGEN_DATA` (the data folder, where the settings file lives) must be environment variables.
 
 ## Two ways to chat with Claude
 
 ### 1. In-app chat panel (Anthropic API key, pay per use)
 
-```bash
-ANTHROPIC_API_KEY=sk-ant-... npm start
-# optional: CLAUDE_MODEL=claude-opus-5-5 (default claude-sonnet-5-5)
-```
+Open **⚙ Settings** (top right), paste your Anthropic API key and pick the model (default `claude-sonnet-5-5`). It works right away, no restart.
 
 ### 2. From Claude Code via MCP (uses your Claude subscription, no API key)
 
@@ -55,9 +80,9 @@ Now in Claude Code: *"import ~/Videos/beach1.mp4 and beach2.mp4 into videogen, m
 
 ## Tools Claude can use
 
-`get_timeline`, `look_at_asset`, `add_clip`, `trim_clip`, `split_clip`, `delete_clip`, `move_clip`, `set_clip` (speed, reverse, volume, fit: contain/cover/blur, in/out animations), `set_color` (brightness, contrast, saturation, temperature, vignette, looks like vintage/cinematic/noir), `add_effect` / `delete_effect` (shake, zoom pulse, glitch, RGB split, flash, blur, VHS, light leak, invert), `set_keyframes` (animate scale/position/opacity/rotation/volume), `analyze_audio`, `mark_beats`, `fit_clips_to_beats` (cut to the beat), `add_markers` / `delete_markers`, `create_proxies`, `replace_clip_asset` (swap the file, keep the clip's settings), `reframe_clip` (auto reframe: the crop follows the subject when 16:9 footage goes into a 9:16 reel; `look_at_asset` with `grid` to read positions), `remove_region` / `delete_region` (hide burned-in subtitles, watermarks, logos: `fill` or `patch` from a clean frame), `set_transition` (fade, dissolve, slides, wipes, circleopen, zoomin, pixelize…), `add_text` / `update_text` / `delete_text` (animations: fade, pop, slideup), `add_music` / `update_music` / `delete_music` (with `duck` to lower music under speech and `denoise` for hiss), `add_overlay` / `set_overlay` (picture-in-picture, logos, B-roll; `chromaKey` for green screen, `blend` modes like screen and multiply), `set_speed_ramp` (montage, hero, bullet… or your own curve), `freeze_frame`, `delete_range` (ripple delete), `duplicate_items` / `delete_items` / `move_items` / `group_items` / `ungroup_items`, `list_luts` (and `set_color lut`), `set_canvas`, `undo` / `redo`, `export_video` (resolution, fps, bitrate, GPU encoding), `export_cover`, `export_status`, `list_styles` / `save_style` / `apply_style` / `delete_style` (reel styles), `list_templates` / `save_template` / `create_from_template` / `delete_template`, plus `import_media` over MCP.
+`get_timeline`, `look_at_asset`, `add_clip`, `trim_clip`, `split_clip`, `delete_clip`, `move_clip`, `set_clip` (speed, reverse, volume, fit: contain/cover/blur, in/out animations), `set_color` (brightness, contrast, saturation, temperature, vignette, looks like vintage/cinematic/noir), `add_effect` / `delete_effect` (shake, zoom pulse, glitch, RGB split, flash, blur, VHS, light leak, invert), `set_keyframes` (animate scale/position/opacity/rotation/volume), `analyze_audio`, `mark_beats`, `fit_clips_to_beats` (cut to the beat), `add_markers` / `delete_markers`, `create_proxies`, `replace_clip_asset` (swap the file, keep the clip's settings), `reframe_clip` (auto reframe: the crop follows the subject when 16:9 footage goes into a 9:16 reel; `look_at_asset` with `grid` to read positions), `remove_region` / `delete_region` (hide burned-in subtitles, watermarks, logos: `fill` or `patch` from a clean frame), `set_transition` (fade, dissolve, slides, wipes, circleopen, zoomin, pixelize…), `add_text` / `update_text` / `delete_text` (animations: fade, pop, slideup), `add_music` / `update_music` / `delete_music` (with `duck` to lower music under speech and `denoise` for hiss), `add_overlay` / `set_overlay` (picture-in-picture, logos, B-roll; `chromaKey` for green screen, `blend` modes like screen and multiply), `set_speed_ramp` (montage, hero, bullet… or your own curve), `freeze_frame`, `delete_range` (ripple delete), `duplicate_items` / `delete_items` / `move_items` / `group_items` / `ungroup_items`, `list_luts` (and `set_color lut`), `set_canvas`, `undo` / `redo`, `export_video` (resolution, fps, bitrate, GPU encoding), `export_cover`, `export_status`, `list_styles` / `save_style` / `apply_style` / `delete_style` (reel styles), `list_templates` / `save_template` / `create_from_template` / `delete_template`, `find_moments` / `make_short` (long video to shorts), `add_voiceover` / `list_voices` (text to speech), plus `import_media` over MCP.
 
-The MCP server also offers prompts (slash commands in Claude Code): `make_reel` (a reel from the media library in a style), `reel_from_template`, `save_my_style` and `reframe_to_vertical` (turn horizontal clips into a vertical reel that keeps the subject in frame).
+The MCP server also offers prompts (slash commands in Claude Code): `make_reel` (a reel from the media library in a style), `reel_from_template`, `save_my_style` and `reframe_to_vertical` (turn horizontal clips into a vertical reel that keeps the subject in frame) and `shorts_from_video` (cut a long video or podcast into several captioned shorts).
 
 ## Keyboard
 
@@ -86,5 +111,6 @@ test/mock-claude.js  Fake Claude API for testing the chat loop offline
 ## Known limits
 
 - Auto-captions need a Whisper model file in `models/` (see *Auto-captions* above). Word times come from Whisper and can be off by a few tenths of a second; fix a line with `update_captions` if needed.
-- The browser preview approximates the export. It does not show effects, LUTs, chroma key, noise reduction, vignette, crop, Ken Burns or removed regions; reversed clips play there by seeking, without sound. Use a draft export or `look_at_timeline` to see the real result.
+- The browser preview approximates the export (effects especially). It does not show LUTs, chroma key, removed regions, smooth slow motion or audio processing (noise reduction, voice effects, ducking); reversed clips play there by seeking, without sound. Use a draft export or `look_at_timeline` to see the real result.
+- Text to speech needs Piper and a voice in `models/piper/` (see *Text to speech* above). There is no lipsync yet: a voiceover does not move anyone's mouth.
 - Reverse works on up to 10s of source per clip (ffmpeg keeps the frames in memory).
