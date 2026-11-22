@@ -46,7 +46,7 @@ export function vignetteCss(v) {
 // transform / filter for the whole clip, svg filters (rgb split, comic) with their shift in stage px,
 // light leak and grain overlays, and a canvas effect (pixelate, mirror, kaleidoscope) to paint.
 export function effectsAt(c, lt, W, H, k) {
-  const r = { transform: '', filter: [], rgb: 0, comic: false, leak: null, grain: 0, canvas: null };
+  const r = { transform: '', filter: [], rgb: 0, comic: false, leak: null, grain: 0, canvas: null, clip: '' };
   for (const fx of c.effects || []) {
     if (lt < fx.from || lt > fx.to) continue;
     const I = fx.intensity ?? 0.5, rate = fx.rate ?? 2, t = lt;
@@ -76,7 +76,20 @@ export function effectsAt(c, lt, W, H, k) {
       case 'film_grain': r.grain = Math.max(r.grain, 0.25 + 0.6 * I); break;
       case 'comic': r.comic = true; r.filter.push('saturate(1.5)'); break;
       case 'pixelate': r.canvas = { type: 'pixelate', block: Math.round(4 + 36 * I) * k }; break;
-      case 'mirror': case 'kaleidoscope': r.canvas = { type: fx.type }; break;
+      case 'mirror': case 'kaleidoscope': case 'multi_screen': r.canvas = { type: fx.type }; break;
+      case 'letterbox': r.clip = `inset(${pc(0.13 * I)} 0)`; break;
+      case 'black_white': r.filter.push(`grayscale(${I.toFixed(3)})`); break;
+      case 'tv_static': r.filter.push('grayscale(0.7)', 'contrast(1.2)'); r.grain = Math.max(r.grain, 0.6 + 0.4 * I); break;
+      case 'flicker': r.filter.push(`brightness(${(1 + 0.15 * I * Math.sin(t * 53) * Math.sin(t * 31)).toFixed(3)})`); break;
+      case 'posterize': r.filter.push(`contrast(${(1.2 + 0.3 * I).toFixed(2)})`, 'saturate(1.4)'); break;
+      case 'duotone': r.filter.push('grayscale(1)', `sepia(${(0.6 * I).toFixed(2)})`, 'hue-rotate(170deg)', `saturate(${(1 + 1.5 * I).toFixed(2)})`); break;
+      case 'glow': r.filter.push(`brightness(${(1.05 + 0.1 * I).toFixed(3)})`, `contrast(${(1 - 0.1 * I).toFixed(3)})`, 'saturate(1.1)'); break;
+      case 'rainbow': r.filter.push(`hue-rotate(${Math.round((360 * rate * (t - fx.from)) % 360)}deg)`, `saturate(${(1 + 0.5 * I).toFixed(2)})`); break;
+      case 'swing': { const deg = 2 + 8 * I; r.transform += ` rotate(${(deg * Math.sin(2 * Math.PI * rate * t)).toFixed(3)}deg) scale(${(1 + Math.sin((deg * Math.PI) / 180) * 1.2).toFixed(4)})`; break; }
+      case 'old_film': r.filter.push('sepia(0.6)', 'contrast(1.1)', `brightness(${(1 + 0.08 * I * Math.sin(t * 37)).toFixed(3)})`); r.grain = Math.max(r.grain, 0.25 + 0.4 * I); break;
+      case 'night_vision': r.filter.push('grayscale(1)', 'sepia(1)', 'hue-rotate(60deg)', 'saturate(4)', 'brightness(1.1)'); r.grain = Math.max(r.grain, 0.25 + 0.35 * I); break;
+      case 'thermal': r.filter.push('invert(1)', 'hue-rotate(180deg)', 'saturate(3)'); break;
+      case 'echo': break; // export only (frame blending)
       default: break;
     }
   }
@@ -91,6 +104,31 @@ export function leakCss(phase) {
 }
 // Grain texture (SVG turbulence), moved every frame so it flickers like ffmpeg's temporal noise.
 export const GRAIN_URL = `url("data:image/svg+xml,${encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>").replace(/%2523/g, '%23')}")`;
+
+// ---------- Tone curves (color adjust; applyColor in src/render.js uses the same points) ----------
+// exposure / shadows / highlights / fade / tint and the three color wheels as one curve per channel:
+// [[x, y], ...] at 9 points, or null when none of them is set. Wheels: {shadows|midtones|highlights: {color, amount}}.
+const bump = (x, c, w) => Math.exp(-(((x - c) / w) ** 2));
+const WHEEL_AT = { shadows: 0.15, midtones: 0.5, highlights: 0.85 };
+export function toneCurves(c) {
+  if (!c) return null;
+  const ex = c.exposure || 0, sh = c.shadows || 0, hi = c.highlights || 0, fade = c.fade || 0, tint = c.tint || 0;
+  const wheels = Object.entries(c.wheels || {}).filter(([k, w]) => WHEEL_AT[k] && w?.amount);
+  if (!ex && !sh && !hi && !fade && !tint && !wheels.length) return null;
+  const rgb = (hex) => { const n = parseInt(String(hex).slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+  const out = {};
+  ['r', 'g', 'b'].forEach((ch, ci) => {
+    out[ch] = Array.from({ length: 9 }, (_, i) => {
+      const x = i / 8;
+      let y = x * 2 ** ex + sh * 0.15 * bump(x, 0.2, 0.2) + hi * 0.15 * bump(x, 0.8, 0.2);
+      for (const [k, w] of wheels) { const col = rgb(w.color), m = (col[0] + col[1] + col[2]) / 3; y += (col[ci] - m) * w.amount * 0.35 * bump(x, WHEEL_AT[k], 0.25); }
+      y += tint * (ci === 1 ? -0.06 : 0.03) * bump(x, 0.5, 0.35); // + magenta, - green
+      y = fade * 0.12 + y * (1 - fade * 0.12);
+      return [Math.round(x * 1000) / 1000, Math.round(Math.min(1, Math.max(0, y)) * 1000) / 1000];
+    });
+  });
+  return out;
+}
 
 // Paint a canvas effect. src: a canvas holding the finished clip frame (same size as ctx's canvas).
 export function drawEffect(ctx, src, fx, scratch) {
@@ -116,6 +154,10 @@ export function drawEffect(ctx, src, fx, scratch) {
     ctx.drawImage(src, sx, sy, qw, qh, 0, 0, qw, qh);
     ctx.restore();
   };
+  if (fx.type === 'multi_screen') {
+    for (const [x, y] of [[0, 0], [hw, 0], [0, hh], [hw, hh]]) ctx.drawImage(src, 0, 0, w, h, x, y, hw, hh);
+    return;
+  }
   if (fx.type === 'mirror') quad(0, 0, true, false, hw, h);
   else {
     quad(0, 0, true, false, hw, hh);

@@ -982,7 +982,8 @@ test('Phase 2.5 extras: voice effects, masks, GIF loop + pop, smooth slow motion
   run(p, 'add_overlay', { assetId: 'vid_b', fit: 'cover', start: 0, duration: 3 });
   const o = p.overlays[1];
   assert.throws(() => run(p, 'set_mask', { overlayId: o.id }), /shape is required/);
-  assert.throws(() => run(p, 'set_mask', { clipId: c.id, shape: 'circle' }), /Masks work on overlays/);
+  assert.match(run(p, 'set_mask', { clipId: c.id, shape: 'circle' }), /fractions of the canvas/, 'main clips can be masked too');
+  run(p, 'set_mask', { clipId: c.id, shape: 'none' });
   assert.match(run(p, 'set_mask', { overlayId: o.id, shape: 'linear', angle: 90, feather: 0.1 }), /linear line through \(0\.5,0\.5\) at 90°/);
   assert.deepEqual(o.mask, { shape: 'linear', x: 0.5, y: 0.5, angle: 90, feather: 0.1 });
   run(p, 'set_mask', { overlayId: o.id, shape: 'rect', round: 0.5, invert: true });
@@ -1078,7 +1079,7 @@ test('preview helpers: Ken Burns, crop, vignette, effects and text match the exp
   assert.equal(at(6.5).filter, 'invert(1)');
   assert.match(at(7.5).transform, /^scale\(1\.1800\)$/);              // peak of |sin|^3 at the half period
   assert.match(at(8.3).transform, /^translate\(/);
-  assert.deepEqual(at(9.5), { transform: '', filter: '', rgb: 0, comic: false, leak: null, grain: 0, canvas: null });
+  assert.deepEqual(at(9.5), { transform: '', filter: '', rgb: 0, comic: false, leak: null, grain: 0, canvas: null, clip: '' });
   // Text look: outline drawn as a stroke under the fill (2x the ASS border), box padding, em ratio.
   const look = pv.textLook({ size: 100, outline: 6, outlineColor: '#ff0000', shadow: 4, font: 'Arial', bold: false, italic: true }, 0.5, 0.9);
   assert.equal(look.fontSize, '45.00px'); assert.equal(look.lineHeight, '50.00px');
@@ -1646,4 +1647,96 @@ test('stock media: orientation from the canvas, the video file that fits, no cre
   assert.ok(!Lb.needsCredit('pexels'));
   assert.equal(S.stockLine({ id: 'pexels-video-1', kind: 'video', duration: 12, width: 1080, height: 1920, title: 'Waves', creator: 'Ann', credit: { licenseName: 'Pexels License (free, no credit needed)' } }, 0),
     '1. pexels-video-1 video 12s 1080x1920 "Waves" by Ann (Pexels License (free, no credit needed))');
+});
+
+test('effects pack, color curves / HSL / wheels, sharpen and clean, masks on main clips: model, graph and preview', async () => {
+  const { buildCommand } = await import('../src/render.js');
+  const P = await import('../public/preview.js');
+  const p = M.emptyProject();
+  p.assets.v = { id: 'v', type: 'video', file: 'v.mp4', duration: 60, width: 1920, height: 1080, hasAudio: false };
+  M.ops.add_clip(p, { assetId: 'v', in: 0, out: 40 });
+  const id = p.clips[0].id;
+  const NEW = ['letterbox', 'black_white', 'tv_static', 'flicker', 'posterize', 'duotone', 'glow', 'rainbow', 'echo', 'swing', 'multi_screen', 'old_film', 'night_vision', 'thermal'];
+  assert.equal(M.EFFECTS.length, 29);
+  NEW.forEach((t, i) => M.ops.add_effect(p, { clipId: id, type: t, start: i * 2, end: i * 2 + 1.5, intensity: 0.6 }));
+  assert.equal(p.clips[0].effects.find((e) => e.type === 'rainbow').rate, 0.5);
+  // Color: new sliders, HSL per color, wheels; validation.
+  M.ops.set_color(p, { clipId: id, exposure: 0.3, shadows: 0.4, highlights: -0.2, fade: 0.2, hue: 15, tint: 0.3, sharpen: 0.5, clean: 0.4,
+    hsl: { blue: { saturation: 0.5, lightness: -0.2 } }, wheels: { shadows: { color: '#1fa3a3', amount: 0.6 } } });
+  assert.throws(() => M.ops.set_color(p, { clipId: id, hsl: { purple: { hue: 10 } } }), /hsl colors are red, yellow/);
+  assert.throws(() => M.ops.set_color(p, { clipId: id, wheels: { shadow: { color: '#ffffff' } } }), /wheels are shadows/);
+  M.ops.set_color(p, { clipId: id, hsl: { red: { hue: 20 }, blue: { saturation: 0, lightness: 0 } } });
+  assert.deepEqual(p.clips[0].color.hsl, { red: { hue: 20 } }, 'a color set back to zero is removed');
+  assert.match(M.summarize(p), /exposure 0\.3 shadows 0\.4 highlights -0\.2 fade 0\.2 hue 15 tint 0\.3 sharpen 0\.5 clean 0\.4 HSL red\(h20\) wheels shadows #1fa3a3 0\.6/);
+  // Tone curves: identity when unset, lifted blacks with fade, wheel pushes channels apart in the shadows.
+  assert.equal(P.toneCurves({ brightness: 0.2 }), null);
+  const tc = P.toneCurves({ fade: 0.5, wheels: { shadows: { color: '#0000ff', amount: 1 } } });
+  assert.ok(tc.b[2][1] > tc.g[2][1] && tc.g[2][1] > tc.r[2][1] - 1e-9 && tc.b[8][1] === 1, 'a blue shadow wheel lifts blue in the shadows');
+  assert.equal(P.toneCurves({ fade: 0.5 }).r[0][1], 0.06, 'fade lifts black');
+  assert.deepEqual(P.toneCurves({ exposure: 1 }).r.slice(-1), [[1, 1]], 'clamped');
+  // Mask on the main clip.
+  assert.match(M.ops.set_mask(p, { clipId: id, shape: 'rect', w: 0.8, h: 0.5, round: 0.2 }), /fractions of the canvas/);
+  assert.match(M.summarize(p), /mask rect/);
+  const cmd = buildCommand(p, path.join(os.tmpdir(), 'x.mp4'), { quality: 'draft' });
+  fs.rmSync(cmd.tmpDir, { recursive: true, force: true });
+  for (const f of ['drawbox=x=0:y=0', 'tv_static' && 'noise=alls=76', "lutrgb=r='floor(val/70)*70'", 'tmix=frames=7', 'pseudocolor=preset=heat', 'gblur=sigma=20', "hue=h='360*0.500*",
+    'hqdn3d=', 'cas=strength=0.625', "curves=r='0/", 'hue=h=15.000', 'huesaturation=colors=r:hue=20.000', 'alphamerge[cm0a]']) assert.ok(cmd.graph.includes(f), f);
+  assert.ok(fs.existsSync || true);
+  // Preview: new effects map to CSS (letterbox clips, multi_screen uses the canvas).
+  const fx = (type, lt = 0.5) => P.effectsAt({ effects: [{ type, from: 0, to: 1, intensity: 0.6, rate: 1 }] }, lt, 1080, 1920, 1);
+  assert.equal(fx('letterbox').clip, 'inset(7.800% 0)');
+  assert.equal(fx('multi_screen').canvas.type, 'multi_screen');
+  assert.match(fx('black_white').filter, /grayscale\(0\.600\)/);
+  assert.match(fx('swing', 0.25).transform, /rotate\(6\.800deg\)/);
+});
+
+test('text templates, settings tools, stickers and motion tracking helpers', async () => {
+  const { buildTextTemplate, TEXT_TEMPLATES } = await import('../src/texttemplates.js');
+  const T = await import('../src/tracking.js');
+  assert.equal(Object.keys(TEXT_TEMPLATES).length, 10);
+  const lt = buildTextTemplate('lower_third', { title: 'Ann', subtitle: 'Chef' }, { start: 2, color: '#ff3366' });
+  assert.deepEqual(lt.map((x) => [x.text, x.start, x.end, x.boxColor]), [['Ann', 2, 5, '#ff3366'], ['Chef', 2.15, 5, '#111111']]);
+  const cd = buildTextTemplate('countdown', { from: 3 }, { start: 1 });
+  assert.deepEqual(cd.map((x) => [x.text, x.start, x.end]), [['3', 1, 2], ['2', 2, 3], ['1', 3, 4]]);
+  const li = buildTextTemplate('list', { title: 'Top', items: ['a', 'b'] }, { vertical: false });
+  assert.equal(li.length, 3);
+  assert.equal(li[2].start, 1.3);
+  assert.throws(() => buildTextTemplate('quote', {}), /quote needs title/);
+  assert.throws(() => buildTextTemplate('nope', {}), /template must be one of/);
+  // Every template's text items are valid add_text inputs.
+  for (const name of Object.keys(TEXT_TEMPLATES)) {
+    const p = M.emptyProject();
+    for (const it of buildTextTemplate(name, { title: 'Hi', subtitle: 'There', items: ['x'], from: 2 }, { start: 0 })) M.ops.add_text(p, it);
+    assert.ok(p.texts.length >= 1, name);
+  }
+  // Settings tools: keys refused, values saved, get_settings never shows a key.
+  const { executeTool } = await import('../src/tools.js');
+  const st = await import('../src/settings.js');
+  st.setSettings({ 'tts.elevenlabs.apiKey': 'abcdefghijklmnop1234' });
+  const g = await executeTool('get_settings', {});
+  assert.match(g.content, /tts\.elevenlabs\.apiKey: set/);
+  assert.ok(!g.content.includes('abcdefghijklmnop1234') && !g.content.includes('1234 '));
+  assert.match((await executeTool('update_settings', { settings: { 'claude.apiKey': 'x' } })).content, /never set through Claude/);
+  assert.match((await executeTool('update_settings', { settings: { 'export.loudness': '-23' } })).content, /export\.loudness = -23/);
+  assert.match((await executeTool('update_settings', { settings: { 'export.loudness': '-99' } })).content, /must be one of/);
+  st.setSettings({ 'tts.elevenlabs.apiKey': '', 'export.loudness': '' });
+  // Tracking: a bright square moving 3px a frame on a textured background is followed exactly.
+  const fw = 120, fh = 80, frames = [];
+  for (let f = 0; f < 12; f++) {
+    const F = new Uint8Array(fw * fh);
+    for (let k = 0; k < F.length; k++) F[k] = ((k * 7919) % 97) + 40;
+    for (let y = 20; y < 32; y++) for (let x = 0; x < 12; x++) F[y * fw + 10 + 3 * f + x] = 250 - ((x + y) % 5) * 20; // the square moves as a whole
+    frames.push(F);
+  }
+  const tr = T.trackBox(frames, fw, fh, { x: 10, y: 20, w: 12, h: 12 });
+  assert.deepEqual(tr.map((q) => q.cx), Array.from({ length: 12 }, (_, f) => 16 + 3 * f));
+  assert.ok(tr.every((q) => q.cy === 26 && q.score > 0.95));
+  // Canvas <-> source mapping round-trips (contain with transform; cover with crop and flip).
+  const a = { width: 1920, height: 1080 };
+  for (const c of [{ fit: 'contain', transform: { scale: 1.2, x: 0.4, y: 0.6 } }, { fit: 'cover', transform: { crop: { x: 0.1, y: 0, w: 0.8, h: 1 }, flipH: true } }]) {
+    const q = T.sourceToCanvas(c, a, 1080, 1920, { x: 0.3, y: 0.7 }, 0), back = T.canvasToSource(c, a, 1080, 1920, q, 0);
+    assert.ok(Math.abs(back.x - 0.3) < 1e-9 && Math.abs(back.y - 0.7) < 1e-9, JSON.stringify([c.fit, q, back]));
+  }
+  assert.deepEqual(T.sourceToCanvas({ fit: 'cover' }, a, 1080, 1920, { x: 0.5, y: 0.5 }, 0), { x: 0.5, y: 0.5 });
+  assert.deepEqual(T.simplifySeries([0, 1, 2, 3, 4].map((t) => ({ t, v: t * 0.1 }))).map((q) => q.t), [0, 4], 'a straight line needs two points');
 });

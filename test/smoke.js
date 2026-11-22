@@ -535,12 +535,55 @@ try {
   } else console.log('skip - remove silences (no whisper model)');
   await tool('open_project', { projectId: firstId });
 
+  // --- No-AI extras: effects pack, color grading, clip mask, text templates, stickers, tracking, settings ---
+  {
+    const mv = path.join(data, 'move.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=640x360:r=25:d=4', '-f', 'lavfi', '-i', 'color=c=white:s=40x40:d=4', '-filter_complex',
+      "[0:v]hue=s=0.2[b];[b][1:v]overlay=x='60+100*t':y='80+20*t':shortest=1,format=yuv420p", '-t', '4', mv]);
+    const mf = new FormData();
+    mf.append('files', new Blob([fs.readFileSync(mv)]), 'move.mp4');
+    const moving = (await (await fetch(`${BASE}/api/upload`, { method: 'POST', body: mf })).json()).added[0];
+    fs.mkdirSync(path.join(data, 'emoji'), { recursive: true });
+    if (!fs.existsSync(path.join(data, 'emoji', 'emoji_u1f525.png'))) execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x00ff00:s=64x64', '-frames:v', '1', path.join(data, 'emoji', 'emoji_u1f525.png')]);
+    await tool('create_project', { name: 'Extras', aspect: '16:9' });
+    await tool('add_clip', { assetId: moving.id });
+    await tool('add_clip', { assetId: vid.id });
+    let ex = (await tool('get_timeline')).project;
+    const [mvClip, vClip] = ex.clips;
+    for (const [i, t] of ['letterbox', 'thermal', 'multi_screen', 'echo'].entries()) await tool('add_effect', { clipId: vClip.id, type: t, start: 4 + i * 0.4, end: 4.35 + i * 0.4 });
+    await tool('set_color', { clipId: vClip.id, exposure: 0.2, shadows: 0.3, fade: 0.2, hue: 10, hsl: { blue: { saturation: 0.4 } }, wheels: { shadows: { color: '#1fa3a3', amount: 0.5 }, highlights: { color: '#ff9a3c', amount: 0.4 } } });
+    await tool('set_mask', { clipId: vClip.id, shape: 'circle', w: 0.8, h: 0.8 });
+    const en = await tool('enhance_video', { sharpen: 0.6, clean: 0.3 });
+    const tt = await tool('add_text_template', { template: 'lower_third', title: 'Ann', subtitle: 'Chef', start: 0.5 });
+    const cd = await tool('add_text_template', { template: 'countdown', from: 3, start: 4 });
+    const stk = await tool('add_sticker', { emoji: '🔥', start: 0, duration: 4, x: 0.5, y: 0.2, scale: 0.1 });
+    ex = (await tool('get_timeline')).project;
+    const ovId = ex.overlays[0].id;
+    // The white square starts at (60, 80) in a 640x360 frame (the clip fills the 16:9 canvas).
+    const trk = await tool('track_motion', { overlayId: ovId, at: 0, box: { x: 60 / 640, y: 80 / 360, w: 40 / 640, h: 40 / 360 }, center: true });
+    ex = (await tool('get_timeline')).project;
+    const kx = ex.overlays[0].keyframes?.x?.points || [], lastX = kx.at(-1)?.v, wantX = (60 + 100 * 3.9 + 20) / 640;
+    ok(/^Enhanced 2/.test(en.content) && /lower_third.*\(grouped\)/.test(tt.content) && /"3" 4-5s, "2" 5-6s, "1" 6-7s/.test(cd.content) && /🔥 sticker/.test(stk.content) &&
+      /follows the box/.test(trk.content) && Math.abs(lastX - wantX) < 0.02 && ex.clips[1].mask?.shape === 'circle' && ex.clips[1].color.wheels && ex.clips[1].effects.length === 4,
+      `effects, grading, clip mask, enhance, text templates, sticker, tracking (last x ${lastX?.toFixed(3)} want ${wantX.toFixed(3)})`);
+    const gs = await tool('get_settings');
+    const us = await tool('update_settings', { settings: { 'export.loudness': 'off' } });
+    ok(/export\.loudness: -14/.test(gs.content) && /export\.loudness = off/.test(us.content) && /never set through Claude/.test(await toolErr('update_settings', { settings: { 'stock.pexels.apiKey': 'x' } })), 'get_settings / update_settings (keys refused)');
+    const xx2 = await tool('export_video', { quality: 'draft', wait: true });
+    const xOut = /done 100% file: (.+?\.mp4)/.exec(xx2.content)?.[1];
+    ok(xOut && Math.abs(Number(probe(xOut, 'format=duration')) - (await tool('get_timeline')).layout.duration) < 0.25 && !/loudness:/.test(xx2.content), `extras export (${path.basename(xOut || '')}), loudness off from the saved setting`);
+    await tool('update_settings', { settings: { 'export.loudness': '' } });
+    const xl = await tool('look_at_timeline', { times: [1, 4.5, 5.2] });
+    xl.content.filter((x) => x.type === 'image').forEach((x, i) => fs.writeFileSync(path.join(framesDir, `extras-${i}.jpg`), Buffer.from(x.source.data, 'base64')));
+    await tool('open_project', { projectId: firstId });
+  }
+
   // --- MCP server over stdio ---
   mcp = new Client({ name: 'smoke', version: '1.0.0' });
   await mcp.connect(new StdioClientTransport({ command: 'node', args: [path.join(root, 'mcp.js')], env: { ...process.env, VIDEOGEN_URL: BASE } }));
   const { tools } = await mcp.listTools();
   const names = tools.map((t) => t.name);
-  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences', 'search_music', 'add_library_audio', 'search_stock', 'add_stock'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
+  ok(['look_at_timeline', 'batch_edit', 'add_overlay', 'add_captions', 'create_project', 'import_media', 'get_timeline_transcript', 'cut_transcript', 'remove_retakes', 'enhance_voice', 'stabilize_clip', 'add_broll', 'match_color', 'set_layout', 'set_chapters', 'set_progress_bar', 'check_reel', 'translate_captions', 'emphasize_captions', 'auto_zoom', 'remove_silences', 'search_music', 'add_library_audio', 'search_stock', 'add_stock', 'get_settings', 'update_settings', 'enhance_video', 'add_text_template', 'add_sticker', 'track_motion'].every((n) => names.includes(n)), `MCP lists ${tools.length} tools`);
   ok(tools.find((t) => t.name === 'get_timeline').annotations?.readOnlyHint === true && tools.find((t) => t.name === 'delete_project').annotations?.destructiveHint === true, 'MCP tool annotations');
   const { resources } = await mcp.listResources();
   const res = await mcp.readResource({ uri: 'videogen://project/json' });

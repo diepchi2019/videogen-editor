@@ -9,6 +9,7 @@ import { emojiFile } from './emoji.js';
 import { stabFile } from './stabilize.js';
 import { chapterTime } from './model.js';
 import { projectCredits } from './library.js';
+import { toneCurves } from '../public/preview.js';
 import { defaultFont, stageFonts } from './fonts.js';
 import { createJob, finishJob, getJob, listJobs } from './jobs.js';
 import { run } from './media.js';
@@ -120,7 +121,15 @@ function applyColor(filters, inL, c, tag, fmt) {
   if (!c) return inL;
   const f = [];
   const b = c.brightness ?? 0, ct = c.contrast ?? 1, s = c.saturation ?? 1, tp = c.temperature ?? 0;
+  // Clean (video noise reduction) and sharpen first, then tone, then color.
+  if (c.clean) f.push(`hqdn3d=${f3(2 + 4 * c.clean)}:${f3(2 + 4 * c.clean)}:${f3(4 + 8 * c.clean)}:${f3(4 + 8 * c.clean)}`);
+  if (c.sharpen) f.push(`cas=strength=${f3(0.25 + 0.75 * c.sharpen)}`);
   if (b || ct !== 1 || s !== 1) f.push(`eq=brightness=${f3(b * 0.4)}:contrast=${f3(ct)}:saturation=${f3(s)}`);
+  const tc = toneCurves(c);
+  if (tc) f.push(`curves=r='${tc.r.map((q) => q.join('/')).join(' ')}':g='${tc.g.map((q) => q.join('/')).join(' ')}':b='${tc.b.map((q) => q.join('/')).join(' ')}'`);
+  if (c.hue) f.push(`hue=h=${f3(c.hue)}`);
+  const HSL_FF = { red: 'r', yellow: 'y', green: 'g', cyan: 'c', blue: 'b', magenta: 'm' };
+  for (const [k, v] of Object.entries(c.hsl || {})) f.push(`huesaturation=colors=${HSL_FF[k]}:hue=${f3(v.hue || 0)}:saturation=${f3(v.saturation || 0)}:intensity=${f3((v.lightness || 0) * 0.5)}`);
   if (tp) f.push(`colorbalance=rs=${f3(0.15 * tp)}:bs=${f3(-0.15 * tp)}:rm=${f3(0.1 * tp)}:bm=${f3(-0.1 * tp)}:rh=${f3(0.05 * tp)}:bh=${f3(-0.05 * tp)}`);
   if (c.vignette) f.push(`vignette=angle=${f3(0.25 + 0.6 * c.vignette)}`);
   let cur = inL;
@@ -247,6 +256,59 @@ function applyEffect(filters, inL, fx, tag, W, H, fps) {
       break;
     case 'comic':
       branch(`edgedetect=mode=colormix:high=${f3(0.3 - 0.2 * I)}:low=0.05,eq=saturation=1.5`);
+      break;
+    case 'letterbox': { // cinematic bars
+      const bh = Math.round(H * 0.13 * I);
+      filters.push(`[${inL}]drawbox=x=0:y=0:w=iw:h=${bh}:color=black:t=fill:enable='${on()}',drawbox=x=0:y=ih-${bh}:w=iw:h=${bh}:color=black:t=fill:enable='${on()}'[${out}]`);
+      break;
+    }
+    case 'black_white':
+      filters.push(`[${inL}]hue=s=${f3(1 - I)}:enable='${on()}'[${out}]`);
+      break;
+    case 'tv_static':
+      filters.push(`[${inL}]hue=s=0.3:enable='${on()}',noise=alls=${Math.round(40 + 60 * I)}:allf=t+u:enable='${on()}',eq=contrast=1.2:enable='${on()}'[${out}]`);
+      break;
+    case 'flicker':
+      filters.push(`[${inL}]eq=brightness='${f3(0.15 * I)}*${on()}*sin(t*53)*sin(t*31)':eval=frame[${out}]`);
+      break;
+    case 'posterize': { // flat poster colors: fewer levels per channel
+      const step = Math.round(32 + 64 * I);
+      filters.push(`[${inL}]lutrgb=r='floor(val/${step})*${step}':g='floor(val/${step})*${step}':b='floor(val/${step})*${step}':enable='${on()}'[${out}]`);
+      break;
+    }
+    case 'duotone': // blue-teal monochrome
+      filters.push(`[${inL}]hue=s=0:enable='${on()}',colorchannelmixer=rr=${f3(1 - 0.5 * I)}:gg=${f3(1 - 0.1 * I)}:bb=${f3(1 + 0.25 * I)}:enable='${on()}'[${out}]`);
+      break;
+    case 'glow': // soft bloom: a blurred copy screened over the frame
+      filters.push(`[${inL}]split[${tag}a][${tag}b]`, `[${tag}b]gblur=sigma=${f3(8 + 20 * I)}[${tag}c]`);
+      filters.push(`[${tag}a][${tag}c]blend=all_mode=screen:all_opacity=${f3(0.25 + 0.4 * I)}:enable='${on()}'[${out}]`);
+      break;
+    case 'rainbow': // hue cycles round, rate = turns per second
+      filters.push(`[${inL}]hue=h='360*${f3(r)}*(t-${f3(fx.from)})':s=${f3(1 + 0.5 * I)}:enable='${on()}'[${out}]`);
+      break;
+    case 'echo': // motion trails
+      branch(`tmix=frames=${Math.round(3 + 6 * I)}`);
+      break;
+    case 'swing': { // the frame rocks left and right (zoomed in a little so no edges show)
+      const deg = 2 + 8 * I, z = 1 + Math.sin((deg * Math.PI) / 180) * 1.2;
+      branch(`scale=${even(W * z)}:${even(H * z)},rotate='${f3((deg * Math.PI) / 180)}*sin(2*PI*${f3(r)}*t)':ow=${W}:oh=${H}:c=black`);
+      break;
+    }
+    case 'multi_screen': // the frame repeated 2x2
+      filters.push(`[${inL}]split[${tag}a][${tag}b]`);
+      filters.push(`[${tag}b]scale=${even(W / 2)}:${even(H / 2)},split=4[${tag}1][${tag}2][${tag}3][${tag}4]`);
+      filters.push(`[${tag}1][${tag}2]hstack[${tag}t]`, `[${tag}3][${tag}4]hstack[${tag}u]`, `[${tag}t][${tag}u]vstack,scale=${W}:${H},setsar=1[${tag}c]`);
+      filters.push(`[${tag}a][${tag}c]overlay=enable='${on()}'[${out}]`);
+      break;
+    case 'old_film':
+      filters.push(`[${inL}]curves=preset=vintage:enable='${on()}',hue=s=${f3(0.6 - 0.4 * I)}:enable='${on()}',noise=alls=${Math.round(15 + 30 * I)}:allf=t+u:enable='${on()}',` +
+        `eq=brightness='${f3(0.08 * I)}*${on()}*sin(t*37)':eval=frame,vignette=angle=PI/4:enable='${on()}'[${out}]`);
+      break;
+    case 'night_vision':
+      filters.push(`[${inL}]hue=s=0:enable='${on()}',colorchannelmixer=rr=0.2:gg=${f3(1.1 + 0.3 * I)}:bb=0.2:enable='${on()}',noise=alls=${Math.round(15 + 25 * I)}:allf=t:enable='${on()}',vignette=angle=PI/3:enable='${on()}'[${out}]`);
+      break;
+    case 'thermal':
+      filters.push(`[${inL}]pseudocolor=preset=heat:opacity=${f3(0.5 + 0.5 * I)}:enable='${on()}'[${out}]`);
       break;
     default:
       return inL;
@@ -487,11 +549,19 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     if (c.animIn?.type === 'fade') post.push(`fade=t=in:st=0:d=${f3(Math.min(c.animIn.duration, dur / 2))}:color=${bg}`);
     if (c.animOut?.type === 'fade') { const d = Math.min(c.animOut.duration, dur / 2); post.push(`fade=t=out:st=${f3(dur - d)}:d=${f3(d)}:color=${bg}`); }
     const fxs = (c.effects || []).filter((e) => e.from < dur && e.to > e.from);
-    if (!post.length && !fxs.length) filters.push(`[${last}]${tail}[v${i}]`);
+    if (!post.length && !fxs.length && !c.mask) filters.push(`[${last}]${tail}[v${i}]`);
     else {
       filters.push(`[${last}]${tail}${post.length ? `,${post.join(',')}` : ''}[vt${i}]`);
       let cur = `vt${i}`;
       fxs.forEach((e, j) => { cur = applyEffect(filters, cur, e, `fx${i}_${j}`, W, H, fps); });
+      if (c.mask) {
+        // Mask on a main clip (fractions of the canvas): drawn once, used as alpha, the background shows outside.
+        const t = `cm${i}`;
+        filters.push(`color=c=black:s=${W}x${H}:r=${fps}:d=0.2,format=gray,trim=end_frame=1,geq=lum='255*${maskExpr(c.mask)}',loop=loop=-1:size=1,setpts=N/${fps}/TB,trim=duration=${f3(dur)}[${t}m]`);
+        filters.push(`[${cur}]format=yuva420p[${t}c]`, `[${t}c][${t}m]alphamerge[${t}a]`);
+        filters.push(`color=c=${bg}:s=${W}x${H}:r=${fps}:d=${f3(dur)}[${t}b]`, `[${t}b][${t}a]overlay=shortest=1,format=yuv420p[${t}]`);
+        cur = t;
+      }
       filters.push(`[${cur}]settb=AVTB[v${i}]`); // effects like zoompan change the timebase; xfade needs them equal
     }
 
@@ -699,7 +769,8 @@ export function buildCommand(project, outFile, { quality = 'final', frames = nul
     args.push(...filterGraphArgs(graphFile), '-map', '[vsel]', '-fps_mode', 'vfr', '-t', f3(Math.max(...frames) + 2 / fps),
       '-c:v', 'mjpeg', '-q:v', still ? '2' : '4', '-frames:v', String(frames.length), outFile);
   } else {
-    fs.writeFileSync(graphFile, filters.join(';\n'));
+    // Lanczos scaling everywhere in the graph: sharper when footage is scaled up (e.g. 720p into a 1080p export).
+    fs.writeFileSync(graphFile, `sws_flags=lanczos+accurate_rnd+full_chroma_int;\n${filters.join(';\n')}`);
     let enc = 'libx264';
     if (encoder === 'gpu' || encoder === 'auto') {
       enc = detectGpuEncoder() || (encoder === 'auto' ? 'libx264' : null);

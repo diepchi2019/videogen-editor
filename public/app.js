@@ -1,6 +1,6 @@
 // VideoGen editor UI (vanilla JS). The server owns the project; every edit is a tool call.
 import { srcAt, speedAt, avgRate, RAMP_PRESETS, reframeTrack, coverPosition } from '/lib/timing.js';
-import { kenBurns, zoomAbout, cropBox, vignetteCss, effectsAt, leakCss, GRAIN_URL, drawEffect, textLook, textAnim } from '/preview.js';
+import { kenBurns, zoomAbout, cropBox, vignetteCss, effectsAt, leakCss, GRAIN_URL, drawEffect, textLook, textAnim, toneCurves } from '/preview.js';
 const $ = (s, el = document) => el.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -122,9 +122,24 @@ const LOOK_CSS = {
   noir: [['grayscale', 1, 0], ['contrast', 1.4, 1]],
   dramatic: [['contrast', 1.3, 1], ['saturate', 0.75, 1], ['brightness', 0.92, 1]],
 };
+// Tone curves (exposure, shadows, highlights, fade, tint, wheels) as an SVG filter, one per distinct setting.
+const toneIds = new Map();
+function toneFilter(c) {
+  const tc = toneCurves(c);
+  if (!tc) return '';
+  const key = JSON.stringify(tc);
+  if (!toneIds.has(key)) {
+    const id = `vg-tone-${toneIds.size}`;
+    const fn = (ch) => `<feFunc${ch.toUpperCase()} type="table" tableValues="${tc[ch].map((q) => q[1]).join(' ')}"/>`;
+    fxDefs.insertAdjacentHTML('beforeend', `<filter id="${id}" color-interpolation-filters="sRGB"><feComponentTransfer>${fn('r')}${fn('g')}${fn('b')}</feComponentTransfer></filter>`);
+    toneIds.set(key, id);
+  }
+  return `url(#${toneIds.get(key)})`;
+}
 function colorCss(c) {
   if (!c) return '';
-  const f = [];
+  const f = [toneFilter(c)].filter(Boolean);
+  if (c.hue) f.push(`hue-rotate(${c.hue}deg)`);
   if (c.brightness) f.push(`brightness(${1 + c.brightness * 0.8})`);
   if ((c.contrast ?? 1) !== 1) f.push(`contrast(${c.contrast})`);
   if ((c.saturation ?? 1) !== 1) f.push(`saturate(${c.saturation})`);
@@ -350,6 +365,8 @@ function renderClipFx(ly, c, a, lt, g) {
   ly.inner.style.transform = [fx.transform, kb ? zoomAbout(kb.z, kb.ox, kb.oy) : ''].filter(Boolean).join(' ');
   ly.rgbOffsets[0].setAttribute('dx', String(-fx.rgb)); ly.rgbOffsets[1].setAttribute('dx', String(fx.rgb));
   ly.inner.style.filter = [fx.rgb ? `url(#vg-rgb-${li})` : '', fx.comic ? `url(#vg-comic-${li})` : '', fx.filter].filter(Boolean).join(' ');
+  ly.inner.style.clipPath = fx.clip || '';
+  Object.assign(ly.inner.style, maskCss(c.mask, P.settings.width / P.settings.height));
   const vig = vignetteCss(c.color?.vignette);
   ly.vig.style.display = vig ? 'block' : 'none'; ly.vig.style.background = vig;
   ly.leak.style.display = fx.leak ? 'block' : 'none';
@@ -994,6 +1011,10 @@ function colorFields(target, color) {
     field('Contrast', c.contrast ?? 1, (v) => tool('set_color', { ...target, contrast: v }), { min: 0, max: 3, step: '0.05' }),
     field('Sat', c.saturation ?? 1, (v) => tool('set_color', { ...target, saturation: v }), { min: 0, max: 3, step: '0.05' }),
     field('Temp', c.temperature ?? 0, (v) => tool('set_color', { ...target, temperature: v }), { min: -1, max: 1, step: '0.1' }),
+    h('details', { class: 'more-color' }, h('summary', {}, 'More color'),
+      ...[['Exposure', 'exposure', -1, 1], ['Shadows', 'shadows', -1, 1], ['Highlights', 'highlights', -1, 1], ['Fade', 'fade', 0, 1], ['Hue', 'hue', -180, 180, 5], ['Tint', 'tint', -1, 1], ['Sharpen', 'sharpen', 0, 1], ['Clean', 'clean', 0, 1]]
+        .map(([label, key, min, max, step]) => field(label, c[key] ?? 0, (v) => tool('set_color', { ...target, [key]: v }), { min, max, step: String(step || 0.05) })),
+      h('span', { class: 'note', title: 'Per-color HSL and the color wheels: ask Claude, e.g. "make the sky bluer" or "teal shadows, orange highlights". Sharpen, Clean and HSL show in the export.' }, 'HSL and color wheels: ask Claude')),
   ];
 }
 const animSelect = (c, key, label) => h('label', {}, label, h('select', { onchange: (e) => tool('set_clip', { clipId: c.id, [key]: e.target.value }) },
@@ -1106,6 +1127,8 @@ function renderInspector() {
       h('label', {}, 'Anim', h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, animation: e.target.value }) },
         ...['none', 'fade', 'pop'].map((v) => h('option', { value: v, selected: (o.animation || 'none') === v }, v)))),
       ...maskFields(o),
+      o.fit === 'free' ? h('button', { class: 'small', title: 'Make this overlay follow something in the video: drag a box around it on the preview (at the playhead)', onclick: () => startTrackDraw(o) }, '⌖ Track') : null,
+      o.fit === 'free' ? h('button', { class: 'small', title: 'Make this overlay follow the main face (local face detector)', onclick: (e) => quickTool(e.target, '🙂 Tracking…', 'track_motion', { overlayId: o.id, face: true, at: Math.max(o.start, +time.toFixed(2)) }, 'Tracking failed') }, '🙂 Follow face') : null,
       lookSelect({ overlayId: o.id }, o.color),
       o.keyframes ? h('span', { class: 'note' }, `◆ keyframes: ${Object.keys(o.keyframes).join(', ')}`) : null,
       h('button', { class: 'small danger', onclick: () => tool('delete_overlay', { overlayId: o.id }) }, 'Delete'),
@@ -1532,6 +1555,76 @@ $('#stockForm').onsubmit = async (e) => {
       h('div', { class: 'meta' }, x.creator),
       h('div', { class: 'row' }, btn('+ Clip', 'clip', 'Add to the end of the main track'), btn('+ B-roll', 'broll', 'Cover the video from the playhead (muted, fades in/out)'), btn('+ Media', 'library', 'Only import into the media library')));
   }));
+};
+// ---------- Motion tracking: drag a box on the preview ----------
+let drawFor = null;
+function startTrackDraw(o) {
+  if (time < o.start || time >= o.start + ovDur(o)) seek(o.start);
+  drawFor = o;
+  $('#drawLayer').hidden = false; $('#drawBox').style.display = 'none';
+}
+function stopTrackDraw() { drawFor = null; $('#drawLayer').hidden = true; }
+$('#drawLayer').addEventListener('pointerdown', (e) => {
+  const r = $('#stage').getBoundingClientRect(), x0 = (e.clientX - r.left) / r.width, y0 = (e.clientY - r.top) / r.height;
+  const box = $('#drawBox');
+  let b = { x: x0, y: y0, w: 0, h: 0 };
+  const move = (ev) => {
+    const x1 = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y1 = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+    b = { x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) };
+    Object.assign(box.style, { display: 'block', left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
+  };
+  const up = async () => {
+    window.removeEventListener('pointermove', move);
+    const o = drawFor;
+    stopTrackDraw();
+    if (!o || b.w < 0.02 || b.h < 0.02) return toast('Drag a bigger box around the thing to follow.');
+    const note = addMsg('action', 'Tracking…');
+    const res = await tool('track_motion', { overlayId: o.id, at: +time.toFixed(2), box: { x: +b.x.toFixed(4), y: +b.y.toFixed(4), w: +b.w.toFixed(4), h: +b.h.toFixed(4) } });
+    note.textContent = res.error ? `Tracking failed: ${res.error}` : `${res.isError ? '' : '✓ '}${res.content}`;
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up, { once: true });
+});
+window.addEventListener('keydown', (e) => { if (e.key === 'Escape' && drawFor) stopTrackDraw(); });
+// ---------- Emoji stickers ----------
+const STICKERS = {
+  Reactions: '😂 🤣 😍 🥰 😎 🤯 😱 😭 😅 🤔 🙄 😴 🥳 🤩 😡 🥺 👀 💀',
+  Hands: '👍 👎 👏 🙏 👌 ✌️ 🤞 💪 👉 👈 👆 👇 🫶 🙌 🤝',
+  Symbols: '🔥 💯 ✨ ⭐ ❤️ 💔 ✅ ❌ ⚠️ ❓ ❗ 💡 🔔 📢 🎯 🏆 💥 💤',
+  Things: '💰 📈 📉 🎉 🎁 ⏰ 📍 📌 📸 🎬 🎵 💻 📱 ☕ 🍕 🍔 🍜 🍹',
+  'Travel & nature': '🌴 🌊 ☀️ 🌙 ⛰️ 🏝️ ✈️ 🚗 🌸 🌈 ❄️ 🐶 🐱 🦋 🐠',
+  Arrows: '➡️ ⬅️ ⬆️ ⬇️ ↗️ ↘️ 🔄 ⤴️',
+};
+$('#stickerOpen').onclick = () => {
+  const dlg = $('#stickerDlg');
+  if (!$('#stickerGrid').childElementCount) {
+    $('#stickerGrid').replaceChildren(...Object.entries(STICKERS).flatMap(([group, list]) => [h('div', { class: 'grp' }, group),
+      h('div', { class: 'row' }, ...list.split(' ').map((em) => h('button', { class: 'emo', title: `Add ${em} at the playhead (2s)`, onclick: async (ev) => {
+        ev.target.disabled = true;
+        const r = await tool('add_sticker', { emoji: em, start: +time.toFixed(2) });
+        ev.target.disabled = false;
+        if (!r.error && !r.isError) { toast(`Added ${em}`); dlg.hidden = true; }
+      } }, em)))]));
+  }
+  dlg.hidden = false;
+};
+$('#stickerClose').onclick = () => { $('#stickerDlg').hidden = true; };
+$('#stickerDlg').addEventListener('pointerdown', (e) => { if (e.target.id === 'stickerDlg') $('#stickerDlg').hidden = true; });
+// ---------- Text templates ----------
+$('#textTemplate').onchange = async (e) => {
+  const tpl = e.target.value;
+  e.target.value = '';
+  if (!tpl) return;
+  const ask = (q, d) => { const v = prompt(q, d); return v === null ? null : v.trim(); };
+  const fields = {};
+  if (tpl === 'countdown') { const n = ask('Count down from', '3'); if (n === null) return; fields.from = Number(n) || 3; }
+  else {
+    const t = ask(tpl === 'list' ? 'List title' : tpl === 'big_number' ? 'The number (e.g. $10,000)' : 'Text', ''); if (t === null || (!t && tpl !== 'call_to_action')) return; fields.title = t;
+    if (tpl === 'list') { const it = ask('Items, separated by |', 'First | Second | Third'); if (it === null) return; fields.items = it.split('|').map((x) => x.trim()).filter(Boolean); }
+    else if (['title_card', 'lower_third', 'quote', 'big_number', 'call_to_action', 'breaking_news'].includes(tpl)) { const s2 = ask('Second line (optional)', ''); if (s2 === null) return; if (s2) fields.subtitle = s2; }
+  }
+  const r = await tool('add_text_template', { template: tpl, ...fields, start: +time.toFixed(2) });
+  if (!r.error && !r.isError) addMsg('action', `✓ ${r.content}`);
 };
 $('#studioVoice').onclick = (e) => {
   const on = P.clips.some((c) => c.enhance) || P.music.some((m) => m.enhance);

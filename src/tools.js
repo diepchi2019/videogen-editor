@@ -28,6 +28,10 @@ import { LAYOUTS, layoutPlan } from './layouts.js';
 import { searchAudio, getTrack, downloadTrack, trackLine } from './library.js';
 import { searchStock, getStockItem, downloadStock, stockLine, orientationFor, PEXELS_HELP } from './stock.js';
 import { makeThumb, run as runCmd } from './media.js';
+import { SETTINGS as SETTING_DEFS, get as settingValue, source as settingSource, setSettings } from './settings.js';
+import { TEXT_TEMPLATES, buildTextTemplate } from './texttemplates.js';
+import { grayFrames, trackBox, sourceToCanvas, canvasToSource, simplifySeries, TRACK_FPS } from './tracking.js';
+import { emojiName } from './emoji.js';
 import { get as setting } from './settings.js';
 import { synthesize, listVoices, piperCommand, PIPER_HELP, ttsSettings, elevenVoices, elevenModels, ENGINES } from './tts.js';
 import fs from 'node:fs';
@@ -217,7 +221,7 @@ export const TOOLS = [
   },
   {
     name: 'set_color',
-    description: 'Color-correct a clip or overlay and/or apply a filter look. Adjustments: brightness -1..1 (0 = original), contrast and saturation 0..3 (1 = original), temperature -1 (cool/blue)..1 (warm/orange), vignette 0..1. ' +
+    description: 'Color-correct a clip or overlay and/or apply a filter look. Adjustments: brightness -1..1 (0 = original), contrast and saturation 0..3 (1 = original), temperature -1 (cool/blue)..1 (warm/orange), vignette 0..1, exposure, shadows, highlights, fade, hue, tint; per-color hsl and color wheels for grading; sharpen and clean for footage quality. ' +
       `Looks: ${FILTERS.filter((f) => f !== 'none').join(', ')}; filterIntensity 0-1 blends the look with the original. Only the fields you pass change; reset clears everything first.`,
     input_schema: S({
       clipId: s('Clip id (or give overlayId)'), overlayId: s('Overlay id'),
@@ -225,15 +229,21 @@ export const TOOLS = [
       temperature: n('-1 cool .. 1 warm, 0 = original'), vignette: n('0..1 dark corners'),
       filter: s('Look preset (none removes)', { enum: FILTERS }), filterIntensity: n('0..1 (default 1)'), reset: b('Clear all color settings first'),
       lut: s('Imported .cube LUT by file name (list_luts), applied before the look; none removes'), lutIntensity: n('0..1 (default 1)'),
+      exposure: n('-1..1 (light stops, 0 = original)'), shadows: n('-1..1: lift (+) or deepen (-) the dark parts'), highlights: n('-1..1: brighten (+) or recover (-) the bright parts'),
+      fade: n('0..1 washed-out, lifted blacks'), hue: n('-180..180 degrees, shifts every color'), tint: n('-1 green .. 1 magenta'),
+      sharpen: n('0..1 crisper detail (export only); good for soft or upscaled footage'), clean: n('0..1 video noise reduction for grainy low-light footage (export only)'),
+      hsl: { type: 'object', description: 'Per color (export only): {blue: {hue: -60..60, saturation: -1..1, lightness: -1..1}}; colors red, yellow, green, cyan, blue, magenta. E.g. bluer sky: {blue: {saturation: 0.4, lightness: -0.2}}' },
+      wheels: { type: 'object', description: 'Color wheels: {shadows|midtones|highlights: {color: hex, amount 0-1}}, e.g. teal-orange: {shadows: {color: "#1fa3a3", amount: 0.5}, highlights: {color: "#ff9a3c", amount: 0.4}}; amount 0 removes' },
     }),
   },
   {
     name: 'add_effect',
     description: `Add a video effect to a main-track clip for a time range: ${EFFECTS.join(', ')}. ` +
       'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative; ' +
-      'pixelate = big pixels (intensity = block size); mirror = left half mirrored to the right; kaleidoscope = top-left quarter mirrored 4 ways; film_grain = moving grain; strobe = white flicker (rate = flashes per second); comic = colored edge drawing. ' +
+      'pixelate = big pixels (intensity = block size); mirror = left half mirrored to the right; kaleidoscope = top-left quarter mirrored 4 ways; film_grain = moving grain; strobe = white flicker (rate = flashes per second); comic = colored edge drawing; ' +
+      'letterbox = cinematic black bars; black_white (intensity = how gray); tv_static = noisy old TV; flicker = unsteady brightness; posterize = flat poster colors; duotone = blue-teal monochrome; glow = soft dreamy bloom; rainbow = cycling colors (rate = turns per second); echo = motion trails (export only); swing = frame rocks side to side (rate); multi_screen = the frame repeated 2x2; old_film = sepia, grain and flicker; night_vision = green night camera; thermal = heat camera colors. ' +
       'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. The browser preview approximates it; check the real look with look_at_timeline.',
-    input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse / strobe: cycles per second (shake default 8, zoom_pulse 2, strobe 8)') }, ['clipId', 'type']),
+    input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse / strobe / rainbow / swing: cycles per second (shake 8, zoom_pulse 2, strobe 8, rainbow 0.5, swing 1)') }, ['clipId', 'type']),
   },
   { name: 'delete_effect', description: 'Remove an effect (ids are listed with each clip in get_timeline).', input_schema: S({ effectId: s('Effect id') }, ['effectId']) },
   {
@@ -420,6 +430,53 @@ export const TOOLS = [
       at: n('Timeline seconds (broll)'), position: n('Main track position, 1 = first (clip; default: at the end)'), duration: n('Seconds'), in: n('Source start seconds (videos)'),
     }, ['id']),
   },
+  {
+    name: 'get_settings',
+    description: 'The editor settings: default text-to-speech engine, ElevenLabs model and voice, Whisper model, default font, export loudness, in-app Claude model, and whether each API key is set (keys themselves are never shown).',
+    input_schema: S({}),
+  },
+  {
+    name: 'update_settings',
+    description: 'Change saved editor defaults, e.g. {"export.loudness": "-16"} or {"tts.engine": "elevenlabs", "tts.elevenlabs.voice": "<voice id>"}. Keys: ' +
+      Object.entries(SETTING_DEFS).filter(([, d]) => !d.secret).map(([k, d]) => `${k} (${d.label}${d.choices ? `: ${d.choices.join(' / ')}` : ''})`).join('; ') +
+      '. An empty value goes back to the default. API keys cannot be set here: the user enters them in ⚙ Settings (never ask for a key in chat).',
+    input_schema: S({ settings: { type: 'object', description: 'Setting key -> value' } }, ['settings']),
+  },
+  {
+    name: 'enhance_video',
+    description: 'Make footage look cleaner and crisper: sharpen (detail) and clean (video noise reduction, for grainy low-light shots) on clips and overlays (default: every clip). Export only. Exports also scale with Lanczos, so 720p footage in a 1080p video stays sharper. 0 removes.',
+    input_schema: S({ ids: idsSchema('Clip or overlay ids (default: all clips)'), sharpen: n('0..1 (default 0.5)'), clean: n('0..1 (default 0; 0.3-0.6 for grainy footage)') }),
+  },
+  {
+    name: 'add_text_template',
+    description: 'Add a ready-made title design (several texts with boxes and animations, grouped): ' + Object.entries(TEXT_TEMPLATES).map(([k, t]) => `${k} (${t.description}; fields: ${t.fields.join(', ')})`).join('; ') + '. ' +
+      'Positions fit the canvas shape and stay clear of the app buttons. Change any part afterwards with update_text, or move the group with move_items.',
+    input_schema: S({
+      template: s('Template', { enum: Object.keys(TEXT_TEMPLATES) }), title: s('Main text'), subtitle: s('Second line (name role, author, label...)'),
+      items: { type: 'array', items: { type: 'string' }, description: 'list: the items' }, from: n('countdown: first number (default 3)'),
+      start: n('Timeline seconds (default 0)'), duration: n('Seconds (default 3; countdown = from; list grows with items)'), color: s('Accent color hex for boxes and highlights (default #e8344e red-pink)'),
+    }, ['template']),
+  },
+  {
+    name: 'add_sticker',
+    description: 'Put an emoji sticker on the video (a color image, transparent background, pops in): e.g. 🔥 😂 ❤️ 👇 ✅ 💯 📍. It is an overlay, so set_overlay moves or resizes it and track_motion makes it follow something.',
+    input_schema: S({
+      emoji: s('One emoji'), start: n('Timeline seconds (default 0)'), duration: n('Seconds (default 2)'),
+      x: n('Center x 0-1 (default 0.5)'), y: n('Center y 0-1 (default 0.35)'), scale: n('Width as a fraction of the frame (default 0.25)'),
+      animation: s('pop (default), fade or none', { enum: ['pop', 'fade', 'none'] }),
+    }, ['emoji']),
+  },
+  {
+    name: 'track_motion',
+    description: 'Make an overlay (sticker, emoji, logo, label) follow something that moves in the main video: a box around the thing at one moment (canvas fractions, as seen in look_at_timeline; or sourceBox in source-frame fractions read from look_at_asset with grid), or face true to follow the main face. ' +
+      'Tracks from `at` to the end of the overlay (or the clip), writes x/y keyframes; the overlay keeps its offset from the thing (center true puts it right on it). The overlay must be fit free. Works on video clips (not reversed); rotation and keyframed clip position are not followed.',
+    input_schema: S({
+      overlayId: s('The overlay that should follow'), at: n('Timeline seconds where the box is drawn (default: overlay start)'),
+      box: { type: 'object', description: '{x, y, w, h}: top-left corner and size as fractions of the canvas at time at', properties: { x: n('0-1'), y: n('0-1'), w: n('0-1'), h: n('0-1') } },
+      sourceBox: { type: 'object', description: '{x, y, w, h} in fractions of the source frame (from look_at_asset grid)', properties: { x: n('0-1'), y: n('0-1'), w: n('0-1'), h: n('0-1') } },
+      face: b('Follow the main face instead of a box'), to: n('Timeline seconds to stop (default: overlay end or clip end)'), center: b('Put the overlay on the thing instead of keeping its offset'),
+    }, ['overlayId']),
+  },
   { name: 'duplicate_items', description: 'Copy clips, texts, overlays, audio items or markers (copy/paste). Copied clips go in right after the originals (or at the clip boundary nearest `at`); other items keep their spacing and start at `at` (default: right after the originals). Groups are copied as new groups.', input_schema: S({ ids: idsSchema('Item ids (or group ids grp_...)'), at: n('Timeline seconds to paste at') }, ['ids']) },
   { name: 'delete_items', description: 'Delete several items at once (clips, texts, overlays, audio items, markers).', input_schema: S({ ids: idsSchema('Item ids') }, ['ids']) },
   { name: 'move_items', description: 'Move texts, overlays, audio items and markers in time together (their groups move too). Main-track clips are reordered with move_clip instead.', input_schema: S({ ids: idsSchema('Item ids or group ids'), by: n('Seconds, negative = earlier') }, ['ids', 'by']) },
@@ -480,10 +537,10 @@ export const TOOLS = [
   { name: 'set_overlay', description: 'Change an overlay (timing, position, size, opacity, crop, volume, blend mode, chroma key for green screen, audio noise reduction...).', input_schema: S({ overlayId: s('Overlay id'), ...overlayProps }, ['overlayId']) },
   {
     name: 'set_mask',
-    description: 'Mask an overlay so only part of it shows: circle (round picture-in-picture or face cut-out), rect (with round corners), linear (split screen: keeps one side of a line, see angle), mirror (a band along a line). ' +
-      'Positions and sizes are fractions of the overlay frame itself (after crop), so the mask moves and scales with it. For a split screen put the second clip as an overlay with fit cover and a linear mask. Only the fields you pass change. Preview shows an approximation.',
+    description: 'Mask an overlay or a main-track clip so only part of it shows: circle (round picture-in-picture or face cut-out), rect (with round corners), linear (split screen: keeps one side of a line, see angle), mirror (a band along a line). ' +
+      'On an overlay, positions and sizes are fractions of the overlay frame itself (after crop), so the mask moves and scales with it; on a clip (clipId) they are fractions of the canvas and the background color shows outside. For a split screen put the second clip as an overlay with fit cover and a linear mask. Only the fields you pass change. Preview shows an approximation.',
     input_schema: S({
-      overlayId: s('Overlay id'), shape: s('Mask shape; none removes the mask', { enum: MASK_SHAPES }),
+      overlayId: s('Overlay id'), clipId: s('Main-track clip id (instead of overlayId)'), shape: s('Mask shape; none removes the mask', { enum: MASK_SHAPES }),
       x: n('Center x (circle/rect) or a point on the line (linear/mirror), 0-1 of the overlay (default 0.5)'), y: n('Center y / point on the line, 0-1 (default 0.5)'),
       w: n('Width 0-1 of the overlay (circle/rect, default 0.6)'), h: n('Height 0-1 (circle/rect, default 0.6); mirror: band thickness (default 0.4)'),
       angle: n('linear/mirror: tilt in degrees. 0 = horizontal line, keeps the part BELOW it; 180 keeps the part above; 90 = vertical line, keeps the LEFT part; -90 keeps the right part'),
@@ -550,7 +607,7 @@ export const TOOLS = [
 ];
 
 // MCP tool annotations (not sent to the Anthropic API, which does not accept them).
-const READ_ONLY = new Set(['search_stock', 'search_music', 'check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
+const READ_ONLY = new Set(['get_settings', 'search_stock', 'search_music', 'check_reel', 'get_timeline_transcript', 'get_timeline', 'find_moments', 'list_voices', 'look_at_asset', 'look_at_timeline', 'list_projects', 'list_fonts', 'get_transcript', 'export_status', 'analyze_audio', 'list_styles', 'list_templates', 'list_luts']);
 const DESTRUCTIVE = new Set(['delete_clip', 'delete_region', 'delete_effect', 'delete_markers', 'delete_overlay', 'delete_text', 'delete_captions', 'delete_music', 'clear_timeline', 'delete_project', 'add_captions', 'delete_style', 'delete_template', 'delete_range', 'delete_items', 'cut_transcript', 'remove_retakes']);
 export const toolAnnotations = (name) => ({
   readOnlyHint: READ_ONLY.has(name),
@@ -1084,6 +1141,121 @@ export async function executeTool(name, input = {}, source = 'claude') {
           msg += ' ' + store.apply('add_overlay', { assetId: a.id, start: at, duration: Math.min(len, L.videoDuration - at), in: srcIn, fit: 'cover', volume: 0, animation: 'fade' }, source);
         }
         return { content: msg + credit, assetId: a.id };
+      }
+      case 'get_settings': {
+        const lines = Object.entries(SETTING_DEFS).map(([k, d]) => {
+          const src = settingSource(k);
+          if (d.secret) return `${k}: ${settingValue(k) ? 'set' : 'not set'}${src === 'env' ? ` (from ${d.env})` : ''} - ${d.label} (the user enters keys in ⚙ Settings)`;
+          return `${k}: ${settingValue(k) ?? '(default)'}${src === 'env' ? ` (from ${d.env}, cannot be changed here)` : src === 'default' ? ' (default)' : ''} - ${d.label}${d.choices ? ` [${d.choices.join(' / ')}]` : ''}`;
+        });
+        return { content: `Editor settings:\n${lines.join('\n')}` };
+      }
+      case 'update_settings': {
+        const patch = input.settings && typeof input.settings === 'object' ? input.settings : {};
+        if (!Object.keys(patch).length) return { content: 'Give settings: {key: value}. get_settings lists the keys.', isError: true };
+        for (const k of Object.keys(patch)) {
+          if (!SETTING_DEFS[k]) return { content: `Unknown setting ${k}. Keys: ${Object.keys(SETTING_DEFS).filter((x) => !SETTING_DEFS[x].secret).join(', ')}`, isError: true };
+          if (SETTING_DEFS[k].secret) return { content: `${k} is an API key: keys are never set through Claude. Ask the user to paste it in ⚙ Settings.`, isError: true };
+        }
+        const pub = setSettings(patch);
+        const envNote = Object.keys(patch).filter((k) => pub[k].source === 'env');
+        return { content: `Saved: ${Object.keys(patch).map((k) => `${k} = ${pub[k].value ?? '(default)'}`).join(', ')}.${envNote.length ? ` Note: ${envNote.join(', ')} come${envNote.length === 1 ? 's' : ''} from an environment variable, which wins over the saved value.` : ''}` };
+      }
+      case 'enhance_video': {
+        const p = store.getProject();
+        const ids = Array.isArray(input.ids) && input.ids.length ? input.ids : p.clips.filter((c) => p.assets[c.assetId]?.type !== 'audio').map((c) => c.id);
+        const sharpen = input.sharpen === undefined ? 0.5 : Number(input.sharpen), clean = input.clean === undefined ? 0 : Number(input.clean);
+        if (!(sharpen >= 0 && sharpen <= 1) || !(clean >= 0 && clean <= 1)) return { content: 'sharpen and clean are 0-1', isError: true };
+        const steps = ids.map((id) => ({ name: 'set_color', input: { ...(p.overlays.some((o) => o.id === id) ? { overlayId: id } : { clipId: id }), sharpen, clean } }));
+        if (!steps.length) return { content: 'No clips to enhance.', isError: true };
+        store.applyBatch(steps, source);
+        return { content: `Enhanced ${steps.length} item(s): sharpen ${sharpen}, clean ${clean} (export only; check with look_at_timeline).` };
+      }
+      case 'add_text_template': {
+        const p = store.getProject();
+        const vertical = p.settings.height > p.settings.width;
+        let items;
+        try {
+          items = buildTextTemplate(input.template, { title: input.title, subtitle: input.subtitle, items: input.items, from: input.from },
+            { start: Number(input.start) || 0, duration: input.duration === undefined ? undefined : Number(input.duration), color: input.color || '#e8344e', vertical });
+        } catch (e) { return { content: e.message, isError: true }; }
+        const steps = items.map((it) => ({ name: 'add_text', input: it }));
+        if (steps.length > 1) steps.push({ name: 'group_items', input: { ids: steps.map((_, i) => `$${i + 1}`) } });
+        store.applyBatch(steps, source);
+        return { content: `Added ${input.template}: ${items.map((it) => `"${it.text}" ${it.start}-${it.end}s`).join(', ')}${items.length > 1 ? ' (grouped)' : ''}.` };
+      }
+      case 'add_sticker': {
+        const e = String(input.emoji || '').trim();
+        let png;
+        try { png = await fetchEmoji(e); } catch (err) { return { content: `Could not get the emoji ${e}: ${err.message}`, isError: true }; }
+        const file = `f_${emojiName(e).replace(/\.png$/, '')}.png`;
+        if (!fs.existsSync(path.join(store.MEDIA_DIR, file))) fs.copyFileSync(png, path.join(store.MEDIA_DIR, file));
+        let a = Object.values(store.getProject().assets).find((x) => x.file === file);
+        if (!a) {
+          a = { id: uid('img'), name: `${e} sticker`, file, ...(await probe(path.join(store.MEDIA_DIR, file))) };
+          a.thumb = await makeThumb(a).catch(() => null);
+          store.addAsset(a);
+        }
+        const msg = store.apply('add_overlay', { assetId: a.id, start: Number(input.start) || 0, duration: Number(input.duration) || 2, fit: 'free', x: input.x ?? 0.5, y: input.y ?? 0.35, scale: input.scale ?? 0.25, animation: input.animation || 'pop', track: 2 }, source);
+        return { content: `${msg} (${e} sticker).` };
+      }
+      case 'track_motion': {
+        const p = store.getProject(), L = layout(p), W = p.settings.width, H = p.settings.height;
+        const o = p.overlays.find((x) => x.id === input.overlayId);
+        if (!o) return { content: `No overlay ${input.overlayId}. Overlays: ${p.overlays.map((x) => x.id).join(', ') || 'none'}`, isError: true };
+        if (o.fit !== 'free') return { content: `${o.id} has fit ${o.fit}; set_overlay fit free first (a full-frame overlay cannot move).`, isError: true };
+        const oEnd = o.start + (o.out - o.in) / (o.speed || 1);
+        const t0 = input.at === undefined ? o.start : Number(input.at);
+        const c = L.clips.find((x) => t0 >= x.start && t0 < x.end);
+        if (!c) return { content: `No main clip at ${t0}s.`, isError: true };
+        const a = p.assets[c.assetId];
+        if (a.type !== 'video' || c.reverse || c.freeze) return { content: 'Tracking needs a video clip (not reversed or a freeze frame) under the overlay.', isError: true };
+        const t1 = Math.min(input.to === undefined ? oEnd : Number(input.to), c.end, oEnd);
+        if (t1 - t0 < 0.3) return { content: 'Less than 0.3s to track (check at / to and the overlay and clip ranges).', isError: true };
+        const s0 = srcAt(c, t0 - c.start), s1 = srcAt(c, t1 - c.start);
+        let path = [];
+        if (input.face) {
+          if (!faceModelPath()) return { content: FACE_HELP, isError: true };
+          // The biggest face at the start, then the face nearest to where it was; a missing frame holds the place.
+          const samples = await faceSamples(a, s0, s1);
+          let prev = null;
+          for (const smp of samples) {
+            const fs0 = smp.faces || [];
+            const f = prev ? fs0.reduce((best, x) => (!best || Math.hypot(x.cx - prev.x, x.cy - prev.y) < Math.hypot(best.cx - prev.x, best.cy - prev.y) ? x : best), null)
+              : fs0.reduce((best, x) => (!best || x.w * x.h > best.w * best.h ? x : best), null);
+            if (f && (!prev || Math.hypot(f.cx - prev.x, f.cy - prev.y) < 0.25)) prev = { x: f.cx, y: f.cy };
+            if (prev) path.push({ src: smp.t, x: prev.x, y: prev.y });
+          }
+          if (!path.length) return { content: 'No face found in that part of the clip.', isError: true };
+        } else {
+          let sb = input.sourceBox;
+          if (!sb && input.box) {
+            const b0 = input.box, lt = t0 - c.start;
+            const tl = canvasToSource(c, a, W, H, { x: b0.x, y: b0.y }, lt), br = canvasToSource(c, a, W, H, { x: b0.x + b0.w, y: b0.y + b0.h }, lt);
+            sb = { x: Math.min(tl.x, br.x), y: Math.min(tl.y, br.y), w: Math.abs(br.x - tl.x), h: Math.abs(br.y - tl.y) };
+          }
+          if (!sb || !(sb.w > 0) || !(sb.h > 0)) return { content: 'Give box {x, y, w, h} (canvas fractions at `at`), sourceBox, or face true.', isError: true };
+          const g = await grayFrames(a, s0, s1);
+          if (g.frames.length < 2) return { content: 'Could not read frames of that part of the clip.', isError: true };
+          const tr = trackBox(g.frames, g.w, g.h, { x: sb.x * g.w, y: sb.y * g.h, w: sb.w * g.w, h: sb.h * g.h });
+          const lost = tr.filter((q) => q.score < 0.45).length;
+          path = tr.map((q, i) => ({ src: g.times[i], x: q.cx / g.w, y: q.cy / g.h, lost: q.score < 0.45 }));
+          path.lostCount = lost;
+        }
+        // Canvas positions in timeline seconds, smoothed a little, offset so the overlay keeps its place relative to the thing.
+        const pts = path.map((q) => { const lt = localAt(c, q.src); return { t: c.start + lt, ...sourceToCanvas(c, a, W, H, q, lt) }; }).filter((q) => q.t >= o.start - 1e-6 && q.t <= oEnd + 1e-6);
+        const sm = (k) => pts.map((q, i) => { const w = pts.slice(Math.max(0, i - 1), i + 2); return w.reduce((s, x) => s + x[k], 0) / w.length; });
+        const xs = sm('x'), ys = sm('y');
+        const dx = input.center ? 0 : o.x - xs[0], dy = input.center ? 0 : o.y - ys[0];
+        const kx = simplifySeries(pts.map((q, i) => ({ t: q.t, v: Math.min(2, Math.max(-1, xs[i] + dx)) })));
+        const ky = simplifySeries(pts.map((q, i) => ({ t: q.t, v: Math.min(2, Math.max(-1, ys[i] + dy)) })));
+        const r3k = (s) => s.map((q) => ({ t: Math.round(q.t * 1000) / 1000, value: Math.round(q.v * 1000) / 1000 }));
+        store.applyBatch([
+          { name: 'set_keyframes', input: { overlayId: o.id, property: 'x', keyframes: r3k(kx), easing: 'linear' } },
+          { name: 'set_keyframes', input: { overlayId: o.id, property: 'y', keyframes: r3k(ky), easing: 'linear' } },
+        ], source);
+        return { content: `${o.id} now follows ${input.face ? 'the face' : 'the box'} from ${t0.toFixed(2)}s to ${t1.toFixed(2)}s: ${pts.length} positions at ${TRACK_FPS} fps -> ${kx.length} x and ${ky.length} y keyframes.` +
+          `${path.lostCount ? ` Lost the target in ${path.lostCount} frame(s) (it held still there): check with look_at_timeline.` : ''}` };
       }
       case 'find_moments': {
         const a = store.getProject().assets[input.assetId];

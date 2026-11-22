@@ -144,6 +144,14 @@ button:disabled { opacity: .45; cursor: default; }
 #trText .tw:hover { background: rgba(255, 255, 255, 0.08); }
 #trText .tw.now { background: var(--accent); color: #000; }
 #trText .tt { color: var(--muted, #888); font-size: 10px; margin-right: 6px; user-select: none; }
+#stickerGrid { max-height: 60vh; overflow: auto; }
+#stickerGrid .grp { font-size: 11px; opacity: .7; margin: 8px 0 4px; }
+#stickerGrid .row { display: flex; flex-wrap: wrap; gap: 4px; }
+#stickerGrid .emo { font-size: 26px; line-height: 1; padding: 4px 6px; background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; }
+#stickerGrid .emo:hover { border-color: var(--line); background: rgba(255, 255, 255, .06); }
+#drawLayer { position: absolute; inset: 0; z-index: 30; cursor: crosshair; background: rgba(0, 0, 0, .15); }
+#drawBox { position: absolute; border: 2px dashed #ffde00; display: none; }
+#drawHint { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); background: rgba(0, 0, 0, .7); padding: 3px 8px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
 #progressBar { position: absolute; left: 0; z-index: 4; pointer-events: none; }
 .mk.note { border-left: 2px solid var(--textc); padding-left: 3px; font-size: 10px; color: var(--textc); white-space: nowrap; }
 .insp .note { color: var(--muted); font-size: 11px; }
@@ -191,3 +199,5 @@ body.dragging #dropOverlay { display: flex; }
 .sval .secret input { flex: 1; min-width: 0; }
 .keystate { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .keystate.on { color: var(--accent); }
+.more-color summary { cursor: pointer; font-size: 12px; opacity: .85; }
+.more-color { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }

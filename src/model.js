@@ -34,15 +34,20 @@ export const REGION_MODES = ['fill', 'patch'];
 export const CLIP_ANIMS = ['none', 'fade', 'zoom_in', 'zoom_out', 'slide_left', 'slide_right', 'slide_up', 'slide_down'];
 // Color filter presets (looks). render.js maps them to ffmpeg filters, public/app.js to CSS filters.
 export const FILTERS = ['none', 'bw', 'sepia', 'vintage', 'warm', 'cool', 'vivid', 'cinematic', 'matte', 'noir', 'dramatic'];
-export const EFFECTS = ['shake', 'zoom_pulse', 'glitch', 'rgb_split', 'flash', 'blur', 'vhs', 'light_leak', 'invert', 'pixelate', 'mirror', 'kaleidoscope', 'film_grain', 'strobe', 'comic'];
+export const EFFECTS = ['shake', 'zoom_pulse', 'glitch', 'rgb_split', 'flash', 'blur', 'vhs', 'light_leak', 'invert', 'pixelate', 'mirror', 'kaleidoscope', 'film_grain', 'strobe', 'comic',
+  'letterbox', 'black_white', 'tv_static', 'flicker', 'posterize', 'duotone', 'glow', 'rainbow', 'echo', 'swing', 'multi_screen', 'old_film', 'night_vision', 'thermal'];
 // Effects with a rate (cycles per second) and its default.
-export const EFFECT_RATES = { shake: 8, zoom_pulse: 2, strobe: 8 };
+export const EFFECT_RATES = { shake: 8, zoom_pulse: 2, strobe: 8, rainbow: 0.5, swing: 1 };
 // Animatable properties and their value ranges.
 export const KEYFRAME_PROPS = {
   clip: { scale: [0.1, 5], x: [-1, 2], y: [-1, 2], volume: [0, 2] },
   overlay: { x: [-1, 2], y: [-1, 2], scale: [0.02, 4], opacity: [0, 1], rotate: [-720, 720], volume: [0, 2] },
 };
-const COLOR_KEYS = [['brightness', -1, 1, 0], ['contrast', 0, 3, 1], ['saturation', 0, 3, 1], ['temperature', -1, 1, 0], ['vignette', 0, 1, 0]];
+const COLOR_KEYS = [['brightness', -1, 1, 0], ['contrast', 0, 3, 1], ['saturation', 0, 3, 1], ['temperature', -1, 1, 0], ['vignette', 0, 1, 0],
+  ['exposure', -1, 1, 0], ['shadows', -1, 1, 0], ['highlights', -1, 1, 0], ['fade', 0, 1, 0], ['hue', -180, 180, 0], ['tint', -1, 1, 0], ['sharpen', 0, 1, 0], ['clean', 0, 1, 0]];
+// Per-color hue / saturation / lightness (HSL panel) and the three color wheels.
+export const HSL_COLORS = ['red', 'yellow', 'green', 'cyan', 'blue', 'magenta'];
+export const WHEELS = ['shadows', 'midtones', 'highlights'];
 
 // Value of a keyframe track {easing, points:[{t,v}]} at local time t (points sorted by t).
 export function kfAt(track, t) {
@@ -231,6 +236,8 @@ function describeColor(c) {
   const parts = COLOR_KEYS.filter(([k, , , d]) => c[k] !== undefined && c[k] !== d).map(([k]) => `${k} ${c[k]}`);
   if (c.filter) parts.push(`filter ${c.filter}${(c.filterIntensity ?? 1) !== 1 ? ` ${c.filterIntensity}` : ''}`);
   if (c.lut) parts.push(`LUT ${c.lut}${(c.lutIntensity ?? 1) !== 1 ? ` ${c.lutIntensity}` : ''}`);
+  if (c.hsl) parts.push(`HSL ${Object.entries(c.hsl).map(([k, v]) => `${k}(${Object.entries(v).map(([f, x]) => `${f[0]}${x}`).join(' ')})`).join(' ')}`);
+  if (c.wheels) parts.push(`wheels ${Object.entries(c.wheels).map(([k, v]) => `${k} ${v.color} ${v.amount}`).join(', ')}`);
   return parts.length ? `, color: ${parts.join(' ')}` : '';
 }
 // Keyframe times are stored relative to the item; show them in timeline seconds.
@@ -272,7 +279,7 @@ export function summarize(p, extras = {}) {
     `- #${c.index + 1} ${c.id}${c.styleRole ? ` (style ${c.styleRole})` : ''}: asset ${c.assetId} ("${p.assets[c.assetId]?.name}"), ${describeTiming(c)}, volume ${c.volume}${describeSound(c)}, fit ${c.fit || 'contain'}, timeline ${c.start.toFixed(2)}-${c.end.toFixed(2)}s` +
     describeTransform(c.transform) +
     (c.motion && c.motion.preset !== 'none' ? `, motion ${c.motion.preset} ${c.motion.intensity}` : '') +
-    (c.stabilize ? `, stabilized ${c.stabilize}` : '') + describeColor(c.color) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
+    (c.stabilize ? `, stabilized ${c.stabilize}` : '') + describeColor(c.color) + describeMask(c.mask) + describeAnims(c) + describeEffects(c, c.start) + describeKeyframes(c, c.start) +
     (c.transition?.type && c.transition.type !== 'none' ? `, transition in: ${c.transition.type} ${c.transition.duration}s` : '') +
     (c.regions?.length ? `, removed regions: ${c.regions.map(describeRegion).join('; ')}` : '') + describeReframe(c, c.start) +
     (c.autoZoom ? `, auto zoom (framing x${c.autoZoom.scale}${c.autoZoom.punches ? `, ${c.autoZoom.punches} punch-in${c.autoZoom.punches > 1 ? 's' : ''}` : ''})` : ''));
@@ -510,6 +517,28 @@ function colorFrom(base, input, prefix = '') {
   const li = num(input.lutIntensity, prefix + 'lutIntensity', 0, 1);
   if (li !== undefined) { if (!c.lut) fail(`Set ${prefix}lut before ${prefix}lutIntensity`); c.lutIntensity = r3(li); }
   if (c.lutIntensity === 1) delete c.lutIntensity;
+  // HSL per color: {red: {hue -60..60, saturation -1..1, lightness -1..1}}; a color with all zeros is removed.
+  if (input.hsl && typeof input.hsl === 'object') {
+    const h = { ...(c.hsl || {}) };
+    for (const [k, v] of Object.entries(input.hsl)) {
+      if (!HSL_COLORS.includes(k)) fail(`${prefix}hsl colors are ${HSL_COLORS.join(', ')}`);
+      const e = { ...(h[k] || {}) };
+      for (const [f, lo, hi] of [['hue', -60, 60], ['saturation', -1, 1], ['lightness', -1, 1]]) { const x = num(v?.[f], `${prefix}hsl.${k}.${f}`, lo, hi); if (x !== undefined) e[f] = r3(x); if (e[f] === 0) delete e[f]; }
+      if (Object.keys(e).length) h[k] = e; else delete h[k];
+    }
+    if (Object.keys(h).length) c.hsl = h; else delete c.hsl;
+  }
+  // Color wheels: {shadows|midtones|highlights: {color: hex, amount 0-1}}; amount 0 removes one.
+  if (input.wheels && typeof input.wheels === 'object') {
+    const w = { ...(c.wheels || {}) };
+    for (const [k, v] of Object.entries(input.wheels)) {
+      if (!WHEELS.includes(k)) fail(`${prefix}wheels are ${WHEELS.join(', ')}`);
+      const col = color(v?.color, `${prefix}wheels.${k}.color`) ?? w[k]?.color;
+      const amt = num(v?.amount, `${prefix}wheels.${k}.amount`, 0, 1) ?? w[k]?.amount ?? 0.5;
+      if (!col || !amt) delete w[k]; else w[k] = { color: col, amount: r3(amt) };
+    }
+    if (Object.keys(w).length) c.wheels = w; else delete c.wheels;
+  }
   return Object.keys(c).length ? c : undefined;
 }
 
@@ -1502,7 +1531,11 @@ export const ops = {
   },
 
   set_mask(p, input) {
-    if (input.clipId && !input.overlayId) fail('Masks work on overlays. To mask a main-track clip, add its asset as an overlay (add_overlay fit cover) above the clip, then mask that.');
+    if (input.clipId && !input.overlayId) {
+      // A main clip: the mask is in fractions of the canvas; outside it the background color shows.
+      const c = p.clips[findClip(p, input.clipId)];
+      return applyMask(c, input) || `Mask of ${c.id}:${describeMask(c.mask).replace(/^, mask/, '')} (fractions of the canvas)`;
+    }
     const o = p.overlays[findIn(p.overlays, input.overlayId, 'overlay')];
     return applyMask(o, input) || `Mask of ${o.id}:${describeMask(o.mask).replace(/^, mask/, '')}`;
   },
