@@ -1750,3 +1750,21 @@ test('preview: sharpen kernel, echo on the canvas, HSL uniforms for the WebGL la
   assert.ok(G.hslActive({ hsl: { blue: { saturation: -1 } } }) && !G.hslActive({ hsl: {} }) && !G.hslActive(null));
   assert.deepEqual(G.hslUniform({ red: { hue: 20 }, blue: { saturation: -1, lightness: 0.5 } }), [20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0.5, 0, 0, 0]);
 });
+
+test('WebGL preview helpers: .cube parsing into an atlas, active regions, despill channel', async () => {
+  const G = await import('../public/glcolor.js');
+  // 2-point LUT that swaps red and blue: atlas pixel (r + 2*b, g) holds (b, g, r).
+  let s = 'TITLE "x"\nLUT_3D_SIZE 2\n';
+  for (let b = 0; b < 2; b++) for (let g = 0; g < 2; g++) for (let r = 0; r < 2; r++) s += `${b} ${g} ${r}\n`;
+  const L = G.parseCube(s);
+  assert.equal(L.size, 2);
+  const px = (r, g, b) => { const o = (g * 4 + b * 2 + r) * 3; return [...L.data.slice(o, o + 3)]; };
+  assert.deepEqual(px(1, 0, 0), [0, 0, 255]);
+  assert.deepEqual(px(0, 1, 1), [255, 255, 0]);
+  assert.throws(() => G.parseCube('LUT_3D_SIZE 2\n0 0 0\n'), /expected 8/);
+  assert.throws(() => G.parseCube('hello'), /not a 3D/);
+  const regions = [{ x: 0.1, y: 0.2, w: 0.3, h: 0.1, from: 1, to: 3 }, { x: 0.5, y: 0.5, w: 0.1, h: 0.1, from: 4, to: 5 }];
+  assert.deepEqual(G.activeBoxes(regions, 2), [[0.1, 0.2, 0.3, 0.1]]);
+  assert.deepEqual(G.activeBoxes(regions, 3.5), []);
+  assert.deepEqual([G.spillCode('#00ff00'), G.spillCode('#0047bb'), G.spillCode('#ff00ff')], [1, 2, 0]);
+});

@@ -12,7 +12,7 @@ import { invalidateFonts, readFamily, fontFile, defaultFont, emRatio } from './s
 import { chat, resetChat } from './src/chat.js';
 import { getJob, listJobs } from './src/render.js';
 import { presetLists } from './src/presets.js';
-import { importLut, listLuts } from './src/luts.js';
+import { importLut, listLuts, lutPath } from './src/luts.js';
 import { modelPath, installedModels } from './src/transcribe.js';
 import { listVoices, ttsSettings, saveTtsSettings, elevenVoices, elevenModels, verifyElevenKey } from './src/tts.js';
 import { verifyPexelsKey } from './src/stock.js';
@@ -65,6 +65,12 @@ store.onChange((p, source) => broadcast('project', { project: p, layout: layout(
 setInterval(() => { if (listJobs().some((j) => j.status === 'running' || Date.now() - (j.finishedAt || 0) < 3000)) broadcast('jobs', listJobs()); }, 700);
 
 app.get('/api/state', wrap(state));
+// A .cube LUT for the preview (the WebGL layer in public/glcolor.js parses it).
+app.get('/api/lut/:name', (req, res) => {
+  const f = lutPath(String(req.params.name));
+  if (!/\.cube$/i.test(f) || !fs.existsSync(f)) return res.status(404).json({ error: 'no such LUT' });
+  res.type('text/plain').sendFile(f);
+});
 
 // Text-to-speech settings for the Voice panel. The API key is write-only: it is never sent back.
 app.get('/api/tts', wrap(async (req) => {

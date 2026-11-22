@@ -488,7 +488,9 @@ function renderFrame(force) {
       else { ly.bg.style.display = 'none'; ly.bg.pause(); }
     }
     renderClipFx(ly, c, a, lt, { fit, pos: rf.pos, x, y, s, rotate: T.rotate || 0, flipH: T.flipH, flipV: T.flipV, op: an.op, crop: T.crop, filter: mediaStyle.filter });
-    glMirror(ly.video, c.color); glMirror(ly.img, c.color); // per-color HSL (WebGL)
+    // WebGL for per-color HSL, LUTs and removed regions (regions use source seconds).
+    glMirror(ly.video, { color: c.color, regions: c.regions, srcT: ly.video.currentTime, onLut: () => renderFrame(true) });
+    glMirror(ly.img, { color: c.color, regions: c.regions, srcT: c.in, onLut: () => renderFrame(true) });
   });
   for (const ly of layers) if (!used.has(ly)) { ly.el.style.display = 'none'; ly.video.pause(); ly.bg.pause(); }
 
@@ -602,7 +604,7 @@ function renderOverlays(t) {
       filter: colorCss(o.color), objectViewBox: cropBox(o.crop),
       ...maskCss(o.mask, full ? P.settings.width / P.settings.height : ((a.width || 1) * (o.crop?.w ?? 1)) / ((a.height || 1) * (o.crop?.h ?? 1))),
     });
-    glMirror(el, o.color);
+    glMirror(el, { color: o.color, key: o.key, onLut: () => renderFrame(true) }); // HSL, LUT and chroma key (WebGL)
   });
   for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
 }
@@ -1026,7 +1028,7 @@ function colorFields(target, color) {
   return [
     lookSelect(target, color),
     c.filter ? field('Mix', c.filterIntensity ?? 1, (v) => tool('set_color', { ...target, filterIntensity: v }), { min: 0, max: 1, step: '0.1' }) : null,
-    luts.length || c.lut ? h('label', { title: 'Imported .cube LUT (shows in export and look_at_timeline, not in this preview)' }, 'LUT', h('select', { onchange: (e) => tool('set_color', { ...target, lut: e.target.value }) },
+    luts.length || c.lut ? h('label', { title: 'Imported .cube LUT (applied before the look)' }, 'LUT', h('select', { onchange: (e) => tool('set_color', { ...target, lut: e.target.value }) },
       ...['none', ...luts].map((x) => h('option', { value: x, selected: (c.lut || 'none') === x }, x.replace(/\.cube$/i, ''))))) : null,
     c.lut ? field('LUT mix', c.lutIntensity ?? 1, (v) => tool('set_color', { ...target, lutIntensity: v }), { min: 0, max: 1, step: '0.1' }) : null,
     field('Bright', c.brightness ?? 0, (v) => tool('set_color', { ...target, brightness: v }), { min: -1, max: 1, step: '0.05' }),
@@ -1135,14 +1137,13 @@ function renderInspector() {
       h('label', { title: 'How the overlay mixes with the video under it. screen: light leaks, fire, sparkles on black. multiply: paper and textures' }, 'Blend',
         h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, blend: e.target.value }) },
           ...BLEND_MODES.map((m) => h('option', { value: m, selected: (o.blend || 'normal') === m }, m)))),
-      h('label', { title: 'Remove a green or blue screen behind the subject (export and look_at_timeline; not in this preview)' }, 'Key',
+      h('label', { title: 'Remove a green or blue screen behind the subject' }, 'Key',
         h('select', { onchange: (e) => tool('set_overlay', { overlayId: o.id, chromaKey: e.target.value }) },
           ...[['none', 'off'], ['green', 'green screen'], ['blue', 'blue screen']].map(([v, l]) => h('option', { value: v, selected: v === 'none' ? !o.key : o.key?.color === ({ green: '#00ff00', blue: '#0000ff' })[v] }, l)),
           o.key && !['#00ff00', '#0000ff'].includes(o.key.color) ? h('option', { value: o.key.color, selected: true }, o.key.color) : null)),
       o.key ? h('input', { type: 'color', value: o.key.color, title: 'Exact backdrop color', onchange: (e) => tool('set_overlay', { overlayId: o.id, chromaKey: e.target.value }) }) : null,
       o.key ? field('Similarity', o.key.similarity, (v) => tool('set_overlay', { overlayId: o.id, keySimilarity: v }), { min: 0.01, max: 1, step: '0.05', title: 'Raise if backdrop remains, lower if the subject gets holes' }) : null,
       o.key ? field('Edge', o.key.blend, (v) => tool('set_overlay', { overlayId: o.id, keyBlend: v }), { min: 0, max: 1, step: '0.02', title: 'Edge softness' }) : null,
-      o.key ? h('label', { class: 'key-note' }, 'key shows in export') : null,
       P.assets[o.assetId]?.type === 'video' && P.assets[o.assetId]?.hasAudio ? denoiseField(o.denoise, (v) => tool('set_overlay', { overlayId: o.id, denoise: v })) : null,
       ...(P.assets[o.assetId]?.type === 'video' && P.assets[o.assetId]?.hasAudio ? voiceFields(o, (x) => tool('set_overlay', { overlayId: o.id, ...x })) : []),
       P.assets[o.assetId]?.type === 'video' ? h('label', { title: 'Repeat the video / GIF for the whole overlay length' }, 'Loop', h('input', { type: 'checkbox', checked: !!o.loop, onchange: (e) => tool('set_overlay', { overlayId: o.id, loop: e.target.checked }) })) : null,
