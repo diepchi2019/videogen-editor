@@ -1,6 +1,7 @@
 // VideoGen editor UI (vanilla JS). The server owns the project; every edit is a tool call.
 import { srcAt, speedAt, avgRate, RAMP_PRESETS, reframeTrack, coverPosition } from '/lib/timing.js';
-import { kenBurns, zoomAbout, cropBox, vignetteCss, effectsAt, leakCss, GRAIN_URL, drawEffect, textLook, textAnim, toneCurves } from '/preview.js';
+import { kenBurns, zoomAbout, cropBox, vignetteCss, effectsAt, leakCss, GRAIN_URL, drawEffect, textLook, textAnim, toneCurves, sharpenKernel } from '/preview.js';
+import { glMirror } from '/glcolor.js';
 const $ = (s, el = document) => el.querySelector(s);
 const h = (tag, attrs = {}, ...kids) => {
   const el = document.createElement(tag);
@@ -136,9 +137,21 @@ function toneFilter(c) {
   }
   return `url(#${toneIds.get(key)})`;
 }
+// Sharpen as an SVG convolution (close to ffmpeg's cas in the export), one filter per amount.
+const sharpIds = new Map();
+function sharpenFilter(amount) {
+  if (!amount) return '';
+  const key = amount.toFixed(2);
+  if (!sharpIds.has(key)) {
+    const id = `vg-sharp-${sharpIds.size}`;
+    fxDefs.insertAdjacentHTML('beforeend', `<filter id="${id}" color-interpolation-filters="sRGB"><feConvolveMatrix order="3" kernelMatrix="${sharpenKernel(amount).join(' ')}" preserveAlpha="true"/></filter>`);
+    sharpIds.set(key, id);
+  }
+  return `url(#${sharpIds.get(key)})`;
+}
 function colorCss(c) {
   if (!c) return '';
-  const f = [toneFilter(c)].filter(Boolean);
+  const f = [sharpenFilter(c.sharpen), toneFilter(c)].filter(Boolean);
   if (c.hue) f.push(`hue-rotate(${c.hue}deg)`);
   if (c.brightness) f.push(`brightness(${1 + c.brightness * 0.8})`);
   if ((c.contrast ?? 1) !== 1) f.push(`contrast(${c.contrast})`);
@@ -376,7 +389,14 @@ function renderClipFx(ly, c, a, lt, g) {
   ly.canvas.style.display = fx.canvas && paintClipFrame(ly, a, g) ? 'block' : 'none';
   if (ly.canvas.style.display === 'block') {
     ly.canvas.width = ly.src.width; ly.canvas.height = ly.src.height;
-    drawEffect(ly.canvas.getContext('2d'), ly.src, fx.canvas, ly.scratch);
+    if (fx.canvas.type === 'echo') {
+      // Motion trails: each frame is laid over a fading copy of the earlier ones (restarts after a jump).
+      const A = (ly.accum ||= document.createElement('canvas')), ax = A.getContext('2d');
+      if (A.width !== ly.src.width || A.height !== ly.src.height || !(Math.abs(lt - (ly.accumT ?? -9)) < 0.5)) { A.width = ly.src.width; A.height = ly.src.height; ax.drawImage(ly.src, 0, 0); }
+      else { ax.globalAlpha = 2 / (fx.canvas.frames + 1); ax.drawImage(ly.src, 0, 0); ax.globalAlpha = 1; }
+      ly.accumT = lt;
+      ly.canvas.getContext('2d').drawImage(A, 0, 0);
+    } else drawEffect(ly.canvas.getContext('2d'), ly.src, fx.canvas, ly.scratch);
   }
 }
 // The finished clip frame (fit, crop, position, rotation, color) on ly.src, for canvas effects. Same
@@ -468,6 +488,7 @@ function renderFrame(force) {
       else { ly.bg.style.display = 'none'; ly.bg.pause(); }
     }
     renderClipFx(ly, c, a, lt, { fit, pos: rf.pos, x, y, s, rotate: T.rotate || 0, flipH: T.flipH, flipV: T.flipV, op: an.op, crop: T.crop, filter: mediaStyle.filter });
+    glMirror(ly.video, c.color); glMirror(ly.img, c.color); // per-color HSL (WebGL)
   });
   for (const ly of layers) if (!used.has(ly)) { ly.el.style.display = 'none'; ly.video.pause(); ly.bg.pause(); }
 
@@ -581,6 +602,7 @@ function renderOverlays(t) {
       filter: colorCss(o.color), objectViewBox: cropBox(o.crop),
       ...maskCss(o.mask, full ? P.settings.width / P.settings.height : ((a.width || 1) * (o.crop?.w ?? 1)) / ((a.height || 1) * (o.crop?.h ?? 1))),
     });
+    glMirror(el, o.color);
   });
   for (const [id, el] of ovEls) if (!keep.has(id)) { el.pause?.(); el.remove(); ovEls.delete(id); }
 }

@@ -1740,3 +1740,13 @@ test('text templates, settings tools, stickers and motion tracking helpers', asy
   assert.deepEqual(T.sourceToCanvas({ fit: 'cover' }, a, 1080, 1920, { x: 0.5, y: 0.5 }, 0), { x: 0.5, y: 0.5 });
   assert.deepEqual(T.simplifySeries([0, 1, 2, 3, 4].map((t) => ({ t, v: t * 0.1 }))).map((q) => q.t), [0, 4], 'a straight line needs two points');
 });
+
+test('preview: sharpen kernel, echo on the canvas, HSL uniforms for the WebGL layer', async () => {
+  const P = await import('../public/preview.js');
+  const G = await import('../public/glcolor.js');
+  assert.deepEqual(P.sharpenKernel(1), [0, -0.5, 0, -0.5, 3, -0.5, 0, -0.5, 0]);
+  assert.equal(P.sharpenKernel(0.5).reduce((a, b) => a + b, 0), 1, 'brightness kept');
+  assert.deepEqual(P.effectsAt({ effects: [{ type: 'echo', from: 0, to: 2, intensity: 1 }] }, 1, 1080, 1920, 1).canvas, { type: 'echo', frames: 9 });
+  assert.ok(G.hslActive({ hsl: { blue: { saturation: -1 } } }) && !G.hslActive({ hsl: {} }) && !G.hslActive(null));
+  assert.deepEqual(G.hslUniform({ red: { hue: 20 }, blue: { saturation: -1, lightness: 0.5 } }), [20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0.5, 0, 0, 0]);
+});

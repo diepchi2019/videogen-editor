@@ -38,7 +38,7 @@ Of the 80 CapCut features listed, VideoGen has 68, 4 more in part and 8 missing 
 | Visual | Chroma key (green screen) | Yes | Have (overlays: green, blue or any color, similarity, edge, despill; export only) | P2 |
 | Visual | Masks (shape, split) | Yes | Have (overlays: circle, rect with round corners, linear split, mirror band; feather, invert; preview with CSS masks) | P2 |
 | Visual | Masks on main-track clips | Yes | Have (set_mask with clipId, in canvas fractions; preview with CSS masks) | P2 |
-| Visual | Color curves, HSL, color wheels | Yes | Have (exposure, shadows, highlights, fade, hue, tint as tone curves shown in the preview; per-color HSL and shadow / midtone / highlight wheels; HSL export only) | P2 |
+| Visual | Color curves, HSL, color wheels | Yes | Have (exposure, shadows, highlights, fade, hue, tint as tone curves shown in the preview; per-color HSL (preview through WebGL) and shadow / midtone / highlight wheels) | P2 |
 | Visual | Motion tracking (text or sticker follows an object) | Yes | Have (track_motion / ⌖ Track: drag a box, template matching, no AI; or 🙂 Follow face; overlays follow with keyframes) | P2 |
 | Visual | Retouch / beauty (smooth skin, face reshape) | Yes | Missing | P2 |
 | Transitions | Transitions between clips | Yes | Have (22 types) | P0 |

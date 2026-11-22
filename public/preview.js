@@ -89,7 +89,7 @@ export function effectsAt(c, lt, W, H, k) {
       case 'old_film': r.filter.push('sepia(0.6)', 'contrast(1.1)', `brightness(${(1 + 0.08 * I * Math.sin(t * 37)).toFixed(3)})`); r.grain = Math.max(r.grain, 0.25 + 0.4 * I); break;
       case 'night_vision': r.filter.push('grayscale(1)', 'sepia(1)', 'hue-rotate(60deg)', 'saturate(4)', 'brightness(1.1)'); r.grain = Math.max(r.grain, 0.25 + 0.35 * I); break;
       case 'thermal': r.filter.push('invert(1)', 'hue-rotate(180deg)', 'saturate(3)'); break;
-      case 'echo': break; // export only (frame blending)
+      case 'echo': r.canvas = { type: 'echo', frames: Math.round(3 + 6 * I) }; break; // trails on a canvas (app.js keeps the history)
       default: break;
     }
   }
@@ -128,6 +128,12 @@ export function toneCurves(c) {
     });
   });
   return out;
+}
+
+// Sharpen kernel for an SVG feConvolveMatrix (unsharp-style: center boosted, 4 neighbours subtracted).
+export function sharpenKernel(amount) {
+  const k = Math.round((0.15 + 0.35 * amount) * 1000) / 1000;
+  return [0, -k, 0, -k, Math.round((1 + 4 * k) * 1000) / 1000, -k, 0, -k, 0];
 }
 
 // Paint a canvas effect. src: a canvas holding the finished clip frame (same size as ctx's canvas).

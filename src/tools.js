@@ -231,8 +231,8 @@ export const TOOLS = [
       lut: s('Imported .cube LUT by file name (list_luts), applied before the look; none removes'), lutIntensity: n('0..1 (default 1)'),
       exposure: n('-1..1 (light stops, 0 = original)'), shadows: n('-1..1: lift (+) or deepen (-) the dark parts'), highlights: n('-1..1: brighten (+) or recover (-) the bright parts'),
       fade: n('0..1 washed-out, lifted blacks'), hue: n('-180..180 degrees, shifts every color'), tint: n('-1 green .. 1 magenta'),
-      sharpen: n('0..1 crisper detail (export only); good for soft or upscaled footage'), clean: n('0..1 video noise reduction for grainy low-light footage (export only)'),
-      hsl: { type: 'object', description: 'Per color (export only): {blue: {hue: -60..60, saturation: -1..1, lightness: -1..1}}; colors red, yellow, green, cyan, blue, magenta. E.g. bluer sky: {blue: {saturation: 0.4, lightness: -0.2}}' },
+      sharpen: n('0..1 crisper detail; good for soft or upscaled footage'), clean: n('0..1 video noise reduction for grainy low-light footage (export only)'),
+      hsl: { type: 'object', description: 'Per color: {blue: {hue: -60..60, saturation: -1..1, lightness: -1..1}}; colors red, yellow, green, cyan, blue, magenta. E.g. bluer sky: {blue: {saturation: 0.4, lightness: -0.2}}' },
       wheels: { type: 'object', description: 'Color wheels: {shadows|midtones|highlights: {color: hex, amount 0-1}}, e.g. teal-orange: {shadows: {color: "#1fa3a3", amount: 0.5}, highlights: {color: "#ff9a3c", amount: 0.4}}; amount 0 removes' },
     }),
   },
@@ -241,7 +241,7 @@ export const TOOLS = [
     description: `Add a video effect to a main-track clip for a time range: ${EFFECTS.join(', ')}. ` +
       'shake = camera shake; zoom_pulse = rhythmic punch-in (rate = pulses per second, e.g. BPM/60 to hit the beat); glitch = random RGB-shift/noise bursts; rgb_split = steady chromatic offset; flash = white flash that fades out from start; blur; vhs = retro tape look; light_leak = warm moving light; invert = negative; ' +
       'pixelate = big pixels (intensity = block size); mirror = left half mirrored to the right; kaleidoscope = top-left quarter mirrored 4 ways; film_grain = moving grain; strobe = white flicker (rate = flashes per second); comic = colored edge drawing; ' +
-      'letterbox = cinematic black bars; black_white (intensity = how gray); tv_static = noisy old TV; flicker = unsteady brightness; posterize = flat poster colors; duotone = blue-teal monochrome; glow = soft dreamy bloom; rainbow = cycling colors (rate = turns per second); echo = motion trails (export only); swing = frame rocks side to side (rate); multi_screen = the frame repeated 2x2; old_film = sepia, grain and flicker; night_vision = green night camera; thermal = heat camera colors. ' +
+      'letterbox = cinematic black bars; black_white (intensity = how gray); tv_static = noisy old TV; flicker = unsteady brightness; posterize = flat poster colors; duotone = blue-teal monochrome; glow = soft dreamy bloom; rainbow = cycling colors (rate = turns per second); echo = motion trails; swing = frame rocks side to side (rate); multi_screen = the frame repeated 2x2; old_film = sepia, grain and flicker; night_vision = green night camera; thermal = heat camera colors. ' +
       'start/end are TIMELINE seconds inside the clip (default: whole clip); the effect stays with the clip if it moves. The browser preview approximates it; check the real look with look_at_timeline.',
     input_schema: S({ clipId: s('Clip id'), type: s('Effect', { enum: EFFECTS }), start: n('Timeline seconds (default clip start)'), end: n('Timeline seconds (default clip end)'), intensity: n('0..1 (default 0.5)'), rate: n('shake / zoom_pulse / strobe / rainbow / swing: cycles per second (shake 8, zoom_pulse 2, strobe 8, rainbow 0.5, swing 1)') }, ['clipId', 'type']),
   },
@@ -444,7 +444,7 @@ export const TOOLS = [
   },
   {
     name: 'enhance_video',
-    description: 'Make footage look cleaner and crisper: sharpen (detail) and clean (video noise reduction, for grainy low-light shots) on clips and overlays (default: every clip). Export only. Exports also scale with Lanczos, so 720p footage in a 1080p video stays sharper. 0 removes.',
+    description: 'Make footage look cleaner and crisper: sharpen (detail) and clean (video noise reduction, for grainy low-light shots, export only) on clips and overlays (default: every clip). Exports also scale with Lanczos, so 720p footage in a 1080p video stays sharper. 0 removes.',
     input_schema: S({ ids: idsSchema('Clip or overlay ids (default: all clips)'), sharpen: n('0..1 (default 0.5)'), clean: n('0..1 (default 0; 0.3-0.6 for grainy footage)') }),
   },
   {
@@ -1169,7 +1169,7 @@ export async function executeTool(name, input = {}, source = 'claude') {
         const steps = ids.map((id) => ({ name: 'set_color', input: { ...(p.overlays.some((o) => o.id === id) ? { overlayId: id } : { clipId: id }), sharpen, clean } }));
         if (!steps.length) return { content: 'No clips to enhance.', isError: true };
         store.applyBatch(steps, source);
-        return { content: `Enhanced ${steps.length} item(s): sharpen ${sharpen}, clean ${clean} (export only; check with look_at_timeline).` };
+        return { content: `Enhanced ${steps.length} item(s): sharpen ${sharpen}, clean ${clean} (clean shows in the export only; check with look_at_timeline).` };
       }
       case 'add_text_template': {
         const p = store.getProject();
