@@ -1,8 +1,8 @@
 # VideoGen feature list vs CapCut
 
-Nov 2, 2026 · @Ngoc
+Nov 2, 2026 · @Ngoc · updated Nov 22, 2026
 
-VideoGen already covers the core of a short-form editor (cut, trim, speed, transitions, text, music, export). The biggest gaps against CapCut are auto-captions, multi-track overlays, keyframes, filters and the AI tools. The MCP server needs a few more tools so Claude can check its own work.
+VideoGen now covers everything a short-form editor needs for reels and talking-head videos, including most of CapCut's AI helpers (captions, auto reframe, silence and retake removal, long video to shorts, text to speech). What is left against CapCut is mostly breadth (hundreds of effects, a template and text-design library, color curves), a few vision features (background removal, motion tracking, retouch), AI generation (script to video, avatars) and direct publishing. Every feature is also an MCP tool, so Claude can do it too.
 
 CapCut features below come from its desktop and mobile apps as I know them (approximate, not checked against today's release notes).
 
@@ -11,7 +11,7 @@ CapCut features below come from its desktop and mobile apps as I know them (appr
 
 ## Editor features vs CapCut
 
-Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated Nov 21, 2026, after masks, voice effects, GIF / image stickers, smooth slow motion, 6 more effects, long video to short clips, text to speech, auto reframe, silence removal, loudness normalization, keyword highlights, auto zoom, the reel checker, caption translation, edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, the progress bar, the free music library and stock media). Every P0 editor feature and every P1 editing feature are in place; the remaining gaps are AI generation features, lipsync, emoji stickers and P2 extras.
+Of the 80 CapCut features listed, VideoGen has 64, 5 more in part and 11 missing (updated Nov 22, 2026: 10 CapCut features that were not on the list yet were added, marked Missing or Partial). Every P0 feature is in place. The only P1 gaps are script to video / AI clips and the size of the effects library (15 effects vs hundreds); everything else open is P2.
 
 | Area | Feature | CapCut | VideoGen | Priority |
 | --- | --- | --- | --- | --- |
@@ -37,12 +37,17 @@ Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated No
 | Visual | Video effects (shake, glitch, zoom pulse, light leaks) | Yes (hundreds) | Partial (15: shake, zoom pulse, glitch, RGB split, flash, blur, VHS, light leak, invert, pixelate, mirror, kaleidoscope, film grain, strobe, comic; preview approximates them) | P1 |
 | Visual | Chroma key (green screen) | Yes | Have (overlays: green, blue or any color, similarity, edge, despill; export only) | P2 |
 | Visual | Masks (shape, split) | Yes | Have (overlays: circle, rect with round corners, linear split, mirror band; feather, invert; preview with CSS masks) | P2 |
+| Visual | Masks on main-track clips | Yes | Partial (masks work on overlays; to mask a main clip, add it as an overlay) | P2 |
+| Visual | Color curves, HSL, color wheels | Yes | Missing (brightness, contrast, saturation, temperature, vignette, 10 looks and .cube LUTs) | P2 |
+| Visual | Motion tracking (text or sticker follows an object) | Yes | Missing (keyframes by hand; auto reframe tracks faces for the crop only) | P2 |
+| Visual | Retouch / beauty (smooth skin, face reshape) | Yes | Missing | P2 |
 | Transitions | Transitions between clips | Yes | Have (22 types) | P0 |
 | Transitions | Real transition shown in preview | Yes | Have (CSS approximations of wipes, slides, circles, radial, zoom, fade to black/white) | P1 |
 | Transitions | Clip in / out animations | Yes | Have (fade, zoom in/out, slide x4) | P1 |
 | Text | Text overlays with position, size, color, box | Yes | Have | P0 |
 | Text | Text in / out animations | Yes | Have (8 in, 5 out, all in the preview) | P1 |
-| Text | Fonts, outline, shadow, styles presets | Yes | Have (any installed or imported font, 8 style presets) | P0 |
+| Text | Fonts, outline, shadow, styles presets | Yes | Have (any installed or imported font, 10 style presets incl. hook title and subscribe button) | P0 |
+| Text | Text templates library (designed animated titles) | Yes (large library) | Partial (10 text styles, 8 in / 5 out animations and saved reel styles; no library of designed title templates) | P2 |
 | Text | Auto-captions from speech | Yes | Have (local Whisper, cached per file) | P0 |
 | Text | Word-by-word karaoke captions | Yes | Have (karaoke, word highlight, single word, line) | P0 |
 | Text | Stickers, emoji, GIFs | Yes | Partial (transparent PNG and animated GIF stickers as overlays: GIFs loop, pop-in animation; color emoji on caption words; no emoji or sticker library) | P2 |
@@ -56,6 +61,8 @@ Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated No
 | Audio | Voiceover recording | Yes | Have (records from the playhead onto a voice track) | P1 |
 | Audio | Ducking music under speech | Yes | Have (sidechain compression keyed by clip audio + voice; export only) | P1 |
 | Audio | Noise reduction, voice effects | Yes | Have (noise reduction, 8 voice effects and pitch shift on clips, overlays and audio items; export only) | P2 |
+| Audio | AI voice changer (turn a recording into another voice) | Yes | Partial (8 voice effects and pitch shift; new speech in any ElevenLabs or Piper voice, but no conversion of a recording) | P2 |
+| Audio | Vocal isolation (separate voice and background music) | Yes | Missing | P2 |
 | Clip | Auto zoom on talking heads (jump-cut framing, punch-ins) | Yes | Have (auto_zoom and 🔍 Auto zoom: every other jump cut framed tighter, punch-ins on highlighted or loudest words) | P1 |
 | Audio | Edit by text (transcript), remove retakes | Yes (text-based editing) | Have (📝 Transcript panel: click to jump, select + Delete to cut; ↺ Remove retakes; get_timeline_transcript, cut_transcript, remove_retakes) | P1 |
 | Audio | Studio voice (enhance speech) | Yes | Have (enhance_voice / 🎙 Studio voice: rumble cut, noise reduction, EQ, de-esser, compression; export only) | P1 |
@@ -70,13 +77,16 @@ Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated No
 | AI | Auto reframe (16:9 to 9:16 following the subject) | Yes | Have (local face detector: the crop follows the main face, smooth within a shot, jumps at cuts; auto_reframe tool and ⌖ button, used by make_short; non-face subjects via reframe_clip with Claude reading gridded frames) | P1 |
 | AI | Long video to short clips | Yes | Have (find_moments ranks moments from the local transcript, loudness and shot changes; Claude picks; make_short builds a captioned 9:16 project each; ✂ button in the media panel) | P2 |
 | AI | Script to video, AI images / video clips | Yes | Missing (planned via VideoGen pipeline) | P1 |
-| AI | Enhance / upscale, frame interpolation | Yes | Missing | P2 |
+| AI | Enhance / upscale, frame interpolation | Yes | Missing (frame interpolation only as smooth slow motion) | P2 |
+| AI | AI avatars, talking photos | Yes | Missing | P2 |
 | Media | Import video, image, audio; drag and drop | Yes | Have | P0 |
 | Media | Thumbnails in library and on clips | Yes | Have | P0 |
 | Media | Stock media library | Yes | Have (🎞 Stock / search_stock + add_stock: Pexels videos and photos with a free key, Openverse photos without; shape follows the canvas; as clip, B-roll or import) | P2 |
 | Templates | Templates (fill a ready-made edit with your clips) | Yes | Have (save any edit as a template; slots keep length, framing, color, effects, transitions; music, beats, titles kept) | P1 |
+| Templates | Online template marketplace (trending templates) | Yes | Missing (your own saved templates and 3 built-in styles) | P2 |
 | Project | Multiple projects, save / open | Yes | Have | P0 |
 | Project | Autosave | Yes | Have | P0 |
+| Project | Cloud sync, team collaboration | Yes | Missing (local only on purpose: files stay on your PC) | P2 |
 | Project | Proxy files for smooth 4K / HEVC editing | Yes | Have (automatic on import, 720p H.264) | P1 |
 | Export | MP4 export, aspect ratios | Yes | Have (9:16, 16:9, 1:1, 4:5) | P0 |
 | Export | Resolution, fps, bitrate choice | Yes | Have (480p-2160p, fps, Mbps, draft) | P1 |
@@ -88,7 +98,7 @@ Of the 70 CapCut features listed, VideoGen has 64 and 2 more in part (updated No
 
 ## MCP server features
 
-The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 75 tools (76 with import_media) and 5 prompts covering clips, color, effects, keyframes, overlays, text, captions, audio analysis and beats, projects, batch edits, timeline frames, undo and export.
+The MCP server is what lets Claude Code edit without an API key, so it needs every editor feature as a tool, plus ways for Claude to see and check its result. It now has 96 tools (95 shared with the editor plus import_media), 2 resources and 8 prompts. Every editing button in the browser calls one of these tools, so anything done by clicking can be done by Claude. Not available over MCP: API keys (on purpose; entered only in ⚙ Settings or environment variables), the other saved settings, and microphone recording (import a recorded file instead).
 
 | Feature | What it lets Claude do | VideoGen | Priority |
 | --- | --- | --- | --- |
@@ -96,14 +106,17 @@ The MCP server is what lets Claude Code edit without an API key, so it needs eve
 | Import files by path | Load clips from your disk | Have | P0 |
 | See frames of source clips | Find moments ("where he jumps") | Have | P0 |
 | See frames of the finished timeline | Check text placement, transitions, framing after editing | Have (look_at_timeline) | P0 |
-| Transcribe speech (Whisper) | Make captions, cut on words, remove silences and filler words | Have (transcribe_asset, get_transcript) | P0 |
+| Transcribe speech (Whisper) | Make captions, cut on words, remove silences and filler words | Have (transcribe_asset, get_transcript, get_timeline_transcript, cut_transcript, remove_silences, remove_retakes) | P0 |
 | Batch edits in one call | Apply many edits at once, faster and one undo step | Have (batch_edit) | P0 |
 | Project as MCP resource | Read the full timeline JSON without a tool call | Have | P1 |
 | Multiple projects | Create, open, duplicate, list projects | Have | P0 |
 | Audio analysis | Detect beats, loudness, silence for cut-to-beat and ducking | Have (analyze_audio, mark_beats) | P1 |
 | Templates and style presets | "Make it in my reel style": saved fonts, colors, caption style, intro, outro | Have (save_style / apply_style with 3 built-ins, save_template / create_from_template) | P1 |
 | Export and wait | Render and return when done, with the file path | Have (export_video wait=true) | P1 |
-| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Have (make_reel, reel_from_template, save_my_style, reframe_to_vertical, shorts_from_video) | P2 |
+| Prompts (MCP prompts) | Ready-made commands like "make a 30s reel from these clips" | Have (make_reel, reel_from_template, save_my_style, reframe_to_vertical, edit_talking_video, hook_and_chapters, translate_reel, shorts_from_video) | P2 |
+| Check its own work | Find what goes wrong after posting before export | Have (check_reel: safe zones, hook, captions, audio, format; look_at_timeline) | P1 |
+| Find free media | Pick music, sound effects and stock footage by mood or by looking at previews | Have (search_music / add_library_audio, search_stock / add_stock with previews) | P2 |
+| Change saved settings | Switch the default voice, loudness target or font without the Settings dialog | Missing (each tool takes these per call; API keys stay out on purpose) | P2 |
 | Generate media | Call image / video / voice models and drop results on the timeline | Missing | P1 |
 | Remote access | Use the editor from Claude on phone or web, not only Claude Code on the same PC | Missing | P2 |
 
@@ -130,15 +143,20 @@ Four phases, each usable on its own. Phase 1 covers everything a captioned reel 
      - **Preview gaps — done Nov 21, 2026:** effects (CSS filters and transforms, SVG filters for RGB split and comic, a canvas for pixelate / mirror / kaleidoscope, light leak and grain layers), Ken Burns, crop, vignette, and text in the export's own font files and sizes with outline, shadow, glow, box and every in / out animation including typewriter. Still export-only: LUTs, chroma key, removed regions, audio processing and smooth slow motion.
      - **Claude does the AI part:** a basic auto reframe (done Nov 20, 2026: `reframe_clip` + `look_at_asset` grid + `reframe_to_vertical` prompt), and long video to short clips (done Nov 21, 2026: `find_moments` lists candidate moments from transcript, loudness and scene changes for Claude to pick from, `make_short` turns each into a captioned 9:16 project, `shorts_from_video` prompt).
 3. **Phase 3, AI and automation (P1):** reel style presets and templates (done Nov 5, 2026: styles with canvas, clip look, titles, captions, music mix, intro / outro / logo, applied in one step and kept as project defaults; 3 built-in styles; templates with slots; MCP prompts), auto reframe (done Nov 21, 2026: local face detector, `auto_reframe`), text to speech (done Nov 21, 2026: local Piper voices, `add_voiceover`), connect the AI video pipeline (generate clips and drop them on the timeline).
-4. **Phase 4, extras (P2):** stickers, chroma key, masks, background removal, stock media and music, direct publishing, remote access.
+4. **Phase 4, extras (P2):** chroma key and masks (done Nov 20-21, 2026), stock media and music (done Nov 21, 2026), GIF stickers (done; no sticker or emoji library yet). Left: background removal, direct publishing, remote access.
+5. **Talking-head and polish set (added and done Nov 21, 2026):** silence and filler removal, loudness normalization, keyword highlights with emoji, auto zoom, reel checker with safe zones, caption translation, edit by text, retakes, studio voice, stabilize, color match, split screen and picture-in-picture layouts, B-roll, chapters, progress bar.
 
-Next: Phase 2.5 is done (Nov 21, 2026: extras, preview gaps, long video to short clips). Text to speech done Nov 21, 2026 (Piper, plus ElevenLabs with an API key; OpenAI left out because its speech-endpoint models shut down 2027-01-06). Auto reframe with a face detector done Nov 21, 2026. Remove silences / filler words and export loudness normalization done Nov 21, 2026. Keyword highlights with emoji and auto zoom done Nov 21, 2026. Reel checker with safe zones and caption translation done Nov 21, 2026. Edit by text, retakes, studio voice, stabilize, color match, layouts, B-roll, chapters, progress bar, hook/subscribe styles done Nov 21, 2026. Free music and sound effects library (Openverse) done Nov 21, 2026. Stock videos and photos (Pexels, Openverse) done Nov 21, 2026. Then the rest of Phase 3 (AI pipeline) and lipsync for voiceovers (local Wav2Lip/MuseTalk need more GPU than the T550 has; or a paid API such as sync.so).
+Next (Nov 22, 2026): phases 1, 2, 2.5 and 5 are done, phase 3 is done except the AI pipeline, phase 4 is done except background removal, publishing and remote access. Text to speech uses Piper, plus ElevenLabs with an API key (OpenAI left out because its speech-endpoint models shut down 2027-01-06). Open, by priority:
+   - **P1:** script to video / AI images and clips (needs an image or video provider); more effects.
+   - **P2, local and free:** background removal, vocal isolation, color curves / HSL, an emoji and sticker picker, masks on main clips, a settings tool for MCP.
+   - **P2, needs a service or an account:** direct publishing, remote access, lipsync (sync.so, about $0.05/s; local Wav2Lip/MuseTalk need more GPU than the T550 has), AI avatars, upscaling.
+   - **P2, large:** motion tracking, retouch, a template / text-design library.
 
 ### Auto-captions setup (added Nov 5, 2026)
 
-Captions are built, but they don't run on the dev machine yet because no Whisper model is downloaded. The dev machine is an i7-1260P laptop with 40 GB RAM and an NVIDIA T550 with 4 GB, so the plan uses models that run well on a laptop CPU.
+All done: captions run on the dev machine (an i7-1260P laptop with 40 GB RAM and an NVIDIA T550 with 4 GB) with `ggml-large-v3-turbo-q5_0.bin` and `ggml-base.bin` in `models/`.
 
-1. **Download the default model:** `ggml-small.bin` (466 MB) into `models/`. It's the best balance of speed and Vietnamese accuracy on this machine.
+1. **Download a model (done: large-v3-turbo-q5_0 and base are in `models/`; small was the first plan):** `ggml-small.bin` (466 MB) into `models/`. It's the best balance of speed and Vietnamese accuracy on this machine.
 2. **Auto-detect the more accurate model (done Nov 20, 2026; turbo takes 3.4s for the 5.5s speech fixture on CPU, base 0.9s):** add `ggml-large-v3-turbo-q5_0.bin` (~550 MB, close to large-v3 accuracy) to the model search in `src/transcribe.js` and prefer it over small when both are present. Today only base, small and tiny are found without `VIDEOGEN_WHISPER_MODEL`.
 3. **Check GPU use (done Nov 20, 2026: the GPU is used; 55s of speech takes 9s on GPU vs 51s on CPU with turbo):** time `test/fixtures/speech.mp3` with `use_gpu` on and off to see whether this ffmpeg build uses the T550. Note the result in CLAUDE.md.
 4. **Skip silence with VAD (done Nov 20, 2026, differently: ffmpeg's Silero VAD was 7x slower and still gave early word times and made-up words, so long silences are cut in our own code before whisper and word times mapped back):** pass ffmpeg's `vad_model` (Silero) when the file is present, so long clips with silences transcribe faster and leave out made-up words in quiet parts.
